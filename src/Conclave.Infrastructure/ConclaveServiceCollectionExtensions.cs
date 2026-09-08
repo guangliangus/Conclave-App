@@ -46,7 +46,7 @@ public static class ConclaveServiceCollectionExtensions
         _ = services.AddSingleton(sp =>
         {
             Directory.CreateDirectory(opts.HomeDirectory);
-            var identity = ElectorIdentity.LoadOrCreate(opts.KeyPath);
+            var identity = ElectorKeyStore.LoadOrCreate(opts.KeyPath);
             var logger = sp.GetRequiredService<ILogger<ElectorIdentity>>();
 
             logger.LogInformation("节点身份 {ElectorId}（私钥 {Path}）", identity.Id, opts.KeyPath);

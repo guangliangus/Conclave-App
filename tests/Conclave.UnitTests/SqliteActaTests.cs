@@ -17,7 +17,7 @@ public sealed class SqliteActaTests : IDisposable
     {
         _home = Path.Combine(Path.GetTempPath(), "conclave-test-" + Guid.NewGuid().ToString("N"));
         _options = new ConclaveOptions { HomeDirectory = _home };
-        _identity = ElectorIdentity.CreateEphemeral();
+        _identity = ElectorIdentity.Create();
         _allowList = new MutableAllowList(_identity.Id);
         _acta = new SqliteActa(_options, _identity, _allowList, NullLogger<SqliteActa>.Instance);
     }
@@ -134,7 +134,7 @@ public sealed class SqliteActaTests : IDisposable
     public async Task Foreign_block_is_rejected_when_the_elector_is_not_whitelisted()
     {
         var ct = CancellationToken.None;
-        using var stranger = ElectorIdentity.CreateEphemeral();
+        using var stranger = ElectorIdentity.Create();
         var block = SignAs(stranger, Rev.ChainId, 0, Block.GenesisPrevHash);
 
         // 白名单不是「以后再加」：别人的块会让别人的评审任务落到本机跑 Bash。
@@ -146,7 +146,7 @@ public sealed class SqliteActaTests : IDisposable
     public async Task Whitelisted_peer_block_is_applied()
     {
         var ct = CancellationToken.None;
-        using var peer = ElectorIdentity.CreateEphemeral();
+        using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
@@ -159,7 +159,7 @@ public sealed class SqliteActaTests : IDisposable
     public async Task Tampered_block_is_rejected_even_from_a_whitelisted_peer()
     {
         var ct = CancellationToken.None;
-        using var peer = ElectorIdentity.CreateEphemeral();
+        using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
@@ -172,7 +172,7 @@ public sealed class SqliteActaTests : IDisposable
     public async Task Re_applying_the_same_block_is_idempotent()
     {
         var ct = CancellationToken.None;
-        using var peer = ElectorIdentity.CreateEphemeral();
+        using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
@@ -186,7 +186,7 @@ public sealed class SqliteActaTests : IDisposable
     public async Task A_gap_in_the_chain_is_refused_rather_than_silently_accepted()
     {
         var ct = CancellationToken.None;
-        using var peer = ElectorIdentity.CreateEphemeral();
+        using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
         // index 5 但本地链是空的 —— 需要先补链（P2 的 PullChain），不能直接落。
@@ -199,7 +199,7 @@ public sealed class SqliteActaTests : IDisposable
     public async Task A_wrong_prev_hash_is_refused()
     {
         var ct = CancellationToken.None;
-        using var peer = ElectorIdentity.CreateEphemeral();
+        using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
         _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);

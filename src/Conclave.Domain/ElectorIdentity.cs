@@ -28,38 +28,25 @@ public sealed class ElectorIdentity : IDisposable
     /// <summary>SubjectPublicKeyInfo 的 base64。</summary>
     public string PublicKey { get; }
 
-    /// <summary>
-    /// 读取 <paramref name="keyPath"/> 处的私钥，不存在则生成并以 0600 写入。
-    /// </summary>
-    public static ElectorIdentity LoadOrCreate(string keyPath)
+    /// <summary>生成一副新密钥。</summary>
+    /// <remarks>
+    /// 私钥的落盘刻意不在这里 —— 领域层要保持无 I/O，才能让席位分配那些纯函数
+    /// 在单元测试里毫无环境依赖地验证「同样输入、不同节点算出同样席位」。
+    /// 落盘见 <c>Conclave.Infrastructure.ElectorKeyStore</c>。
+    /// </remarks>
+    public static ElectorIdentity Create()
+        => new(ECDsa.Create(ECCurve.NamedCurves.nistP256));
+
+    /// <summary>从 PKCS#8 私钥字节还原身份。</summary>
+    public static ElectorIdentity FromPkcs8(ReadOnlySpan<byte> pkcs8)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(keyPath);
-
         var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        if (File.Exists(keyPath))
-        {
-            key.ImportPkcs8PrivateKey(File.ReadAllBytes(keyPath), out _);
-            return new ElectorIdentity(key);
-        }
-
-        var dir = Path.GetDirectoryName(keyPath);
-        if (!string.IsNullOrEmpty(dir))
-        {
-            Directory.CreateDirectory(dir);
-        }
-
-        File.WriteAllBytes(keyPath, key.ExportPkcs8PrivateKey());
-        if (!OperatingSystem.IsWindows())
-        {
-            File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        }
-
+        key.ImportPkcs8PrivateKey(pkcs8, out _);
         return new ElectorIdentity(key);
     }
 
-    /// <summary>仅供测试：生成一个不落盘的临时身份。</summary>
-    public static ElectorIdentity CreateEphemeral()
-        => new(ECDsa.Create(ECCurve.NamedCurves.nistP256));
+    /// <summary>导出 PKCS#8 私钥字节，交由基础设施层落盘。</summary>
+    public byte[] ExportPkcs8() => _key.ExportPkcs8PrivateKey();
 
     public string Sign(string payload)
     {

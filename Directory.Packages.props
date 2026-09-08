@@ -32,6 +32,8 @@
        为一个签名算法引入 NSec/BouncyCastle 的原生依赖不值得。 -->
 
   <ItemGroup Label="Testing">
+    <PackageVersion Include="NetArchTest.Rules" Version="1.3.2" />
+    <PackageVersion Include="Shouldly" Version="4.3.0" />
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />

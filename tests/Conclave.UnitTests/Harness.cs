@@ -27,7 +27,7 @@ internal sealed class Harness : IDisposable
             PostToAzureDevOps = false,
         };
 
-        Identity = ElectorIdentity.CreateEphemeral();
+        Identity = ElectorIdentity.Create();
         AllowList = new MutableAllowList(Identity.Id);
         Acta = new SqliteActa(Options, Identity, AllowList, NullLogger<SqliteActa>.Instance);
 

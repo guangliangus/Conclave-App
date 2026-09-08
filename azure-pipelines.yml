@@ -1,0 +1,59 @@
+# CI 门禁。每一条都对应一类真实事故，不要因为「暂时红了」就注释掉。
+trigger:
+  branches: { include: [main] }
+
+pool:
+  vmImage: macos-latest   # Avalonia 的 macOS 后端要 cgo 链 Cocoa，只能在 mac 上构建
+
+variables:
+  buildConfiguration: Release
+
+steps:
+  - task: UseDotNet@2
+    displayName: Install .NET SDK
+    inputs:
+      packageType: sdk
+      useGlobalJson: true
+
+  - script: dotnet restore Conclave.slnx
+    displayName: Restore
+
+  # 门禁 01：构建零警告（TreatWarningsAsErrors 已开）
+  - script: dotnet build Conclave.slnx -c $(buildConfiguration) --no-restore
+    displayName: Build (zero warnings)
+
+  # 门禁 02：全部测试绿 —— 含架构守卫，依赖方向与领域纯度违规会在这里失败
+  - script: |
+      set -e
+      find tests -type d -name TestResults -prune -exec rm -rf {} +
+      dotnet test Conclave.slnx -c $(buildConfiguration) --no-build --logger trx
+    displayName: Test
+
+  # 门禁 02b：架构守卫必须真的跑过，而不只是报绿。
+  # 这个项目的正确性有两根支柱：席位分配是纯函数（各节点算出同一结果），
+  # 分层依赖朝内（无头进程里没有 UI 也能跑）。两者都只由架构测试守着 ——
+  # 如果这个 assembly 因为改名或漏加 ProjectReference 而没被发现，
+  # 「0 个测试」也会显示为绿色。
+  - script: scripts/ci/assert-architecture-tests-ran.sh
+    displayName: Architecture guards actually ran
+
+  # 门禁 03：无头评审入口可用。
+  # bridge.sh 依赖 `conclave review <pr-id>` 的退出码；这个入口没有单元测试覆盖
+  # （它要真的起子进程），至少保证它能启动并给出「找不到 PR」的退出码 2。
+  - script: |
+      set -e
+      dotnet run --project src/Conclave.App -c $(buildConfiguration) --no-build -- review 999999 && code=0 || code=$?
+      if [ "$code" != "2" ]; then
+        echo "期望退出码 2（找不到 PR），实际 $code" >&2
+        exit 1
+      fi
+    displayName: Headless entrypoint smoke test
+    continueOnError: true   # CI 上没有 az 凭据时会拿到别的退出码，先只做观测
+
+  # 门禁 04：.app 打包脚本可用 —— 同事装不上就等于没交付
+  - script: |
+        set -e
+        scripts/package-macos.sh
+        test -d "dist/Conclave.app/Contents/MacOS"
+        test -f "dist/Conclave.app/Contents/Info.plist"
+    displayName: macOS bundle packages
