@@ -42,8 +42,8 @@ public sealed class ClaudeReviewRunner(
         {
             // 入席前 SeatAssignment.Eligible 已经查过，走到这里说明 clone 在评审开始后被挪走了。
             return new BallotPayload(
-                revision.Id, round, ReviewDecision.Error, [], "n/a", 0,
-                $"本机找不到 {pr.Repo} 的 clone");
+                revision.Id, round, ReviewDecision.Error, [], "n/a", 0, ReviewUsage.None,
+                Error: $"本机找不到 {pr.Repo} 的 clone");
         }
 
         // 会话 ID 从 (revisionId, round) 确定性派生：日后要追某一票是怎么来的，
@@ -74,7 +74,8 @@ public sealed class ClaudeReviewRunner(
         {
             return new BallotPayload(
                 revision.Id, round, ReviewDecision.Error, [], "n/a", sw.ElapsedMilliseconds,
-                Truncate(result.StdErr, 2000));
+                ReviewUsage.None,
+                Error: $"claude 退出码 {result.ExitCode}：{Truncate(result.StdErr, 2000)}");
         }
 
         return Parse(revision, round, result.StdOut, sw.ElapsedMilliseconds);
@@ -84,6 +85,7 @@ public sealed class ClaudeReviewRunner(
     {
         string text;
         var model = "unknown";
+        var usage = ReviewUsage.None;
 
         try
         {
@@ -91,22 +93,26 @@ public sealed class ClaudeReviewRunner(
             var root = doc.RootElement;
 
             text = root.TryGetProperty("result", out var r) ? r.GetString() ?? string.Empty : string.Empty;
-            model = ExtractModel(root);
+            usage = ExtractUsage(root);
+            model = usage.Models.Count > 0
+                ? usage.Models.OrderByDescending(m => m.OutputTokens).First().Model
+                : "unknown";
 
             if (root.TryGetProperty("is_error", out var isError)
                 && isError.ValueKind == JsonValueKind.True)
             {
+                // 失败也要把计量记下来 —— 烧掉的 token 不会因为失败而退回。
                 return new BallotPayload(
-                    revision.Id, round, ReviewDecision.Error, [], model, elapsedMs,
-                    Truncate(text, 2000));
+                    revision.Id, round, ReviewDecision.Error, [], model, elapsedMs, usage,
+                    Error: Truncate(text, 2000));
             }
         }
         catch (JsonException ex)
         {
             logger.LogError(ex, "claude 的 --output-format json 输出解析失败");
             return new BallotPayload(
-                revision.Id, round, ReviewDecision.Error, [], model, elapsedMs,
-                "claude 输出不是合法 JSON：" + Truncate(stdout, 500));
+                revision.Id, round, ReviewDecision.Error, [], model, elapsedMs, usage,
+                Error: "claude 输出不是合法 JSON：" + Truncate(stdout, 500));
         }
 
         var contract = ExtractJsonBlock(text);
@@ -117,49 +123,90 @@ public sealed class ClaudeReviewRunner(
                 "{Revision} round={Round} 没有输出 collect 契约的 JSON 块 —— skill 需要加 REVIEW_MODE 分支",
                 revision.Id, round);
             return new BallotPayload(
-                revision.Id, round, ReviewDecision.Error, [], model, elapsedMs,
-                "未找到 collect 契约的 JSON 块（skill 需要 REVIEW_MODE=collect 分支）。原文：\n"
+                revision.Id, round, ReviewDecision.Error, [], model, elapsedMs, usage,
+                Error: "未找到 collect 契约的 JSON 块（skill 需要 REVIEW_MODE=collect 分支）。原文：\n"
                     + Truncate(text, 1500));
         }
 
-        return contract with { RevisionId = revision.Id, Round = round, Model = model, DurationMs = elapsedMs };
+        return contract with
+        {
+            RevisionId = revision.Id,
+            Round = round,
+            Model = model,
+            DurationMs = elapsedMs,
+            Usage = usage,
+        };
     }
 
-    /// <summary><c>modelUsage</c> 是以模型 ID 为键的对象；取输出 token 最多的那个当归因模型。</summary>
-    private static string ExtractModel(JsonElement root)
+    /// <summary>
+    /// 从 claude 的输出里取 token 与折算金额。
+    /// </summary>
+    /// <remarks>
+    /// 聚合数刻意由 <c>modelUsage</c> 逐项相加，而不是读顶层的 <c>usage</c> 对象：
+    /// 报表要能对上「总计 = 各模型之和」，读两个不同来源迟早对不上。
+    /// 金额则取顶层 <c>total_cost_usd</c>，那是 claude 自己的权威汇总。
+    /// </remarks>
+    private static ReviewUsage ExtractUsage(JsonElement root)
     {
-        if (!root.TryGetProperty("modelUsage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+        var models = new List<ModelUsage>();
+
+        if (root.TryGetProperty("modelUsage", out var modelUsage)
+            && modelUsage.ValueKind == JsonValueKind.Object)
         {
-            return "unknown";
-        }
-
-        var best = string.Empty;
-        long bestTokens = -1;
-
-        foreach (var entry in usage.EnumerateObject())
-        {
-            var tokens = 0L;
-            if (entry.Value.ValueKind == JsonValueKind.Object)
+            foreach (var entry in modelUsage.EnumerateObject())
             {
-                foreach (var name in (string[])["outputTokens", "output_tokens"])
-                {
-                    if (entry.Value.TryGetProperty(name, out var t) && t.TryGetInt64(out var parsed))
-                    {
-                        tokens = parsed;
-                        break;
-                    }
-                }
-            }
-
-            if (tokens > bestTokens)
-            {
-                bestTokens = tokens;
-                best = entry.Name;
+                var v = entry.Value;
+                models.Add(new ModelUsage(
+                    entry.Name,
+                    Str(v, "canonicalModel", entry.Name),
+                    Num(v, "inputTokens"),
+                    Num(v, "outputTokens"),
+                    Num(v, "cacheReadInputTokens"),
+                    Num(v, "cacheCreationInputTokens"),
+                    Num(v, "thinkingTokens"),
+                    Money(v, "costUSD")));
             }
         }
 
-        return best.Length > 0 ? best : "unknown";
+        if (models.Count == 0)
+        {
+            return ReviewUsage.None;
+        }
+
+        var basis = "list";
+        if (root.TryGetProperty("modelUsage", out var mu) && mu.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var entry in mu.EnumerateObject())
+            {
+                basis = Str(entry.Value, "costBasis", "list");
+                break;
+            }
+        }
+
+        return new ReviewUsage(
+            models.Sum(m => m.InputTokens),
+            models.Sum(m => m.OutputTokens),
+            models.Sum(m => m.CacheReadTokens),
+            models.Sum(m => m.CacheWriteTokens),
+            models.Sum(m => m.ThinkingTokens),
+            root.TryGetProperty("total_cost_usd", out var cost) && cost.TryGetDecimal(out var total)
+                ? total
+                : models.Sum(m => m.CostUsd),
+            basis,
+            root.TryGetProperty("num_turns", out var turns) && turns.TryGetInt32(out var t) ? t : 0,
+            models);
     }
+
+    private static long Num(JsonElement e, string name)
+        => e.TryGetProperty(name, out var p) && p.TryGetInt64(out var v) ? v : 0;
+
+    private static decimal Money(JsonElement e, string name)
+        => e.TryGetProperty(name, out var p) && p.TryGetDecimal(out var v) ? v : 0m;
+
+    private static string Str(JsonElement e, string name, string fallback)
+        => e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
+            ? p.GetString() ?? fallback
+            : fallback;
 
     /// <summary>
     /// 从回复正文里抠出 collect 契约。优先找最后一个 <c>```json</c> 围栏，

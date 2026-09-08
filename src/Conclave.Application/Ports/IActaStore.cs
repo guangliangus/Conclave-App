@@ -47,27 +47,54 @@ public sealed record ApplyResult(ApplyOutcome Outcome, IReadOnlyList<Block> Reba
     public bool Novel => Outcome == ApplyOutcome.Applied;
 }
 
+/// <summary>账本的健康计数，供 UI 与报表展示。</summary>
+/// <param name="Blocks">区块总数。</param>
+/// <param name="Revisions">出现过的 revision 数。</param>
+/// <param name="IndexConflicts">发生过多少次索引冲突。</param>
+/// <param name="ConflictsLost">其中本地让位（重挂）的次数。</param>
+public sealed record ActaHealth(long Blocks, long Revisions, long IndexConflicts, long ConflictsLost);
+
 /// <summary>Acta 账本的持久化。实现见 <c>Conclave.Infrastructure.SqliteActa</c>。</summary>
 public interface IActaStore
 {
-    /// <summary>由本节点签名并追加一个区块到 <paramref name="chainId"/> 的链尾。</summary>
-    Task<Block> AppendAsync<TPayload>(string chainId, BlockKind kind, TPayload payload, CancellationToken ct);
+    /// <summary>
+    /// 由本节点签名并追加一个区块到全局链的链尾。
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="revisionId"/> 由调用方给出而不是从载荷里反解 —— 调用方总是知道它，
+    /// 反解要多一次 JSON 往返，而且新增区块类型时容易漏。
+    /// </remarks>
+    Task<Block> AppendAsync<TPayload>(
+        string revisionId, BlockKind kind, TPayload payload, CancellationToken ct);
 
     /// <summary>
-    /// 应用一个来自其他节点的区块。验签失败、PrevHash 不匹配、或索引冲突且己方哈希更小时
-    /// <see cref="ApplyResult.Applied"/> 为 false。
+    /// 应用一个来自其他节点的区块。
     /// </summary>
     Task<ApplyResult> TryApplyAsync(Block block, CancellationToken ct);
 
-    /// <summary>读一条完整的链，按 Index 升序。</summary>
-    Task<IReadOnlyList<Block>> ReadChainAsync(string chainId, CancellationToken ct);
+    /// <summary>读某个 revision 的全部区块，按链序升序。</summary>
+    Task<IReadOnlyList<Block>> ReadRevisionAsync(string revisionId, CancellationToken ct);
 
-    /// <summary>最近写入的若干区块，跨链，按时间倒序。供 UI 的账本浏览器用。</summary>
+    /// <summary>
+    /// 出现过 Summons 但尚无 Promulgation 的 revision，按链序（即时间序）升序。
+    /// </summary>
+    /// <remarks>
+    /// 同一个 PR 可能有多个未结论的版本（作者连着 push 两次）。按链序返回，
+    /// 调用方按 PR 分组取最后一个 —— 旧版本已经被取代，评它没意义。
+    /// </remarks>
+    Task<IReadOnlyList<string>> ReadOpenRevisionsAsync(CancellationToken ct);
+
+    /// <summary>
+    /// 读全局链，可从某个索引之后开始。供 mesh 补链与完整性校验。
+    /// </summary>
+    Task<IReadOnlyList<Block>> ReadChainAsync(long fromIndex, CancellationToken ct);
+
+    /// <summary>最近写入的若干区块，按链序倒序。供 UI 的账本浏览器用。</summary>
     Task<IReadOnlyList<Block>> ReadRecentAsync(int limit, CancellationToken ct);
-
-    /// <summary>链上出现过 Summons 但尚无 Promulgation 的链 ID。</summary>
-    Task<IReadOnlyList<string>> ReadOpenChainsAsync(CancellationToken ct);
 
     /// <summary>本节点近 24 小时出过多少张 Ballot。用于公平性权重。</summary>
     Task<int> CountRecentBallotsAsync(string electorId, CancellationToken ct);
+
+    /// <summary>账本健康计数。</summary>
+    Task<ActaHealth> ReadHealthAsync(CancellationToken ct);
 }

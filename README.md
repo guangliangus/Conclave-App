@@ -22,8 +22,30 @@ dotnet test Conclave.slnx                            # 136 个测试
 dotnet run --project src/Conclave.App                # 起 UI + 后台服务
 dotnet run --project src/Conclave.App -- serve       # 无 UI 常驻（worker 机器 / 本机联调）
 dotnet run --project src/Conclave.App -- review 2878 # 无头：只评这一个 PR 然后退出
+dotnet run --project src/Conclave.App -- report      # 账单：谁评了什么、多少 token、多少钱
 scripts/package-macos.sh                             # 打成 dist/Conclave.app
 ```
+
+## 账单
+
+```
+总计 2 次评审 · 555.7k token · 折合 $1.26
+缓存命中 92%（命中的输入 token 计价远低于新输入，这个数越高越省）
+
+⚠️  金额是按 API 目录价折算，不是实际扣费。走 Max/Pro 订阅时边际成本为 0。
+
+按人                          按模型
+  guangliangli  2  555.7k  $1.26    claude-opus-5  1  555.7k  $1.26
+
+最近的评审
+  时间          谁            PR    仓库         状态    问题  TOKEN   金额   耗时
+  09-08 19:23  guangliangli  2880  edison-test  Reject    11  555.7k  $1.26  363s
+```
+
+`conclave report --since 2026-09-01` 限定起始日期。UI 里是「评审记录」页。
+
+每票的记录都落在链上（`Ballot` 区块），`reviews` 表只是可查投影 —— 每行带
+`block_hash` 指回来源区块，随时能重建、也能验证没被改过。
 
 无头模式的退出码给脚本用：
 

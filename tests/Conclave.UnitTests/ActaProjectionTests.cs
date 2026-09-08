@@ -10,7 +10,7 @@ public class ActaProjectionTests
     private static Block Block<T>(BlockKind kind, T payload, long index)
         => new()
         {
-            ChainId = V1.ChainId,
+            ChainId = Domain.Acta.ChainId,
             Index = index,
             PrevHash = Domain.Block.GenesisPrevHash,
             At = TestElectors.Now.AddMinutes(index),

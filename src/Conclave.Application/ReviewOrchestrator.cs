@@ -103,26 +103,30 @@ public sealed class ReviewOrchestrator : BackgroundService
         var self = _mesh.Self;
         var views = new List<PrView>();
 
-        foreach (var chainId in await _acta.ReadOpenChainsAsync(ct).ConfigureAwait(false))
+        // 先把开放的 revision 按 PR 收敛到最新一个。作者连着 push 两次会留下一个
+        // 被取代的旧版本，它永远不会有结论也不该再评。ReadOpenRevisionsAsync 按链序
+        // （即时间序）返回，所以后面的覆盖前面的。
+        var latest = new Dictionary<(string Project, int PrId), (Revision Revision, ChainState Chain)>();
+
+        foreach (var revisionId in await _acta.ReadOpenRevisionsAsync(ct).ConfigureAwait(false))
         {
             ct.ThrowIfCancellationRequested();
 
-            var blocks = await _acta.ReadChainAsync(chainId, ct).ConfigureAwait(false);
-
-            // 只处理链上最新的 Revision。旧版本没跑完也不补 —— PR 已经变了，评它没意义。
-            var revision = ActaProjection.RevisionsOf(blocks).LastOrDefault();
-            if (revision is null)
+            var blocks = await _acta.ReadRevisionAsync(revisionId, ct).ConfigureAwait(false);
+            var projected = ActaProjection.Project(blocks, revisionId);
+            if (projected.Summons is null)
             {
                 continue;
             }
 
-            var chain = ActaProjection.Project(blocks, revision.Id);
-            if (chain.Summons is null)
-            {
-                continue;
-            }
+            latest[projected.Summons.Revision.PullRequest] = (projected.Summons.Revision, projected);
+        }
 
-            var pr = chain.Summons.Pr;
+        foreach (var (revision, chain) in latest.Values)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var pr = chain.Summons!.Pr;
 
             // 传入 Recess 数：每次弃权都追加一个重试轮次，否则单节点 mesh 上
             // 一次超时会让这个 PR 永远卡在「没票也没人接管」。
@@ -214,7 +218,7 @@ public sealed class ReviewOrchestrator : BackgroundService
     private async Task TakeSeatAsync(Revision revision, int round, string selfId, CancellationToken ct)
     {
         var block = await _acta.AppendAsync(
-            revision.ChainId,
+            revision.Id,
             BlockKind.Seating,
             new SeatingPayload(revision.Id, round, selfId),
             ct).ConfigureAwait(false);
@@ -253,7 +257,7 @@ public sealed class ReviewOrchestrator : BackgroundService
             }
 
             var block = await _acta.AppendAsync(
-                revision.ChainId,
+                revision.Id,
                 BlockKind.Recess,
                 new RecessPayload(revision.Id, round, $"seating timeout after {_options.SeatingTimeout}"),
                 ct).ConfigureAwait(false);
@@ -294,13 +298,20 @@ public sealed class ReviewOrchestrator : BackgroundService
                 using var timeout = new CancellationTokenSource(_options.ReviewTimeout);
                 var ballot = await _runner.RunAsync(revision, pr, round, timeout.Token).ConfigureAwait(false);
 
+                // 把人读的评审者身份盖在票上：审计问的是「谁」，ElectorId 只是公钥指纹。
+                // 由评审者自己在签名范围内声明，所以不可否认。
+                var stamped = ballot with { ReviewerAz = _mesh.Self.AzIdentity };
+
                 var block = await _acta.AppendAsync(
-                    revision.ChainId, BlockKind.Ballot, ballot, CancellationToken.None).ConfigureAwait(false);
+                    revision.Id, BlockKind.Ballot, stamped, CancellationToken.None).ConfigureAwait(false);
                 await _mesh.BroadcastAsync(block, CancellationToken.None).ConfigureAwait(false);
 
                 _logger.LogInformation(
-                    "投票 {Revision} round={Round} → {Decision}，{Count} 条 finding，耗时 {Ms}ms",
-                    revision.Id, round, ballot.Decision, ballot.Findings.Count, ballot.DurationMs);
+                    "投票 {Revision} round={Round} → {Decision}，{Count} 条 finding，"
+                        + "耗时 {Ms}ms，{Tokens} token，折合 ${Cost}（{Basis} 价）",
+                    revision.Id, round, ballot.Decision, ballot.Findings.Count, ballot.DurationMs,
+                    ballot.Metering.TotalTokens, ballot.Metering.CostUsd.ToString("F4", System.Globalization.CultureInfo.InvariantCulture),
+                    ballot.Metering.CostBasis);
             }
             catch (Exception ex)
             {
@@ -309,9 +320,11 @@ public sealed class ReviewOrchestrator : BackgroundService
                 try
                 {
                     await _acta.AppendAsync(
-                        revision.ChainId,
+                        revision.Id,
                         BlockKind.Ballot,
-                        new BallotPayload(revision.Id, round, ReviewDecision.Error, [], "n/a", 0, ex.Message),
+                        new BallotPayload(
+                            revision.Id, round, ReviewDecision.Error, [], "n/a", 0,
+                            ReviewUsage.None, _mesh.Self.AzIdentity, ex.Message),
                         CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception inner)
@@ -365,7 +378,7 @@ public sealed class ReviewOrchestrator : BackgroundService
         }
 
         var block = await _acta.AppendAsync(
-            revision.ChainId,
+            revision.Id,
             BlockKind.Promulgation,
             merged with { ThreadId = threadId },
             ct).ConfigureAwait(false);

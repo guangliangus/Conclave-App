@@ -27,7 +27,7 @@
     </Style>
   </Window.Styles>
 
-  <Grid RowDefinitions="Auto,Auto,*,4,240,Auto" Margin="12">
+  <Grid RowDefinitions="Auto,Auto,*,4,320,Auto" Margin="12">
 
     <!-- 节点信息与开关 -->
     <Border Grid.Row="0" Padding="12" CornerRadius="6"
@@ -108,40 +108,89 @@
 
     <GridSplitter Grid.Row="3" ResizeDirection="Rows" Background="Transparent" />
 
-    <!-- Acta 账本 -->
-    <Border Grid.Row="4" CornerRadius="6" BorderThickness="1"
-            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
-      <Grid RowDefinitions="Auto,Auto,*">
-        <TextBlock Grid.Row="0" Margin="12,10,12,6" FontWeight="SemiBold"
-                   Text="Acta 会议录（append-only，每块含前块哈希与本节点签名）" />
+    <!-- 下半区：评审账单 与 Acta 会议录 -->
+    <TabControl Grid.Row="4" Padding="0">
 
-        <Grid Grid.Row="1" Margin="12,0,12,6" ColumnDefinitions="110,220,50,110,120,*">
-          <TextBlock Grid.Column="0" Classes="h" Text="时间" />
-          <TextBlock Grid.Column="1" Classes="h" Text="链" />
-          <TextBlock Grid.Column="2" Classes="h" Text="#" />
-          <TextBlock Grid.Column="3" Classes="h" Text="类型" />
-          <TextBlock Grid.Column="4" Classes="h" Text="HASH" />
-          <TextBlock Grid.Column="5" Classes="h" Text="摘要" />
+      <TabItem Header="评审记录">
+        <Grid RowDefinitions="Auto,*,Auto">
+          <Grid Grid.Row="0" Margin="12,8,12,6"
+                ColumnDefinitions="100,120,60,130,*,80,60,80,80,60">
+            <TextBlock Grid.Column="0" Classes="h" Text="时间" />
+            <TextBlock Grid.Column="1" Classes="h" Text="谁" />
+            <TextBlock Grid.Column="2" Classes="h" Text="PR" />
+            <TextBlock Grid.Column="3" Classes="h" Text="仓库" />
+            <TextBlock Grid.Column="4" Classes="h" Text="标题" />
+            <TextBlock Grid.Column="5" Classes="h" Text="状态" />
+            <TextBlock Grid.Column="6" Classes="h" Text="问题" />
+            <TextBlock Grid.Column="7" Classes="h" Text="TOKEN" />
+            <TextBlock Grid.Column="8" Classes="h" Text="金额" />
+            <TextBlock Grid.Column="9" Classes="h" Text="耗时" />
+          </Grid>
+
+          <ListBox Grid.Row="1" ItemsSource="{Binding Reviews}" Background="Transparent"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:ReviewRow">
+                <Grid ColumnDefinitions="100,120,60,130,*,80,60,80,80,60" Height="26"
+                      ToolTip.Tip="{Binding Breakdown}">
+                  <TextBlock Grid.Column="0" Classes="cell mono" Text="{Binding At}" />
+                  <TextBlock Grid.Column="1" Classes="cell" Text="{Binding Reviewer}" />
+                  <TextBlock Grid.Column="2" Classes="cell mono" Text="{Binding Pr}" />
+                  <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Repo}" />
+                  <TextBlock Grid.Column="4" Classes="cell" Text="{Binding Title}" />
+                  <TextBlock Grid.Column="5" Classes="cell" Text="{Binding Status}" />
+                  <TextBlock Grid.Column="6" Classes="cell mono" Text="{Binding Findings}" />
+                  <TextBlock Grid.Column="7" Classes="cell mono" Text="{Binding Tokens}" />
+                  <TextBlock Grid.Column="8" Classes="cell mono" Text="{Binding Cost}" />
+                  <TextBlock Grid.Column="9" Classes="cell mono" Text="{Binding Duration}" />
+                </Grid>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+
+          <Border Grid.Row="2" Padding="12,8" Background="{DynamicResource SystemControlBackgroundListLowBrush}">
+            <TextBlock Text="{Binding CostSummary}" FontWeight="SemiBold" TextWrapping="Wrap" />
+          </Border>
         </Grid>
+      </TabItem>
 
-        <ListBox Grid.Row="2" ItemsSource="{Binding Blocks}" Background="Transparent"
-                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-          <ListBox.ItemTemplate>
-            <DataTemplate x:DataType="vm:BlockRow">
-              <Grid ColumnDefinitions="110,220,50,110,120,*" Height="24">
-                <TextBlock Grid.Column="0" Classes="cell mono" Text="{Binding At}" />
-                <TextBlock Grid.Column="1" Classes="cell mono" Text="{Binding Chain}" />
-                <TextBlock Grid.Column="2" Classes="cell mono" Text="{Binding Index}" />
-                <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Kind}" />
-                <TextBlock Grid.Column="4" Classes="cell mono" Text="{Binding Hash}"
-                           ToolTip.Tip="{Binding Elector, StringFormat='签名节点 {0}'}" />
-                <TextBlock Grid.Column="5" Classes="cell mono" Text="{Binding Summary}" />
-              </Grid>
-            </DataTemplate>
-          </ListBox.ItemTemplate>
-        </ListBox>
-      </Grid>
-    </Border>
+      <TabItem Header="Acta 会议录">
+        <Grid RowDefinitions="Auto,Auto,*,Auto">
+          <TextBlock Grid.Row="0" Margin="12,8,12,4" Opacity="0.7" TextWrapping="Wrap"
+                     Text="全局唯一一条链，每块含前块哈希与签名。索引冲突时哈希小者胜出，输的一段重挂到链尾。" />
+
+          <Grid Grid.Row="1" Margin="12,4,12,6" ColumnDefinitions="110,50,150,110,120,*">
+            <TextBlock Grid.Column="0" Classes="h" Text="时间" />
+            <TextBlock Grid.Column="1" Classes="h" Text="#" />
+            <TextBlock Grid.Column="2" Classes="h" Text="REVISION" />
+            <TextBlock Grid.Column="3" Classes="h" Text="类型" />
+            <TextBlock Grid.Column="4" Classes="h" Text="HASH" />
+            <TextBlock Grid.Column="5" Classes="h" Text="摘要" />
+          </Grid>
+
+          <ListBox Grid.Row="2" ItemsSource="{Binding Blocks}" Background="Transparent"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:BlockRow">
+                <Grid ColumnDefinitions="110,50,150,110,120,*" Height="24">
+                  <TextBlock Grid.Column="0" Classes="cell mono" Text="{Binding At}" />
+                  <TextBlock Grid.Column="1" Classes="cell mono" Text="{Binding Index}" />
+                  <TextBlock Grid.Column="2" Classes="cell mono" Text="{Binding Revision}" />
+                  <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Kind}" />
+                  <TextBlock Grid.Column="4" Classes="cell mono" Text="{Binding Hash}"
+                             ToolTip.Tip="{Binding Elector, StringFormat='签名节点 {0}'}" />
+                  <TextBlock Grid.Column="5" Classes="cell mono" Text="{Binding Summary}" />
+                </Grid>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+
+          <Border Grid.Row="3" Padding="12,8" Background="{DynamicResource SystemControlBackgroundListLowBrush}">
+            <TextBlock Text="{Binding ActaSummary}" FontWeight="SemiBold" />
+          </Border>
+        </Grid>
+      </TabItem>
+    </TabControl>
 
     <!-- 状态栏 -->
     <TextBlock Grid.Row="5" Margin="4,10,4,0" Opacity="0.75" TextWrapping="Wrap"

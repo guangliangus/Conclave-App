@@ -38,7 +38,7 @@ public sealed class RebaseTests : IDisposable
         internal SqliteActa Acta { get; }
 
         internal Task<IReadOnlyList<Block>> ChainAsync()
-            => Acta.ReadChainAsync(ChainId, CancellationToken.None);
+            => Acta.ReadChainAsync(0, CancellationToken.None);
 
         public void Dispose()
         {
@@ -54,7 +54,6 @@ public sealed class RebaseTests : IDisposable
         }
     }
 
-    private const string ChainId = "pr:edison-test:2878";
     private static readonly Revision Rev = new("edison-test", 2878, "aaaaaaaa11111111");
 
     private readonly Node _a = new("a");
@@ -70,7 +69,7 @@ public sealed class RebaseTests : IDisposable
     {
         var unsigned = new Block
         {
-            ChainId = ChainId,
+            ChainId = Domain.Acta.ChainId,
             Index = index,
             PrevHash = prevHash,
             At = DateTimeOffset.UtcNow,
@@ -104,14 +103,14 @@ public sealed class RebaseTests : IDisposable
         var ct = CancellationToken.None;
 
         // 双方先同步一个共同的起点
-        var genesis = await _a.Acta.AppendAsync(ChainId, BlockKind.Summons, Summons(), ct);
+        var genesis = await _a.Acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
         Assert.True((await _b.Acta.TryApplyAsync(genesis, ct)).Applied);
 
         // 同时在 index 1 上各写一块：分区合并后的典型冲突
         var mine = await _a.Acta.AppendAsync(
-            ChainId, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
+            Rev.Id, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
         var theirs = await _b.Acta.AppendAsync(
-            ChainId, BlockKind.Ballot,
+            Rev.Id, BlockKind.Ballot,
             new BallotPayload(Rev.Id, 0, ReviewDecision.Reject, [], "m", 1), ct);
 
         Assert.Equal(1, mine.Index);
@@ -147,13 +146,13 @@ public sealed class RebaseTests : IDisposable
     {
         var ct = CancellationToken.None;
 
-        var genesis = await _a.Acta.AppendAsync(ChainId, BlockKind.Summons, Summons(), ct);
+        var genesis = await _a.Acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
         Assert.True((await _b.Acta.TryApplyAsync(genesis, ct)).Applied);
 
         var fromA = await _a.Acta.AppendAsync(
-            ChainId, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
+            Rev.Id, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
         var fromB = await _b.Acta.AppendAsync(
-            ChainId, BlockKind.Seating, new SeatingPayload(Rev.Id, 1, _b.Identity.Id), ct);
+            Rev.Id, BlockKind.Seating, new SeatingPayload(Rev.Id, 1, _b.Identity.Id), ct);
 
         // 互相推送，并把 rebase 重挂出来的块也推出去 —— MeshService 就是这么做的，
         // 少了这一步两边永远不会一致。
@@ -197,7 +196,7 @@ public sealed class RebaseTests : IDisposable
         using var third = new Node("c");
         _a.AllowList.Allow(third.Identity.Id);
 
-        var genesis = await _a.Acta.AppendAsync(ChainId, BlockKind.Summons, Summons(), ct);
+        var genesis = await _a.Acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
 
         // index 1 上放一块第三方签的
         var foreign = SignAt(
@@ -234,11 +233,11 @@ public sealed class RebaseTests : IDisposable
     {
         var ct = CancellationToken.None;
 
-        var genesis = await _a.Acta.AppendAsync(ChainId, BlockKind.Summons, Summons(), ct);
+        var genesis = await _a.Acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
         _ = await _a.Acta.AppendAsync(
-            ChainId, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
+            Rev.Id, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
         _ = await _a.Acta.AppendAsync(
-            ChainId, BlockKind.Ballot,
+            Rev.Id, BlockKind.Ballot,
             new BallotPayload(Rev.Id, 0, ReviewDecision.Approve, [], "m", 1), ct);
 
         var before = await _a.ChainAsync();
@@ -274,9 +273,9 @@ public sealed class RebaseTests : IDisposable
         var ct = CancellationToken.None;
         using var stranger = new Node("x");
 
-        var genesis = await _a.Acta.AppendAsync(ChainId, BlockKind.Summons, Summons(), ct);
+        var genesis = await _a.Acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
         var mine = await _a.Acta.AppendAsync(
-            ChainId, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
+            Rev.Id, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _a.Identity.Id), ct);
 
         var hostile = SignAt(
             stranger.Identity, 1, genesis.Hash(), BlockKind.Ballot,

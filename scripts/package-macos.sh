@@ -18,21 +18,22 @@ echo "==> 清理"
 rm -rf dist
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
-echo "==> 发布（${RID} / ${CONFIG} / self-contained 单文件）"
+# 刻意不用 PublishSingleFile。它默认把原生库留在单文件之外
+# （IncludeNativeLibrariesForSelfExtract 默认 false），于是只拷可执行文件会漏掉
+# libe_sqlite3.dylib，装好的 .app 一启动就 DllNotFoundException。
+# .app 本来就是个目录，在里面再套单文件没有好处。
+echo "==> 发布（${RID} / ${CONFIG} / self-contained）"
 dotnet publish src/Conclave.App \
   -c "${CONFIG}" -r "${RID}" \
   --self-contained true \
-  -p:PublishSingleFile=true \
   -p:DebugType=none \
   -p:Version="${VERSION}" \
   -o dist/publish \
   --nologo
 
 echo "==> 组装 bundle"
-cp dist/publish/conclave "${APP}/Contents/MacOS/"
-# 单文件发布后配置文件仍是独立的一份，要跟可执行文件放在一起：
-# 程序读的是 AppContext.BaseDirectory 下的 appsettings.json
-cp dist/publish/appsettings.json "${APP}/Contents/MacOS/"
+# 整个发布目录都进去：运行时、原生库、appsettings.json 一个不能少
+cp -R dist/publish/. "${APP}/Contents/MacOS/"
 
 echo "==> 生成 .icns"
 ICONSET=dist/Conclave.iconset
@@ -70,6 +71,16 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
 PLIST
 
 rm -rf dist/publish
+
+# 自检：只看文件在不在是不够的 —— 缺原生库时文件全在，一跑就炸。
+echo "==> 自检（跑一次 report）"
+if ! "${APP}/Contents/MacOS/conclave" report >/dev/null 2>dist/smoke.err; then
+  echo "❌ bundle 起不来：" >&2
+  tail -5 dist/smoke.err >&2
+  exit 1
+fi
+rm -f dist/smoke.err
+
 SIZE=$(du -sh "${APP}" | cut -f1)
 echo
 echo "✅ ${APP}（${SIZE}）"

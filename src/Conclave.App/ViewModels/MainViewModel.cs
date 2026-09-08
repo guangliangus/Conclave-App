@@ -17,6 +17,8 @@ public sealed partial class MainViewModel : ViewModelBase
     private readonly DiscoveryService _discovery;
     private readonly ReviewOrchestrator _orchestrator;
     private readonly ConclaveOptions _options;
+    private readonly IReviewLog _reviewLog;
+    private readonly IActaStore _acta;
     private readonly ILogger<MainViewModel> _logger;
 
     [ObservableProperty]
@@ -48,12 +50,24 @@ public sealed partial class MainViewModel : ViewModelBase
 
     public ObservableCollection<BlockRow> Blocks { get; } = [];
 
+    public ObservableCollection<ReviewRow> Reviews { get; } = [];
+
+    /// <summary>评审记录面板底部的汇总。</summary>
+    [ObservableProperty]
+    public partial string CostSummary { get; set; } = "尚无评审记录";
+
+    /// <summary>账本健康：区块数、revision 数、索引冲突次数。</summary>
+    [ObservableProperty]
+    public partial string ActaSummary { get; set; } = "—";
+
     public MainViewModel(
         NodeState state,
         IMesh mesh,
         DiscoveryService discovery,
         ReviewOrchestrator orchestrator,
         ConclaveOptions options,
+        IReviewLog reviewLog,
+        IActaStore acta,
         ILogger<MainViewModel> logger)
     {
         ArgumentNullException.ThrowIfNull(state);
@@ -65,6 +79,8 @@ public sealed partial class MainViewModel : ViewModelBase
         _discovery = discovery;
         _orchestrator = orchestrator;
         _options = options;
+        _reviewLog = reviewLog;
+        _acta = acta;
         _logger = logger;
 
         AutoReview = options.AutoReview;
@@ -72,6 +88,47 @@ public sealed partial class MainViewModel : ViewModelBase
 
         _state.Changed += OnStateChanged;
         Refresh();
+    }
+
+    /// <summary>
+    /// 拉一次评审记录与账本计数。
+    /// </summary>
+    /// <remarks>
+    /// 走投影表而不是重放整条链 —— 链会一直长，而面板每次状态变化都要刷。
+    /// </remarks>
+    private async Task LoadLedgerAsync()
+    {
+        try
+        {
+            var records = await _reviewLog.ReadRecentAsync(200, CancellationToken.None)
+                .ConfigureAwait(true);
+            var total = await _reviewLog.ReadTotalAsync(null, null, CancellationToken.None)
+                .ConfigureAwait(true);
+            var health = await _acta.ReadHealthAsync(CancellationToken.None).ConfigureAwait(true);
+
+            Reviews.Clear();
+            foreach (var record in records)
+            {
+                Reviews.Add(new ReviewRow(record));
+            }
+
+            CostSummary = total.Reviews == 0
+                ? "尚无评审记录"
+                : string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "{0} 次评审 · {1} token · 折合 {2}（目录价，非实际扣费）· 缓存命中 {3:P0}",
+                    total.Reviews, Format.Tokens(total.TotalTokens),
+                    Format.Money(total.CostUsd), total.CacheHitRatio);
+
+            ActaSummary = string.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "{0} 块 · {1} 个 revision · 索引冲突 {2} 次（本地让位 {3} 次）",
+                health.Blocks, health.Revisions, health.IndexConflicts, health.ConflictsLost);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "读评审记录失败");
+        }
     }
 
     /// <summary>后台线程触发，必须切回 UI 线程再动集合。</summary>
@@ -115,6 +172,10 @@ public sealed partial class MainViewModel : ViewModelBase
         {
             Blocks.Add(new BlockRow(block));
         }
+
+        // 账本读取是异步的，而 Refresh 由状态变化同步驱动 —— 不阻塞 UI 线程，
+        // 失败也只记日志：账单面板刷不出来不该影响评审本身。
+        _ = LoadLedgerAsync();
     }
 
     [RelayCommand]

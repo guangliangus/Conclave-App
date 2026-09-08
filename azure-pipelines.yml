@@ -50,10 +50,12 @@ steps:
     displayName: Headless entrypoint smoke test
     continueOnError: true   # CI 上没有 az 凭据时会拿到别的退出码，先只做观测
 
-  # 门禁 04：.app 打包脚本可用 —— 同事装不上就等于没交付
+  # 门禁 04：.app 打包脚本可用 —— 同事装不上就等于没交付。
+  # 脚本自己会跑一次 report 自检：只 test -f 是不够的，缺原生库时文件全在、一跑就炸
+  # （libe_sqlite3.dylib 就这么漏过一次）。
   - script: |
         set -e
         scripts/package-macos.sh
-        test -d "dist/Conclave.app/Contents/MacOS"
         test -f "dist/Conclave.app/Contents/Info.plist"
-    displayName: macOS bundle packages
+        test -f "dist/Conclave.app/Contents/Resources/Conclave.icns"
+    displayName: macOS bundle packages and runs

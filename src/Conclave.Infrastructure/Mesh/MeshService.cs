@@ -140,28 +140,43 @@ public sealed class MeshService(
             return;
         }
 
-        var local = await acta.ReadChainAsync(block.ChainId, ct).ConfigureAwait(false);
-        if (local.Count <= block.Index)
+        var tail = await ReadTailIndexAsync(ct).ConfigureAwait(false);
+        if (block.Index > tail + 1)
         {
-            await CatchUpAsync(block.ChainId, ct).ConfigureAwait(false);
+            await CatchUpAsync(tail + 1, ct).ConfigureAwait(false);
         }
     }
 
-    /// <summary>向 mesh 里的节点回拉整条链并顺序应用，补齐缺口。</summary>
-    private async Task CatchUpAsync(string chainId, CancellationToken ct)
+    /// <summary>本地链尾索引；空链返回 -1。</summary>
+    private async Task<long> ReadTailIndexAsync(CancellationToken ct)
     {
-        foreach (var peer in mesh.Members.Where(p => p.Id != mesh.Self.Id && p.Endpoint.Length > 0 && p.IsAlive(DateTimeOffset.UtcNow)))
+        var recent = await acta.ReadRecentAsync(1, ct).ConfigureAwait(false);
+        return recent.Count > 0 ? recent[0].Index : -1;
+    }
+
+    /// <summary>
+    /// 从 mesh 里的节点回拉 <paramref name="fromIndex"/> 起的链段并顺序应用，补齐缺口。
+    /// </summary>
+    /// <remarks>
+    /// 全局单链之后不能整链重传 —— 链会一直长。所以按索引增量拉，
+    /// 拉到第一个能补上东西的节点就停。
+    /// </remarks>
+    private async Task CatchUpAsync(long fromIndex, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var peer in mesh.Members.Where(
+            p => p.Id != mesh.Self.Id && p.Endpoint.Length > 0 && p.IsAlive(now)))
         {
-            var remote = await mesh.PullChainAsync(peer, chainId, ct).ConfigureAwait(false);
+            var remote = await mesh.PullChainAsync(peer, fromIndex, ct).ConfigureAwait(false);
             if (remote.Count == 0)
             {
                 continue;
             }
 
             var applied = 0;
-            foreach (var block in remote.OrderBy(b => b.Index))
+            foreach (var b in remote.OrderBy(x => x.Index))
             {
-                if ((await acta.TryApplyAsync(block, ct).ConfigureAwait(false)).Applied)
+                if ((await acta.TryApplyAsync(b, ct).ConfigureAwait(false)).Applied)
                 {
                     applied++;
                 }
@@ -169,7 +184,8 @@ public sealed class MeshService(
 
             if (applied > 0)
             {
-                logger.LogInformation("从 {Elector} 补链 {Chain}，补进 {Count} 块", peer.Id, chainId, applied);
+                logger.LogInformation(
+                    "从 {Elector} 补链（#{From} 起），补进 {Count} 块", peer.Id, fromIndex, applied);
                 return;
             }
         }

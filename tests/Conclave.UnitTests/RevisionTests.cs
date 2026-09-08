@@ -10,7 +10,7 @@ public class RevisionTests
         var rev = new Revision("liontrip-cms", 2721, "dc1d1d474a470955b9093e0867362d0d4ec7161a");
 
         Assert.Equal("2721@dc1d1d47", rev.Id);
-        Assert.Equal("pr:liontrip-cms:2721", rev.ChainId);
+        Assert.Equal(("liontrip-cms", 2721), rev.PullRequest);
     }
 
     [Fact]
@@ -22,8 +22,8 @@ public class RevisionTests
         // 幂等键变了 —— 所以作者 push 之后会自动重评。
         Assert.NotEqual(before.Id, after.Id);
 
-        // 但链是同一条 —— 一个 PR 的完整评审史留在一起。
-        Assert.Equal(before.ChainId, after.ChainId);
+        // 但仍指向同一个 PR —— 编排层据此只处理最新那个未结论的版本。
+        Assert.Equal(before.PullRequest, after.PullRequest);
     }
 
     [Fact]

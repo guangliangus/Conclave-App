@@ -99,7 +99,11 @@ internal sealed class Harness : IDisposable
     }
 
     internal Task<IReadOnlyList<Block>> ChainAsync(Revision rev)
-        => Acta.ReadChainAsync(rev.ChainId, CancellationToken.None);
+        => Acta.ReadRevisionAsync(rev.Id, CancellationToken.None);
+
+    /// <summary>整条全局链，用来验证索引连续与哈希链完整。</summary>
+    internal Task<IReadOnlyList<Block>> WholeChainAsync()
+        => Acta.ReadChainAsync(0, CancellationToken.None);
 
     internal async Task<ChainState> StateOfAsync(Revision rev)
         => ActaProjection.Project(await ChainAsync(rev), rev.Id);

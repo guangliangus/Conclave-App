@@ -119,7 +119,7 @@ public sealed class DiscoveryService(
                     continue;
                 }
 
-                var chain = await acta.ReadChainAsync(revision.ChainId, ct).ConfigureAwait(false);
+                var chain = await acta.ReadRevisionAsync(revision.Id, ct).ConfigureAwait(false);
                 if (ActaProjection.Project(chain, revision.Id).Summons is not null)
                 {
                     continue;
@@ -134,7 +134,7 @@ public sealed class DiscoveryService(
                 }
 
                 var block = await acta.AppendAsync(
-                    revision.ChainId,
+                    revision.Id,
                     BlockKind.Summons,
                     new SummonsPayload(revision, enriched, quorum, _reserved.Fingerprint()),
                     ct).ConfigureAwait(false);
@@ -178,7 +178,7 @@ public sealed class DiscoveryService(
         }
 
         var revision = pr.ToRevision();
-        var chain = await acta.ReadChainAsync(revision.ChainId, ct).ConfigureAwait(false);
+        var chain = await acta.ReadRevisionAsync(revision.Id, ct).ConfigureAwait(false);
         if (ActaProjection.Project(chain, revision.Id).Summons is not null)
         {
             logger.LogInformation("{Revision} 已在链上，无需重复召集", revision.Id);
@@ -188,7 +188,7 @@ public sealed class DiscoveryService(
         // 插队刻意不看 IsDraft：人明确指名要评的，草稿也评。
         var quorum = Math.Max(1, SeatAssignment.QuorumSize(pr, _reserved));
         var block = await acta.AppendAsync(
-            revision.ChainId,
+            revision.Id,
             BlockKind.Summons,
             new SummonsPayload(revision, pr, quorum, _reserved.Fingerprint()),
             ct).ConfigureAwait(false);

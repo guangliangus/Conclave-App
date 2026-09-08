@@ -79,9 +79,18 @@ public sealed record Revision(string Project, int PrId, string SrcCommit)
 **不需要任何额外的「是否已处理」状态表，Acta 本身就是。** 一个 PR 的多个
 revision 追加在同一条 `ChainId` 上，PR 的完整评审史一目了然。
 
-## 5. Acta：每个 PR 一条链
+## 5. Acta：一条全局链
 
-不做全局单链，就不需要共识算法——这是能砍掉 PoW/BFT 的根本原因。
+> **2026-09-08 变更。** 早期设计是「每个 PR 一条链」（单写者居多、索引冲突罕见）。
+> 按需求改成**全局唯一一条链**，换来一条真正的全局时间线：谁在什么时候评审了什么，
+> 按链序读一遍就是。
+>
+> **代价是并发写必然撞索引**：两个节点只要在听到彼此之前各写一块，就会争同一个 index。
+> 让位重挂（§5 冲突解决）因此从异常路径变成常态路径。它是纯函数、确定性收敛，
+> 功能上没问题，但代价要看得见 —— 账本记了 `index_conflicts` / `index_conflicts_lost`
+> 两个计数，UI 的会议录页脚会显示。
+>
+> 「按 PR 查」不再靠 ChainId，靠 `revision_id` 冗余列 + 索引。
 
 ```csharp
 public sealed record Block(
@@ -98,16 +107,45 @@ public sealed record Block(
 
 `Hash = SHA256(ChainId|Index|PrevHash|At|Kind|PayloadJson|ElectorId)`
 
-一条链的典型形态：
+链的典型形态（一条链上交错着多个 PR）：
 
 ```
-[0] Summons      rev=2721@dc1d1d47  quorum=2   由发现节点写入
-[1] Seating      round=0  elector=A
-[2] Seating      round=1  elector=B
-[3] Ballot       round=0  elector=A  reject  findings=5   [signed]
-[4] Ballot       round=1  elector=B  reject  findings=3   [signed]
-[5] Promulgation decision=reject  merged=6  threadId=8821
+#0 Summons      2721@dc1d1d47  quorum=2   由发现节点写入
+#1 Seating      2721@dc1d1d47  round=0  elector=A
+#2 Summons      2946@476b95ce  quorum=1   ← 另一个 PR 插在中间
+#3 Ballot       2721@dc1d1d47  round=0  A  reject  5 findings  128k token  $0.42
+#4 Seating      2721@dc1d1d47  round=1  elector=B
+#5 Ballot       2946@476b95ce  round=0  A  approve 0 findings   61k token  $0.19
+#6 Ballot       2721@dc1d1d47  round=1  B  reject  3 findings   96k token  $0.31
+#7 Promulgation 2721@dc1d1d47  reject  merged=6  threadId=8821
 ```
+
+## 5.2 评审记录投影
+
+链是唯一真相，但它不适合回答「这个月谁花了多少钱」。所以 Ballot 落链时同步写一层
+可查投影：
+
+```sql
+reviews              -- 每票一行：who / when / status / findings / tokens / cost
+review_model_usages  -- 分模型明细：opus 与 skill 里子代理用的小模型各花了多少
+```
+
+每一行都带 `block_hash` 指回来源区块 —— 任何时候都能从链上重建，也能验证没被改过。
+**让位重挂会改块哈希，所以 rebase 之后必须整体重建投影**，否则报表里会留下指向
+已不存在区块的幽灵行、金额重复计。
+
+### 金额是折算，不是扣费
+
+`claude -p` 报的 `costBasis` 通常是 `list`，即按 API 目录价折算；走 Max/Pro 订阅时
+边际成本其实是 0。所以 `cost_basis` 必须一起入库，并在报表和 UI 上标出来 ——
+否则「这个月花了 40 美元」会被读成账单。
+
+token 分四类而不是简单的输入/输出：缓存读写的计价与新输入差一个量级，
+混在一起就没法判断「是不是该把 review 的上下文做得更可缓存」。实测一次真实评审
+缓存命中 92%，这个数就是优化空间的直接指标。
+
+`cost_usd` 用 `REAL` 而不是全局规范里的 `numeric(10,2)`：单次评审常在 $0.001 量级，
+两位小数会全部归零。
 
 **落库**：SQLite，自增代理主键 + `(chain_id, block_index)` 唯一索引。append 前校验三件事——
 签名有效、`ElectorId` 在白名单、`PrevHash` 等于本地链尾哈希。

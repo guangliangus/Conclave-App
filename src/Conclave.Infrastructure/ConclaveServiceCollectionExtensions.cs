@@ -71,6 +71,7 @@ public static class ConclaveServiceCollectionExtensions
         _ = services.AddSingleton<IReviewRunner, ClaudeReviewRunner>();
         _ = services.AddSingleton<SqliteActa>();
         _ = services.AddSingleton<IActaStore>(sp => sp.GetRequiredService<SqliteActa>());
+        _ = services.AddSingleton<IReviewLog, SqliteReviewLog>();
 
         _ = services.AddSingleton(sp =>
         {

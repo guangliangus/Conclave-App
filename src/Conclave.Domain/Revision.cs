@@ -15,6 +15,6 @@ public sealed record Revision(string Project, int PrId, string SrcCommit)
 
     public string ShortCommit => SrcCommit.Length >= 8 ? SrcCommit[..8] : SrcCommit;
 
-    /// <summary>形如 <c>pr:liontrip-cms:2721</c>。一个 PR 一条链，多个 revision 追加在同一条链上。</summary>
-    public string ChainId => $"pr:{Project}:{PrId}";
+    /// <summary>同一个 PR 的不同版本。用于「每个 PR 只处理最新那个未结论的版本」。</summary>
+    public (string Project, int PrId) PullRequest => (Project, PrId);
 }

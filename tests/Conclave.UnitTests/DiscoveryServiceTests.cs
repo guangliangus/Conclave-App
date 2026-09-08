@@ -37,7 +37,7 @@ public class DiscoveryServiceTests
     }
 
     [Fact]
-    public async Task A_new_src_commit_summons_again_on_the_same_chain()
+    public async Task A_new_src_commit_becomes_a_separate_revision_on_the_global_chain()
     {
         using var h = new Harness();
         var first = h.Publish(Pr(commit: "aaaaaaaa11111111"));
@@ -47,12 +47,19 @@ public class DiscoveryServiceTests
         var second = h.Publish(first with { SrcCommit = "bbbbbbbb22222222" });
         await h.Discovery.PollOnceAsync(CancellationToken.None);
 
-        var chain = await h.ChainAsync(first.ToRevision());
-        Assert.Equal(2, chain.Count);
-        Assert.Equal(first.ToRevision().ChainId, second.ToRevision().ChainId);   // 同一条链
+        // 两个版本各自一个 revision，各有一块 Summons……
+        Assert.Single(await h.ChainAsync(first.ToRevision()));
+        Assert.Single(await h.ChainAsync(second.ToRevision()));
+
+        // ……但指向同一个 PR，编排层据此只处理最新那个。
+        Assert.Equal(first.ToRevision().PullRequest, second.ToRevision().PullRequest);
+
+        // 全局链上前后相连，是一条时间线。
+        var whole = await h.WholeChainAsync();
+        Assert.Equal(2, whole.Count);
         Assert.Equal(
             [first.ToRevision(), second.ToRevision()],
-            ActaProjection.RevisionsOf(chain));
+            ActaProjection.RevisionsOf(whole));
     }
 
     [Fact]
@@ -75,7 +82,7 @@ public class DiscoveryServiceTests
         await h.Discovery.PollOnceAsync(CancellationToken.None);
 
         // 构不出幂等键就不该落链 —— 否则会得到一条永远重复召集的链。
-        Assert.Empty(await h.Acta.ReadOpenChainsAsync(CancellationToken.None));
+        Assert.Empty(await h.Acta.ReadOpenRevisionsAsync(CancellationToken.None));
     }
 
     [Fact]

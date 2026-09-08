@@ -171,15 +171,15 @@ public sealed class HttpMesh : IMesh, IDisposable
         }
     }
 
-    /// <summary>向某个节点回拉一条链，用于补链。</summary>
+    /// <summary>从某个节点回拉 <paramref name="fromIndex"/> 起的链段，用于补链。</summary>
     public async Task<IReadOnlyList<Block>> PullChainAsync(
-        Elector peer, string chainId, CancellationToken ct)
+        Elector peer, long fromIndex, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(peer);
 
         try
         {
-            var url = $"{peer.Endpoint}/chains/{Uri.EscapeDataString(chainId)}";
+            var url = $"{peer.Endpoint}/chain?from={fromIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
             var blocks = await _http
                 .GetFromJsonAsync<List<Block>>(url, ActaJson.Options, ct)
                 .ConfigureAwait(false);
@@ -188,7 +188,7 @@ public sealed class HttpMesh : IMesh, IDisposable
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
                                       or System.Text.Json.JsonException)
         {
-            _logger.LogDebug(ex, "从 {Elector} 补链 {Chain} 失败", peer.Id, chainId);
+            _logger.LogDebug(ex, "从 {Elector} 补链（#{From} 起）失败", peer.Id, fromIndex);
             return [];
         }
     }

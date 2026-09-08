@@ -19,7 +19,7 @@ namespace Conclave.Infrastructure.Mesh;
 /// 改造成 <c>WebApplicationBuilder</c>。内网三个 JSON 接口不值得这个代价。
 /// </para>
 /// <para>
-/// 接口：<c>POST /blocks</c> 收区块、<c>GET /chains/{id}</c> 供对方补链、
+/// 接口：<c>POST /blocks</c> 收区块、<c>GET /chain?from=N</c> 供对方补链、
 /// <c>GET /elector</c> 方便 curl 排查。
 /// </para>
 /// </remarks>
@@ -130,10 +130,18 @@ public sealed class MeshHttpServer : IDisposable
             return;
         }
 
-        if (method == "GET" && path.StartsWith("/chains/", StringComparison.Ordinal))
+        if (method == "GET" && path == "/chain")
         {
-            var chainId = Uri.UnescapeDataString(path["/chains/".Length..]);
-            var chain = await _acta.ReadChainAsync(chainId, ct).ConfigureAwait(false);
+            // 全局单链之后补链是「从我这个索引往后给我」，而不是整链重传。
+            var from = 0L;
+            var raw = context.Request.QueryString["from"];
+            if (!string.IsNullOrEmpty(raw)
+                && long.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+            {
+                from = Math.Max(0, parsed);
+            }
+
+            var chain = await _acta.ReadChainAsync(from, ct).ConfigureAwait(false);
             await WriteJsonAsync(context, chain, ct).ConfigureAwait(false);
             return;
         }

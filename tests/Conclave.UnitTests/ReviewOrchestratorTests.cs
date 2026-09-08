@@ -101,7 +101,7 @@ public class ReviewOrchestratorTests
             await h.TickAsync();
         }
 
-        Assert.Empty(await h.Acta.ReadOpenChainsAsync(CancellationToken.None));
+        Assert.Empty(await h.Acta.ReadOpenRevisionsAsync(CancellationToken.None));
 
         // 再多跑几轮也不该重复评审。
         await h.TickAsync();
@@ -317,7 +317,7 @@ public class ReviewOrchestratorTests
 
         Assert.NotNull((await h.StateOfAsync(rev2)).Promulgation);
         Assert.Equal(2, h.Runner.Calls);                       // 两个版本各评一次
-        Assert.Equal(rev1.ChainId, rev2.ChainId);              // 同一条链
+        Assert.Equal(rev1.PullRequest, rev2.PullRequest);              // 同一条链
     }
 
     [Fact]
@@ -351,16 +351,16 @@ public class ReviewOrchestratorTests
         }
 
         await h.Discovery.PollOnceAsync(CancellationToken.None);
-        Assert.Equal(5, (await h.Acta.ReadOpenChainsAsync(CancellationToken.None)).Count);
+        Assert.Equal(5, (await h.Acta.ReadOpenRevisionsAsync(CancellationToken.None)).Count);
 
         // 单个 tick 能开跑几个是不确定的 —— 节点一旦饱和，按 SeatAssignment.Eligible
         // 就不再有入席资格，所以后面的链这一轮直接旁观。要断言的是最终收敛，不是单轮吞吐。
-        for (var i = 0; i < 40 && (await h.Acta.ReadOpenChainsAsync(CancellationToken.None)).Count > 0; i++)
+        for (var i = 0; i < 40 && (await h.Acta.ReadOpenRevisionsAsync(CancellationToken.None)).Count > 0; i++)
         {
             await h.TickAsync();
         }
 
-        Assert.Empty(await h.Acta.ReadOpenChainsAsync(CancellationToken.None));
+        Assert.Empty(await h.Acta.ReadOpenRevisionsAsync(CancellationToken.None));
         Assert.Equal(5, h.Runner.Calls);                       // 一个不漏，一个不重
         Assert.Equal(0, h.Mesh.Self.RunningJobs);              // 负载计数归零
     }

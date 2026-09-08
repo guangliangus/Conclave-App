@@ -11,7 +11,8 @@ public sealed class BlockRow
         ArgumentNullException.ThrowIfNull(block);
 
         At = block.At.ToLocalTime().ToString("MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-        Chain = block.ChainId;
+        // 全局单链之后链名恒为 "acta"，没有信息量；改显示这块属于哪个 PR 版本。
+        Revision = Conclave.Domain.Acta.RevisionIdOf(block) ?? "—";
         Index = block.Index.ToString(CultureInfo.InvariantCulture);
         Kind = block.Kind.ToString();
         Elector = block.ElectorId;
@@ -21,7 +22,7 @@ public sealed class BlockRow
 
     public string At { get; }
 
-    public string Chain { get; }
+    public string Revision { get; }
 
     public string Index { get; }
 

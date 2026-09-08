@@ -31,7 +31,7 @@ public sealed class SqliteActaTests : IDisposable
     [Fact]
     public async Task First_block_on_a_chain_is_a_genesis_block()
     {
-        var block = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), CancellationToken.None);
+        var block = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), CancellationToken.None);
 
         Assert.Equal(0, block.Index);
         Assert.Equal(Block.GenesisPrevHash, block.PrevHash);
@@ -42,13 +42,13 @@ public sealed class SqliteActaTests : IDisposable
     public async Task Appended_blocks_form_an_unbroken_hash_chain()
     {
         var ct = CancellationToken.None;
-        var a = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
-        var b = await _acta.AppendAsync(Rev.ChainId, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _identity.Id), ct);
+        var a = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
+        var b = await _acta.AppendAsync(Rev.Id, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _identity.Id), ct);
         var c = await _acta.AppendAsync(
-            Rev.ChainId, BlockKind.Ballot,
+            Rev.Id, BlockKind.Ballot,
             new BallotPayload(Rev.Id, 0, ReviewDecision.Approve, [], "m", 1), ct);
 
-        var chain = await _acta.ReadChainAsync(Rev.ChainId, ct);
+        var chain = await _acta.ReadRevisionAsync(Rev.Id, ct);
 
         Assert.Equal(3, chain.Count);
         Assert.Equal([0L, 1L, 2L], chain.Select(x => x.Index));
@@ -59,24 +59,31 @@ public sealed class SqliteActaTests : IDisposable
     }
 
     [Fact]
-    public async Task Chains_are_independent_so_each_pr_starts_at_index_zero()
+    public async Task All_revisions_share_one_index_space_but_stay_queryable_apart()
     {
         var ct = CancellationToken.None;
-        var one = await _acta.AppendAsync("pr:a:1", BlockKind.Summons, Summons(), ct);
-        var two = await _acta.AppendAsync("pr:b:2", BlockKind.Summons, Summons(), ct);
+        var one = await _acta.AppendAsync("1@aaaaaaaa", BlockKind.Summons, Summons(), ct);
+        var two = await _acta.AppendAsync("2@bbbbbbbb", BlockKind.Summons, Summons(), ct);
 
-        // 每个 PR 一条独立链 —— 这是不需要全局排序（也就不需要共识算法）的根本原因。
+        // 全局单链：索引是共享的一条时间线，不同 PR 的块前后相连。
         Assert.Equal(0, one.Index);
-        Assert.Equal(0, two.Index);
+        Assert.Equal(1, two.Index);
+        Assert.Equal(one.Hash(), two.PrevHash);
+        Assert.Equal(Domain.Acta.ChainId, one.ChainId);
+
+        // 「按 PR 查」不再靠 ChainId，靠 revision_id 那一列。
+        Assert.Single(await _acta.ReadRevisionAsync("1@aaaaaaaa", ct));
+        Assert.Single(await _acta.ReadRevisionAsync("2@bbbbbbbb", ct));
+        Assert.Equal(2, (await _acta.ReadChainAsync(0, ct)).Count);
     }
 
     [Fact]
     public async Task Round_trip_preserves_payload_and_timestamp()
     {
         var ct = CancellationToken.None;
-        var written = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(3), ct);
+        var written = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(3), ct);
 
-        var read = (await _acta.ReadChainAsync(Rev.ChainId, ct))[0];
+        var read = (await _acta.ReadRevisionAsync(Rev.Id, ct))[0];
         var payload = read.Payload<SummonsPayload>();
 
         Assert.Equal(written.Hash(), read.Hash());
@@ -90,32 +97,32 @@ public sealed class SqliteActaTests : IDisposable
     public async Task Open_chains_exclude_promulgated_revisions()
     {
         var ct = CancellationToken.None;
-        _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
-        Assert.Contains(Rev.ChainId, await _acta.ReadOpenChainsAsync(ct));
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
+        Assert.Contains(Rev.Id, await _acta.ReadOpenRevisionsAsync(ct));
 
         _ = await _acta.AppendAsync(
-            Rev.ChainId, BlockKind.Promulgation,
+            Rev.Id, BlockKind.Promulgation,
             new PromulgationPayload(Rev.Id, ReviewDecision.Approve, [], false, 1, 1), ct);
 
-        Assert.DoesNotContain(Rev.ChainId, await _acta.ReadOpenChainsAsync(ct));
+        Assert.DoesNotContain(Rev.Id, await _acta.ReadOpenRevisionsAsync(ct));
     }
 
     [Fact]
     public async Task A_new_revision_reopens_the_chain()
     {
         var ct = CancellationToken.None;
-        _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
         _ = await _acta.AppendAsync(
-            Rev.ChainId, BlockKind.Promulgation,
+            Rev.Id, BlockKind.Promulgation,
             new PromulgationPayload(Rev.Id, ReviewDecision.Approve, [], false, 1, 1), ct);
 
         var next = new Revision(Rev.Project, Rev.PrId, "bbbbbbbb22222222");
         _ = await _acta.AppendAsync(
-            Rev.ChainId, BlockKind.Summons,
+            Rev.Id, BlockKind.Summons,
             new SummonsPayload(next, TestElectors.Pr(), 1, "rules1"), ct);
 
         // 作者 push 了新 commit → Summons 数 > Promulgation 数 → 这条链重新变成待办。
-        Assert.Contains(Rev.ChainId, await _acta.ReadOpenChainsAsync(ct));
+        Assert.Contains(Rev.Id, await _acta.ReadOpenRevisionsAsync(ct));
     }
 
     [Fact]
@@ -123,9 +130,9 @@ public sealed class SqliteActaTests : IDisposable
     {
         var ct = CancellationToken.None;
         _ = await _acta.AppendAsync(
-            Rev.ChainId, BlockKind.Ballot,
+            Rev.Id, BlockKind.Ballot,
             new BallotPayload(Rev.Id, 0, ReviewDecision.Approve, [], "m", 1), ct);
-        _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
 
         Assert.Equal(1, await _acta.CountRecentBallotsAsync(_identity.Id, ct));
         Assert.Equal(0, await _acta.CountRecentBallotsAsync("someone-else", ct));
@@ -136,11 +143,11 @@ public sealed class SqliteActaTests : IDisposable
     {
         var ct = CancellationToken.None;
         using var stranger = ElectorIdentity.Create();
-        var block = SignAs(stranger, Rev.ChainId, 0, Block.GenesisPrevHash);
+        var block = SignAs(stranger, 0, Block.GenesisPrevHash);
 
         // 白名单不是「以后再加」：别人的块会让别人的评审任务落到本机跑 Bash。
         Assert.False((await _acta.TryApplyAsync(block, ct)).Applied);
-        Assert.Empty(await _acta.ReadChainAsync(Rev.ChainId, ct));
+        Assert.Empty(await _acta.ReadRevisionAsync(Rev.Id, ct));
     }
 
     [Fact]
@@ -150,10 +157,10 @@ public sealed class SqliteActaTests : IDisposable
         using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
-        var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
+        var block = SignAs(peer, 0, Block.GenesisPrevHash);
 
         Assert.True((await _acta.TryApplyAsync(block, ct)).Applied);
-        Assert.Single(await _acta.ReadChainAsync(Rev.ChainId, ct));
+        Assert.Single(await _acta.ReadRevisionAsync(Rev.Id, ct));
     }
 
     [Fact]
@@ -163,7 +170,7 @@ public sealed class SqliteActaTests : IDisposable
         using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
-        var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
+        var block = SignAs(peer, 0, Block.GenesisPrevHash);
         var tampered = block with { PayloadJson = """{"evil":true}""" };
 
         Assert.False((await _acta.TryApplyAsync(tampered, ct)).Applied);
@@ -176,7 +183,7 @@ public sealed class SqliteActaTests : IDisposable
         using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
-        var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
+        var block = SignAs(peer, 0, Block.GenesisPrevHash);
 
         var first = await _acta.TryApplyAsync(block, ct);
         var second = await _acta.TryApplyAsync(block, ct);   // gossip 送了两遍
@@ -190,7 +197,7 @@ public sealed class SqliteActaTests : IDisposable
         Assert.True(second.Applied);
         Assert.False(second.Novel);
 
-        Assert.Single(await _acta.ReadChainAsync(Rev.ChainId, ct));
+        Assert.Single(await _acta.ReadRevisionAsync(Rev.Id, ct));
     }
 
     [Fact]
@@ -201,7 +208,7 @@ public sealed class SqliteActaTests : IDisposable
         _allowList.Allow(peer.Id);
 
         // index 5 但本地链是空的 —— 需要先补链（P2 的 PullChain），不能直接落。
-        var block = SignAs(peer, Rev.ChainId, 5, Block.GenesisPrevHash);
+        var block = SignAs(peer, 5, Block.GenesisPrevHash);
 
         Assert.False((await _acta.TryApplyAsync(block, ct)).Applied);
     }
@@ -213,18 +220,46 @@ public sealed class SqliteActaTests : IDisposable
         using var peer = ElectorIdentity.Create();
         _allowList.Allow(peer.Id);
 
-        _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
-        var block = SignAs(peer, Rev.ChainId, 1, prevHash: new string('9', 64));
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
+        var block = SignAs(peer, 1, prevHash: new string('9', 64));
 
         Assert.False((await _acta.TryApplyAsync(block, ct)).Applied);
+    }
+
+    [Fact]
+    public async Task A_block_claiming_a_different_chain_is_rejected()
+    {
+        var ct = CancellationToken.None;
+        using var peer = ElectorIdentity.Create();
+        _allowList.Allow(peer.Id);
+
+        var unsigned = new Block
+        {
+            ChainId = "pr:edison-test:2878",      // 旧的「每 PR 一条链」写法
+            Index = 0,
+            PrevHash = Block.GenesisPrevHash,
+            At = DateTimeOffset.UtcNow,
+            Kind = BlockKind.Summons,
+            PayloadJson = ActaJson.Serialize(Summons()),
+            ElectorId = peer.Id,
+            PublicKey = peer.PublicKey,
+            Signature = string.Empty,
+        };
+        var foreign = unsigned with { Signature = peer.Sign(unsigned.SigningPayload()) };
+
+        // 唯一索引是 (chain_id, block_index)，不校验链 ID 的话这块能占住 index 0
+        // 而不触发冲突判定 —— 账本里就会并存两条互不相干的序列。
+        Assert.True(foreign.VerifySignature());
+        Assert.Equal(ApplyOutcome.Rejected, (await _acta.TryApplyAsync(foreign, ct)).Outcome);
+        Assert.Empty(await _acta.ReadChainAsync(0, ct));
     }
 
     [Fact]
     public async Task Recent_blocks_come_back_newest_first()
     {
         var ct = CancellationToken.None;
-        _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
-        _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _identity.Id), ct);
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Seating, new SeatingPayload(Rev.Id, 0, _identity.Id), ct);
 
         var recent = await _acta.ReadRecentAsync(10, ct);
 
@@ -236,20 +271,21 @@ public sealed class SqliteActaTests : IDisposable
     public async Task Ledger_survives_reopening_the_database()
     {
         var ct = CancellationToken.None;
-        _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
 
         var reopened = new SqliteActa(_options, _identity, _allowList, NullLogger<SqliteActa>.Instance);
-        var chain = await reopened.ReadChainAsync(Rev.ChainId, ct);
+        var chain = await reopened.ReadRevisionAsync(Rev.Id, ct);
 
         Assert.Single(chain);
         Assert.True(chain[0].VerifySignature());
     }
 
-    private static Block SignAs(ElectorIdentity id, string chainId, long index, string prevHash)
+    private static Block SignAs(ElectorIdentity id, long index, string prevHash)
     {
         var unsigned = new Block
         {
-            ChainId = chainId,
+            // 全局单链：链 ID 只有一个，且 TryApplyAsync 会校验它。
+            ChainId = Domain.Acta.ChainId,
             Index = index,
             PrevHash = prevHash,
             At = DateTimeOffset.UtcNow,

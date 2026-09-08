@@ -1,4 +1,5 @@
 using Avalonia;
+using System.Globalization;
 using Conclave.App.ViewModels;
 using Conclave.Application;
 using Conclave.Application.Ports;
@@ -36,6 +37,12 @@ internal sealed class Program
         if (args is ["serve", ..])
         {
             return Serve(args);
+        }
+
+        // 账单：谁评审了什么、烧了多少 token、折合多少钱。
+        if (args is ["report", ..])
+        {
+            return Report(args);
         }
 
         var builder = CreateBuilder(args);
@@ -107,6 +114,44 @@ internal sealed class Program
     }
 
     /// <summary>
+    /// 打印评审账单然后退出。
+    /// </summary>
+    /// <remarks>
+    /// 只读投影表，不起任何后台服务 —— 查账不该顺手触发一轮轮询。
+    /// <c>--since 2026-09-01</c> 可限定起始日期。
+    /// </remarks>
+    private static int Report(string[] args)
+    {
+        var builder = CreateBuilder(args);
+        _ = builder.Services.AddConclaveNode(builder.Configuration);
+
+        using var host = builder.Build();
+        var log = host.Services.GetRequiredService<IReviewLog>();
+
+        DateTimeOffset? since = null;
+        var idx = Array.IndexOf(args, "--since");
+        if (idx >= 0 && idx + 1 < args.Length
+            && DateTimeOffset.TryParse(
+                args[idx + 1], CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+        {
+            since = parsed;
+        }
+
+        var ct = CancellationToken.None;
+        var report = UsageReport.Render(
+            log.ReadTotalAsync(since, null, ct).GetAwaiter().GetResult(),
+            log.SummariseByReviewerAsync(since, null, ct).GetAwaiter().GetResult(),
+            log.SummariseByMonthAsync(ct).GetAwaiter().GetResult(),
+            log.SummariseByRepoAsync(since, null, ct).GetAwaiter().GetResult(),
+            log.SummariseByModelAsync(since, null, ct).GetAwaiter().GetResult(),
+            log.ReadRecentAsync(20, ct).GetAwaiter().GetResult());
+
+        Console.Write(report);
+        return 0;
+    }
+
+    /// <summary>
     /// 先探出 <c>Conclave:HomeDirectory</c>。
     /// </summary>
     /// <remarks>
@@ -175,7 +220,7 @@ internal sealed class Program
             await orchestrator.TickAsync(ct).ConfigureAwait(false);
             await orchestrator.WhenIdleAsync().ConfigureAwait(false);
 
-            var chain = await acta.ReadChainAsync(revision.ChainId, ct).ConfigureAwait(false);
+            var chain = await acta.ReadRevisionAsync(revision.Id, ct).ConfigureAwait(false);
             var state = ActaProjection.Project(chain, revision.Id);
 
             if (state.Promulgation is null)
