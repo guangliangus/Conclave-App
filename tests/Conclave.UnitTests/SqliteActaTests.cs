@@ -10,6 +10,7 @@ public sealed class SqliteActaTests : IDisposable
     private readonly string _home;
     private readonly ConclaveOptions _options;
     private readonly ElectorIdentity _identity;
+    private readonly MutableAllowList _allowList;
     private readonly SqliteActa _acta;
 
     public SqliteActaTests()
@@ -17,7 +18,8 @@ public sealed class SqliteActaTests : IDisposable
         _home = Path.Combine(Path.GetTempPath(), "conclave-test-" + Guid.NewGuid().ToString("N"));
         _options = new ConclaveOptions { HomeDirectory = _home };
         _identity = ElectorIdentity.CreateEphemeral();
-        _acta = new SqliteActa(_options, _identity, NullLogger<SqliteActa>.Instance);
+        _allowList = new MutableAllowList(_identity.Id);
+        _acta = new SqliteActa(_options, _identity, _allowList, NullLogger<SqliteActa>.Instance);
     }
 
     private static readonly Revision Rev = new("liontrip-cms", 2721, "aaaaaaaa11111111");
@@ -145,7 +147,7 @@ public sealed class SqliteActaTests : IDisposable
     {
         var ct = CancellationToken.None;
         using var peer = ElectorIdentity.CreateEphemeral();
-        _acta.Allow(peer.Id);
+        _allowList.Allow(peer.Id);
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
 
@@ -158,7 +160,7 @@ public sealed class SqliteActaTests : IDisposable
     {
         var ct = CancellationToken.None;
         using var peer = ElectorIdentity.CreateEphemeral();
-        _acta.Allow(peer.Id);
+        _allowList.Allow(peer.Id);
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
         var tampered = block with { PayloadJson = """{"evil":true}""" };
@@ -171,7 +173,7 @@ public sealed class SqliteActaTests : IDisposable
     {
         var ct = CancellationToken.None;
         using var peer = ElectorIdentity.CreateEphemeral();
-        _acta.Allow(peer.Id);
+        _allowList.Allow(peer.Id);
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
 
@@ -185,7 +187,7 @@ public sealed class SqliteActaTests : IDisposable
     {
         var ct = CancellationToken.None;
         using var peer = ElectorIdentity.CreateEphemeral();
-        _acta.Allow(peer.Id);
+        _allowList.Allow(peer.Id);
 
         // index 5 但本地链是空的 —— 需要先补链（P2 的 PullChain），不能直接落。
         var block = SignAs(peer, Rev.ChainId, 5, Block.GenesisPrevHash);
@@ -198,7 +200,7 @@ public sealed class SqliteActaTests : IDisposable
     {
         var ct = CancellationToken.None;
         using var peer = ElectorIdentity.CreateEphemeral();
-        _acta.Allow(peer.Id);
+        _allowList.Allow(peer.Id);
 
         _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
         var block = SignAs(peer, Rev.ChainId, 1, prevHash: new string('9', 64));
@@ -225,7 +227,7 @@ public sealed class SqliteActaTests : IDisposable
         var ct = CancellationToken.None;
         _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
 
-        var reopened = new SqliteActa(_options, _identity, NullLogger<SqliteActa>.Instance);
+        var reopened = new SqliteActa(_options, _identity, _allowList, NullLogger<SqliteActa>.Instance);
         var chain = await reopened.ReadChainAsync(Rev.ChainId, ct);
 
         Assert.Single(chain);

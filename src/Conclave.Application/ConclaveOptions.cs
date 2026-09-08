@@ -26,8 +26,13 @@ public sealed class ConclaveOptions
     /// <summary>本节点同时最多跑几个评审。</summary>
     public int MaxConcurrent { get; set; } = 2;
 
-    /// <summary>去这些目录下找已 clone 的 repo。支持 <c>~</c> 前缀。</summary>
-    public IList<string> RepoSearchRoots { get; } = [
+    /// <summary>
+    /// 去这些目录下找已 clone 的 repo。支持 <c>~</c> 前缀。
+    /// </summary>
+    /// <remarks>
+    /// 刻意可写：配置绑定对只读集合是「往里追加」，那样配置文件永远删不掉默认项。
+    /// </remarks>
+    public IList<string> RepoSearchRoots { get; set; } = [
         "~/projects",
         "~/C#Projects",
         "~/C#Projects/guang",
@@ -35,7 +40,10 @@ public sealed class ConclaveOptions
     ];
 
     /// <summary>只轮询这些 project；留空表示全部。</summary>
-    public IList<string> ProjectAllowList { get; } = [];
+    public IList<string> ProjectAllowList { get; set; } = [];
+
+    /// <summary>P1 mesh 的参数。</summary>
+    public MeshOptions Mesh { get; set; } = new();
 
     /// <summary>
     /// 发现 PR 后是否自动开跑评审。

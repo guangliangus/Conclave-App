@@ -1,6 +1,7 @@
 using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -10,7 +11,24 @@ namespace Conclave.Infrastructure;
 public static class ConclaveServiceCollectionExtensions
 {
     /// <summary>
-    /// 注册节点身份、Acta、适配器与两个后台服务。
+    /// 从配置读出 <see cref="ConclaveOptions"/> 并注册一个节点。
+    /// </summary>
+    /// <remarks>
+    /// 读 <c>Conclave</c> 配置节。绑定后仍会经 <see cref="AddConclaveNode(IServiceCollection, ConclaveOptions)"/>，
+    /// 所以配置路径与测试路径注册的是同一套东西。
+    /// </remarks>
+    public static IServiceCollection AddConclaveNode(
+        this IServiceCollection services, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        var opts = new ConclaveOptions();
+        configuration.GetSection("Conclave").Bind(opts);
+        return services.AddConclaveNode(opts);
+    }
+
+    /// <summary>
+    /// 注册节点身份、Acta、适配器与后台服务。
     /// </summary>
     /// <remarks>
     /// <see cref="DiscoveryService"/> 与 <see cref="ReviewOrchestrator"/> 同时以单例和
@@ -29,12 +47,24 @@ public static class ConclaveServiceCollectionExtensions
         {
             Directory.CreateDirectory(opts.HomeDirectory);
             var identity = ElectorIdentity.LoadOrCreate(opts.KeyPath);
-            sp.GetRequiredService<ILogger<ElectorIdentity>>()
-              .LogInformation("节点身份 {ElectorId}（私钥 {Path}）", identity.Id, opts.KeyPath);
+            var logger = sp.GetRequiredService<ILogger<ElectorIdentity>>();
+
+            logger.LogInformation("节点身份 {ElectorId}（私钥 {Path}）", identity.Id, opts.KeyPath);
+
+            // 把生效配置打出来：配置分四层叠加，出问题时最先要确认的就是「到底生效了哪份」。
+            logger.LogInformation(
+                "生效配置：轮询 {Poll} · 编排 {Orch} · 并发 {Max} · 自动评审 {Auto} · 投递 {Post} · mesh {Mesh} · project 白名单 {Projects} · repo 根目录 {Roots}",
+                opts.PollInterval, opts.OrchestratorInterval, opts.MaxConcurrent,
+                opts.AutoReview, opts.PostToAzureDevOps,
+                opts.Mesh.Enabled ? $"开（:{opts.Mesh.HttpPort}）" : "关",
+                opts.ProjectAllowList.Count > 0 ? string.Join(',', opts.ProjectAllowList) : "全部",
+                string.Join(',', opts.RepoSearchRoots));
+
             return identity;
         });
 
         _ = services.AddSingleton<NodeState>();
+        _ = services.AddSingleton<IElectorAllowList, FileElectorAllowList>();
         _ = services.AddSingleton<IRepoLocator, FileSystemRepoLocator>();
         _ = services.AddSingleton<IPrSource, AzCliPrSource>();
         _ = services.AddSingleton<IReviewRunner, ClaudeReviewRunner>();

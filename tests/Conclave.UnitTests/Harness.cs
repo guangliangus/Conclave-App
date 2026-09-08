@@ -28,7 +28,8 @@ internal sealed class Harness : IDisposable
         };
 
         Identity = ElectorIdentity.CreateEphemeral();
-        Acta = new SqliteActa(Options, Identity, NullLogger<SqliteActa>.Instance);
+        AllowList = new MutableAllowList(Identity.Id);
+        Acta = new SqliteActa(Options, Identity, AllowList, NullLogger<SqliteActa>.Instance);
 
         Mesh = new FakeMesh(new Elector
         {
@@ -55,6 +56,8 @@ internal sealed class Harness : IDisposable
     internal ConclaveOptions Options { get; }
 
     internal ElectorIdentity Identity { get; }
+
+    internal MutableAllowList AllowList { get; }
 
     internal SqliteActa Acta { get; }
 

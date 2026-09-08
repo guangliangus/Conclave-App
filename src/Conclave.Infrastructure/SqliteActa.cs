@@ -29,26 +29,23 @@ public sealed class SqliteActa : IActaStore
     private readonly ElectorIdentity _identity;
     private readonly ILogger<SqliteActa> _logger;
 
-    /// <summary>
-    /// 允许其区块进入本地账本的节点。
-    /// </summary>
-    /// <remarks>
-    /// P0 只含自己。P1 接入 mesh 时这里必须换成真正的白名单 —— 别人的 Seating 块会让
-    /// 别人的评审任务落到你机器上跑 Bash，这道闸不是「以后再加」的。
-    /// </remarks>
-    private readonly HashSet<string> _allowedElectors;
+    private readonly IElectorAllowList _allowList;
 
     /// <summary>SQLite 单写者。并发写会撞 SQLITE_BUSY，这里直接串行化。</summary>
     private readonly SemaphoreSlim _writeGate = new(1, 1);
 
-    public SqliteActa(ConclaveOptions options, ElectorIdentity identity, ILogger<SqliteActa> logger)
+    public SqliteActa(
+        ConclaveOptions options,
+        ElectorIdentity identity,
+        IElectorAllowList allowList,
+        ILogger<SqliteActa> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(identity);
 
         _identity = identity;
+        _allowList = allowList;
         _logger = logger;
-        _allowedElectors = new HashSet<string>(StringComparer.Ordinal) { identity.Id };
 
         Directory.CreateDirectory(options.HomeDirectory);
         _connectionString = new SqliteConnectionStringBuilder
@@ -59,24 +56,6 @@ public sealed class SqliteActa : IActaStore
         }.ToString();
 
         Initialize();
-    }
-
-    /// <summary>把一个节点加进白名单。P1 由 mesh 的成员管理调用。</summary>
-    public void Allow(string electorId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(electorId);
-        lock (_allowedElectors)
-        {
-            _ = _allowedElectors.Add(electorId);
-        }
-    }
-
-    private bool IsAllowed(string electorId)
-    {
-        lock (_allowedElectors)
-        {
-            return _allowedElectors.Contains(electorId);
-        }
     }
 
     private void Initialize()
@@ -163,7 +142,7 @@ public sealed class SqliteActa : IActaStore
             return false;
         }
 
-        if (!IsAllowed(block.ElectorId))
+        if (!_allowList.IsAllowed(block.ElectorId))
         {
             _logger.LogWarning(
                 "拒收区块 {Chain}#{Index}：节点 {Elector} 不在白名单",

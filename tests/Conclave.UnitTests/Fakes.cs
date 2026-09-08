@@ -130,3 +130,15 @@ internal sealed class FakeRepoLocator(params string[] repos) : IRepoLocator
     public IReadOnlyDictionary<string, string> Locate()
         => repos.ToDictionary(r => r, r => "/tmp/" + r, StringComparer.OrdinalIgnoreCase);
 }
+
+/// <summary>测试用的可变白名单。</summary>
+internal sealed class MutableAllowList(string selfId) : IElectorAllowList
+{
+    private readonly HashSet<string> _ids = new(StringComparer.Ordinal) { selfId };
+
+    public IReadOnlyCollection<string> Allowed => _ids;
+
+    public bool IsAllowed(string electorId) => _ids.Contains(electorId);
+
+    internal void Allow(string electorId) => _ids.Add(electorId);
+}

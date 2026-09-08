@@ -4,6 +4,7 @@ using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
 using Conclave.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -31,15 +32,8 @@ internal sealed class Program
             return HeadlessReview(args, prId);
         }
 
-        var builder = Host.CreateApplicationBuilder(args);
-
-        _ = builder.Logging.AddSimpleConsole(o =>
-        {
-            o.SingleLine = true;
-            o.TimestampFormat = "HH:mm:ss ";
-        });
-
-        _ = builder.Services.AddConclaveNode();
+        var builder = CreateBuilder(args);
+        _ = builder.Services.AddConclaveNode(builder.Configuration);
         _ = builder.Services.AddSingleton<MainViewModel>();
 
         using var host = builder.Build();
@@ -59,6 +53,34 @@ internal sealed class Program
     }
 
     /// <summary>
+    /// 配置来源，从弱到强：程序目录的 appsettings.json → <c>~/.conclave/appsettings.json</c>
+    /// → <c>CONCLAVE_</c> 前缀的环境变量 → 命令行。
+    /// </summary>
+    /// <remarks>
+    /// 用户目录那份优先于程序目录那份：装好的 <c>.app</c> 里没法改文件，
+    /// 但每台机器的 repo 路径和 mesh 端口都不一样，必须能在外面覆盖。
+    /// </remarks>
+    private static HostApplicationBuilder CreateBuilder(string[] args)
+    {
+        var builder = Host.CreateApplicationBuilder(args);
+
+        var home = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".conclave");
+
+        _ = builder.Configuration
+            .AddJsonFile(Path.Combine(home, "appsettings.json"), optional: true, reloadOnChange: false)
+            .AddEnvironmentVariables("CONCLAVE_");
+
+        _ = builder.Logging.AddSimpleConsole(o =>
+        {
+            o.SingleLine = true;
+            o.TimestampFormat = "HH:mm:ss ";
+        });
+
+        return builder;
+    }
+
+    /// <summary>
     /// 评审一个指定的 PR 然后退出。不起 UI，也不起后台轮询。
     /// </summary>
     /// <remarks>
@@ -67,13 +89,8 @@ internal sealed class Program
     /// </remarks>
     private static int HeadlessReview(string[] args, int prId)
     {
-        var builder = Host.CreateApplicationBuilder(args);
-        _ = builder.Logging.AddSimpleConsole(o =>
-        {
-            o.SingleLine = true;
-            o.TimestampFormat = "HH:mm:ss ";
-        });
-        _ = builder.Services.AddConclaveNode();
+        var builder = CreateBuilder(args);
+        _ = builder.Services.AddConclaveNode(builder.Configuration);
 
         using var host = builder.Build();
         var services = host.Services;
