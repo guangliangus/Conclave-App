@@ -136,6 +136,54 @@ public sealed class DiscoveryService(
             $"已轮询 {share.Count} 个 project：看到 {seen} 个活跃 PR，新召集 {summoned} 个，跳过草稿 {skippedDraft} 个");
     }
 
+    /// <summary>
+    /// 只给一个 PR 号，跨 project 找到它并召集评议（插队）。
+    /// </summary>
+    /// <remarks>
+    /// 这是 <c>bridge.sh</c> 唯一需要保留的能力：人手上只有一个 4 位 PR 号，
+    /// 不想等下一轮轮询。链上已有该版本的 Summons 时直接返回，不重复写。
+    /// </remarks>
+    public async Task<Revision?> SummonAsync(int prId, CancellationToken ct)
+    {
+        await RefreshSelfAsync(ct).ConfigureAwait(false);
+
+        var pr = await prSource.FindPullRequestAsync(prId, ct).ConfigureAwait(false);
+        if (pr is null)
+        {
+            logger.LogError("找不到 PR {PrId}", prId);
+            return null;
+        }
+
+        if (string.IsNullOrEmpty(pr.SrcCommit))
+        {
+            logger.LogError("PR {PrId} 没有 lastMergeSourceCommit，无法构造幂等键", prId);
+            return null;
+        }
+
+        var revision = pr.ToRevision();
+        var chain = await acta.ReadChainAsync(revision.ChainId, ct).ConfigureAwait(false);
+        if (ActaProjection.Project(chain, revision.Id).Summons is not null)
+        {
+            logger.LogInformation("{Revision} 已在链上，无需重复召集", revision.Id);
+            return revision;
+        }
+
+        // 插队刻意不看 IsDraft：人明确指名要评的，草稿也评。
+        var quorum = Math.Max(1, SeatAssignment.QuorumSize(pr, _reserved));
+        var block = await acta.AppendAsync(
+            revision.ChainId,
+            BlockKind.Summons,
+            new SummonsPayload(revision, pr, quorum, _reserved.Fingerprint()),
+            ct).ConfigureAwait(false);
+
+        await mesh.BroadcastAsync(block, ct).ConfigureAwait(false);
+        logger.LogInformation(
+            "插队召集 {Revision} {Repo}「{Title}」 quorum={Quorum}（{Files} 文件 / {Lines} 行）",
+            revision.Id, pr.Repo, pr.Title, quorum, pr.FilesChanged, pr.LinesChanged);
+
+        return revision;
+    }
+
     /// <summary>刷新本节点的动态字段：已 clone 的 repo、有权限的 project、近 24h 票数。</summary>
     private async Task RefreshSelfAsync(CancellationToken ct)
     {
