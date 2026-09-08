@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <!-- 不能关：.editorconfig 把 IDE0005 设为 warning，而该分析器要求
+         GenerateDocumentationFile=true 才能运行，关掉会让零警告门禁直接报错。 -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Conclave.Application/Conclave.Application.csproj" />
+    <ProjectReference Include="../../src/Conclave.Domain/Conclave.Domain.csproj" />
+    <ProjectReference Include="../../src/Conclave.Infrastructure/Conclave.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

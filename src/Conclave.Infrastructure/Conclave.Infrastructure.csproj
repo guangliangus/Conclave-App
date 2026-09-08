@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Conclave.Application/Conclave.Application.csproj" />
+    <ProjectReference Include="../Conclave.Domain/Conclave.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Conclave.App/Conclave.App.csproj" />
+    <Project Path="src/Conclave.Application/Conclave.Application.csproj" />
+    <Project Path="src/Conclave.Domain/Conclave.Domain.csproj" />
+    <Project Path="src/Conclave.Infrastructure/Conclave.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Conclave.UnitTests/Conclave.UnitTests.csproj" />
+  </Folder>
+  <Folder Name="/docs/">
+    <File Path="docs/DESIGN.md" />
+    <File Path="README.md" />
+  </Folder>
+</Solution>

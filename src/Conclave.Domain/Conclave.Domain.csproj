@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 领域层零依赖。席位分配与哈希链规则必须是纯函数：
+       每个 Elector 都要能在不通信的前提下算出同一个结果。 -->
+
+</Project>

@@ -1,0 +1,41 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <!-- Avalonia 12.x 在 macOS 上走自带的 Objective-C++ 后端，不依赖 .NET macOS workload，
+       也不需要 Xcode（只要 Command Line Tools）。四个包必须同版本，混版会在启动时炸。 -->
+  <ItemGroup Label="UI">
+    <PackageVersion Include="Avalonia" Version="12.1.2" />
+    <PackageVersion Include="Avalonia.Desktop" Version="12.1.2" />
+    <PackageVersion Include="Avalonia.Themes.Fluent" Version="12.1.2" />
+    <PackageVersion Include="Avalonia.Fonts.Inter" Version="12.1.2" />
+    <PackageVersion Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.3" />
+    <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+  </ItemGroup>
+
+  <!-- Generic Host：UI 与后台 BackgroundService 同进程共存，见 docs/DESIGN.md「进程模型」 -->
+  <ItemGroup Label="Hosting">
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+  </ItemGroup>
+
+  <!-- Acta 账本落地。刻意不用 EF Core：账本是 append-only 的两列主键表，
+       手写 SQL 比 ORM 更直白，且 Infrastructure 不该为一张表拖进 EF 整栈。 -->
+  <ItemGroup Label="Data">
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+  </ItemGroup>
+
+  <!-- 签名用 System.Security.Cryptography 内置的 ECDsa P-256。
+       实测 .NET 10 不含 Ed25519（只有后量子 MLDsa/SlhDsa），
+       为一个签名算法引入 NSec/BouncyCastle 的原生依赖不值得。 -->
+
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+</Project>

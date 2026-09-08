@@ -1,0 +1,12 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+.DS_Store
+TestResults/
+*.dmp
+# 本节点的私钥与本地账本，永不入库
+acta.db
+acta.db-*
+elector.key

@@ -1,0 +1,150 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Conclave.App.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="1180" d:DesignHeight="760"
+        x:Class="Conclave.App.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Width="1180" Height="760"
+        MinWidth="900" MinHeight="520"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="Conclave">
+
+  <Window.Styles>
+    <Style Selector="TextBlock.h">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Opacity" Value="0.65" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.mono">
+      <Setter Property="FontFamily" Value="Menlo,Monaco,Consolas,monospace" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.cell">
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+  </Window.Styles>
+
+  <Grid RowDefinitions="Auto,Auto,*,4,240,Auto" Margin="12">
+
+    <!-- 节点信息与开关 -->
+    <Border Grid.Row="0" Padding="12" CornerRadius="6"
+            Background="{DynamicResource SystemControlBackgroundListLowBrush}">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Spacing="4">
+          <TextBlock Text="Conclave" FontSize="20" FontWeight="Bold" />
+          <StackPanel Orientation="Horizontal" Spacing="16">
+            <TextBlock Classes="mono" Text="{Binding NodeId, StringFormat='elector {0}'}" />
+            <TextBlock Classes="mono" Text="{Binding AzIdentity, StringFormat='az {0}'}" />
+            <TextBlock Classes="mono" Text="{Binding Capability}" />
+          </StackPanel>
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+          <CheckBox Content="自动评审" IsChecked="{Binding AutoReview}"
+                    ToolTip.Tip="关闭时只有手动点「评审」才会跑 claude，避免一开机就把所有活跃 PR 全评一遍" />
+          <CheckBox Content="投递到 AzDO" IsChecked="{Binding PostToAzureDevOps}"
+                    ToolTip.Tip="开启后公布结论时会往真实 PR 发评论并投票" />
+          <Button Content="立即轮询" Command="{Binding PollCommand}"
+                  IsEnabled="{Binding !IsPolling}" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- az 身份缺失警告 -->
+    <Border Grid.Row="1" Margin="0,8,0,0" Padding="10,8" CornerRadius="4"
+            Background="#33FF7A45" BorderBrush="#FF7A45" BorderThickness="1"
+            IsVisible="{Binding IdentityWarning, Converter={x:Static ObjectConverters.IsNotNull}}">
+      <TextBlock Text="{Binding IdentityWarning}" TextWrapping="Wrap" />
+    </Border>
+
+    <!-- PR 队列 -->
+    <Border Grid.Row="2" Margin="0,8,0,0" CornerRadius="6" BorderThickness="1"
+            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+      <Grid RowDefinitions="Auto,Auto,*">
+        <TextBlock Grid.Row="0" Margin="12,10,12,6" FontWeight="SemiBold"
+                   Text="PR 队列（幂等键 = PR 号 @ 源 commit 前 8 位）" />
+
+        <Grid Grid.Row="1" Margin="12,0,12,6"
+              ColumnDefinitions="150,150,*,120,110,80,90,150,80">
+          <TextBlock Grid.Column="0" Classes="h" Text="REVISION" />
+          <TextBlock Grid.Column="1" Classes="h" Text="REPO" />
+          <TextBlock Grid.Column="2" Classes="h" Text="标题" />
+          <TextBlock Grid.Column="3" Classes="h" Text="作者" />
+          <TextBlock Grid.Column="4" Classes="h" Text="阶段" />
+          <TextBlock Grid.Column="5" Classes="h" Text="QUORUM" />
+          <TextBlock Grid.Column="6" Classes="h" Text="本节点" />
+          <TextBlock Grid.Column="7" Classes="h" Text="结论" />
+          <TextBlock Grid.Column="8" Classes="h" Text="" />
+        </Grid>
+
+        <ListBox Grid.Row="2" ItemsSource="{Binding Pipeline}" Background="Transparent"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="vm:PrRow">
+              <Grid ColumnDefinitions="150,150,*,120,110,80,90,150,80" Height="30">
+                <TextBlock Grid.Column="0" Classes="cell mono" Text="{Binding RevisionId}" />
+                <TextBlock Grid.Column="1" Classes="cell" Text="{Binding Repo}"
+                           ToolTip.Tip="{Binding Project}" />
+                <TextBlock Grid.Column="2" Classes="cell" Text="{Binding Title}"
+                           ToolTip.Tip="{Binding Branches}" />
+                <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Author}" />
+                <TextBlock Grid.Column="4" Classes="cell" Text="{Binding Stage}" />
+                <TextBlock Grid.Column="5" Classes="cell" Text="{Binding Quorum}"
+                           ToolTip.Tip="{Binding Diff}" />
+                <TextBlock Grid.Column="6" Classes="cell" Text="{Binding Seat}" />
+                <TextBlock Grid.Column="7" Classes="cell" Text="{Binding Outcome}" />
+                <Button Grid.Column="8" Content="评审" Padding="8,2" FontSize="11"
+                        Command="{Binding ReviewCommand}" CommandParameter="{Binding}"
+                        IsEnabled="{Binding CanReview}" />
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Grid>
+    </Border>
+
+    <GridSplitter Grid.Row="3" ResizeDirection="Rows" Background="Transparent" />
+
+    <!-- Acta 账本 -->
+    <Border Grid.Row="4" CornerRadius="6" BorderThickness="1"
+            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+      <Grid RowDefinitions="Auto,Auto,*">
+        <TextBlock Grid.Row="0" Margin="12,10,12,6" FontWeight="SemiBold"
+                   Text="Acta 会议录（append-only，每块含前块哈希与本节点签名）" />
+
+        <Grid Grid.Row="1" Margin="12,0,12,6" ColumnDefinitions="110,220,50,110,120,*">
+          <TextBlock Grid.Column="0" Classes="h" Text="时间" />
+          <TextBlock Grid.Column="1" Classes="h" Text="链" />
+          <TextBlock Grid.Column="2" Classes="h" Text="#" />
+          <TextBlock Grid.Column="3" Classes="h" Text="类型" />
+          <TextBlock Grid.Column="4" Classes="h" Text="HASH" />
+          <TextBlock Grid.Column="5" Classes="h" Text="摘要" />
+        </Grid>
+
+        <ListBox Grid.Row="2" ItemsSource="{Binding Blocks}" Background="Transparent"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="vm:BlockRow">
+              <Grid ColumnDefinitions="110,220,50,110,120,*" Height="24">
+                <TextBlock Grid.Column="0" Classes="cell mono" Text="{Binding At}" />
+                <TextBlock Grid.Column="1" Classes="cell mono" Text="{Binding Chain}" />
+                <TextBlock Grid.Column="2" Classes="cell mono" Text="{Binding Index}" />
+                <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Kind}" />
+                <TextBlock Grid.Column="4" Classes="cell mono" Text="{Binding Hash}"
+                           ToolTip.Tip="{Binding Elector, StringFormat='签名节点 {0}'}" />
+                <TextBlock Grid.Column="5" Classes="cell mono" Text="{Binding Summary}" />
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Grid>
+    </Border>
+
+    <!-- 状态栏 -->
+    <TextBlock Grid.Row="5" Margin="4,10,4,0" Opacity="0.75" TextWrapping="Wrap"
+               Text="{Binding Status}" />
+  </Grid>
+</Window>
