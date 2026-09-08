@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  常驻运行 Conclave。
+
+  装法：
+    cp scripts/com.liontravel.conclave.plist ~/Library/LaunchAgents/
+    # 把下面的路径改成 .app 的实际位置
+    launchctl load ~/Library/LaunchAgents/com.liontravel.conclave.plist
+  改了 plist 之后重启：
+    launchctl kickstart -k gui/$(id -u)/com.liontravel.conclave
+
+  ⚠️ 必须是 LaunchAgent（~/Library/LaunchAgents），不能是 LaunchDaemon。
+     Daemon 在没有图形会话的上下文里跑，带 UI 的进程在那里起不来。
+     这跟 lark-claude-bridge 用的是同一套机制。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.liontravel.conclave</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/Conclave.app/Contents/MacOS/conclave</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- claude / az / git 都装在这些目录下；launchd 的默认 PATH 里没有它们 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/conclave.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/conclave.err.log</string>
+</dict>
+</plist>

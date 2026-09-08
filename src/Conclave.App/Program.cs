@@ -68,6 +68,11 @@ internal sealed class Program
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".conclave");
 
         _ = builder.Configuration
+            // 显式加程序目录那份：Host.CreateApplicationBuilder 默认从 ContentRoot（工作目录）读，
+            // 而 Finder 启动 .app 时工作目录是 /，打包进去的 appsettings.json 就永远读不到。
+            .AddJsonFile(
+                Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
+                optional: true, reloadOnChange: false)
             .AddJsonFile(Path.Combine(home, "appsettings.json"), optional: true, reloadOnChange: false)
             .AddEnvironmentVariables("CONCLAVE_");
 

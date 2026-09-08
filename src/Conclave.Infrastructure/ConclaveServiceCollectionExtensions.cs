@@ -24,7 +24,7 @@ public static class ConclaveServiceCollectionExtensions
 
         var opts = new ConclaveOptions();
         configuration.GetSection("Conclave").Bind(opts);
-        return services.AddConclaveNode(opts);
+        return services.AddConclaveNode(opts.ApplyDefaults());
     }
 
     /// <summary>
@@ -40,7 +40,7 @@ public static class ConclaveServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
-        var opts = options ?? new ConclaveOptions();
+        var opts = (options ?? new ConclaveOptions()).ApplyDefaults();
         _ = services.AddSingleton(opts);
 
         _ = services.AddSingleton(sp =>

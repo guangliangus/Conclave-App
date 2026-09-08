@@ -27,17 +27,34 @@ public sealed class ConclaveOptions
     public int MaxConcurrent { get; set; } = 2;
 
     /// <summary>
-    /// 去这些目录下找已 clone 的 repo。支持 <c>~</c> 前缀。
+    /// 没有任何配置时用的 repo 搜索根目录。
     /// </summary>
     /// <remarks>
-    /// 刻意可写：配置绑定对只读集合是「往里追加」，那样配置文件永远删不掉默认项。
+    /// 默认值刻意不写在属性初始化器里。.NET 的配置绑定对集合属性是**追加**语义
+    /// （接口类型的集合有没有 setter 都一样），所以「属性带默认值 + 配置文件里再列一遍」
+    /// 会得到两份 —— 实测 .app 启动日志里这个列表确实重复了一遍。
+    /// 改为绑定后由 <c>AddConclaveNode</c> 判空回填，语义变成「配置给了就用配置，没给才用默认」。
     /// </remarks>
-    public IList<string> RepoSearchRoots { get; set; } = [
+    public static IReadOnlyList<string> DefaultRepoSearchRoots { get; } = [
         "~/projects",
         "~/C#Projects",
         "~/C#Projects/guang",
         "~/goWorkSpace",
     ];
+
+    /// <summary>去这些目录下找已 clone 的 repo。支持 <c>~</c> 前缀。留空则用 <see cref="DefaultRepoSearchRoots"/>。</summary>
+    public IList<string> RepoSearchRoots { get; set; } = [];
+
+    /// <summary>把留空的集合回填成默认值。绑定完配置后调一次。</summary>
+    public ConclaveOptions ApplyDefaults()
+    {
+        if (RepoSearchRoots.Count == 0)
+        {
+            RepoSearchRoots = [.. DefaultRepoSearchRoots];
+        }
+
+        return this;
+    }
 
     /// <summary>只轮询这些 project；留空表示全部。</summary>
     public IList<string> ProjectAllowList { get; set; } = [];
