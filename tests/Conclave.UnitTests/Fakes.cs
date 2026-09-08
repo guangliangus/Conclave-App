@@ -108,7 +108,7 @@ internal sealed class FakeMesh : IMesh
         get { lock (_gate) { return _self; } }
     }
 
-    public IReadOnlyList<Elector> Alive => [Self, .. Peers];
+    public IReadOnlyList<Elector> Members => [Self, .. Peers];
 
     public Task BroadcastAsync(Block block, CancellationToken ct)
     {

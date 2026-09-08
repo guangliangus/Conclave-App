@@ -127,7 +127,7 @@ public sealed class ReviewOrchestrator : BackgroundService
             // 传入 Recess 数：每次弃权都追加一个重试轮次，否则单节点 mesh 上
             // 一次超时会让这个 PR 永远卡在「没票也没人接管」。
             var seats = SeatAssignment.Seats(
-                revision, pr, _mesh.Alive, _reserved, now, extraRounds: chain.Recessed.Count);
+                revision, pr, _mesh.Members, _reserved, now, extraRounds: chain.Recessed.Count);
             var mySeat = FirstOpenSeat(seats, self.Id, chain);
 
             views.Add(BuildView(revision, chain, mySeat));

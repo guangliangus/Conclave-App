@@ -132,14 +132,14 @@ public sealed class SqliteActa : IActaStore
         }
     }
 
-    public async Task<bool> TryApplyAsync(Block block, CancellationToken ct)
+    public async Task<ApplyResult> TryApplyAsync(Block block, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(block);
 
         if (!block.VerifySignature())
         {
             _logger.LogWarning("拒收区块 {Chain}#{Index}：验签失败", block.ChainId, block.Index);
-            return false;
+            return ApplyResult.Rejected;
         }
 
         if (!_allowList.IsAllowed(block.ElectorId))
@@ -147,7 +147,7 @@ public sealed class SqliteActa : IActaStore
             _logger.LogWarning(
                 "拒收区块 {Chain}#{Index}：节点 {Elector} 不在白名单",
                 block.ChainId, block.Index, block.ElectorId);
-            return false;
+            return ApplyResult.Rejected;
         }
 
         await _writeGate.WaitAsync(ct).ConfigureAwait(false);
@@ -160,17 +160,19 @@ public sealed class SqliteActa : IActaStore
             {
                 if (existing.Hash() == block.Hash())
                 {
-                    return true;   // 同一个块被 gossip 送了两遍，幂等。
+                    return ApplyResult.AlreadyPresent;   // 同一个块被 gossip 送了两遍。
                 }
 
                 // 分区合并：同 index 两个不同块，blockHash 字典序小者胜出。
-                // 己方更小则保留己方；对方更小则本地这一块要让位 —— P2 实现 rebase，
-                // P0 阶段先记日志，因为单节点不会走到这里。
-                var keepMine = string.CompareOrdinal(existing.Hash(), block.Hash()) < 0;
-                _logger.LogWarning(
-                    "索引冲突 {Chain}#{Index}：{Winner} 胜出（rebase 待 P2 实现）",
-                    block.ChainId, block.Index, keepMine ? "本地" : "远端");
-                return false;
+                // 双方各自独立执行同一规则，所以不需要协商就会收敛到同一条链。
+                if (string.CompareOrdinal(existing.Hash(), block.Hash()) < 0)
+                {
+                    _logger.LogInformation(
+                        "索引冲突 {Chain}#{Index}：本地块胜出，拒收远端块", block.ChainId, block.Index);
+                    return ApplyResult.Rejected;
+                }
+
+                return await RebaseAsync(conn, block, ct).ConfigureAwait(false);
             }
 
             var (tailIndex, tailHash) = await ReadTailAsync(conn, block.ChainId, ct).ConfigureAwait(false);
@@ -181,17 +183,17 @@ public sealed class SqliteActa : IActaStore
                 _logger.LogInformation(
                     "区块 {Chain}#{Index} 与本地链尾 {Tail} 不连续，需要补链（P2 的 PullChain）",
                     block.ChainId, block.Index, tailIndex);
-                return false;
+                return ApplyResult.Rejected;
             }
 
             if (block.PrevHash != expectedPrev)
             {
                 _logger.LogWarning("区块 {Chain}#{Index} 的 PrevHash 与本地链尾不符", block.ChainId, block.Index);
-                return false;
+                return ApplyResult.Rejected;
             }
 
             await InsertAsync(conn, block, ct).ConfigureAwait(false);
-            return true;
+            return ApplyResult.Accepted;
         }
         finally
         {
@@ -271,9 +273,100 @@ public sealed class SqliteActa : IActaStore
         return Convert.ToInt32(result, CultureInfo.InvariantCulture);
     }
 
-    private static async Task InsertAsync(SqliteConnection conn, Block block, CancellationToken ct)
+    /// <summary>
+    /// 让远端块占据它的索引，把本地从该索引起的整段重挂到新链尾。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>这是账本唯一会删块的操作。</b>「append-only」的准确说法是「无冲突时只追加」：
+    /// 索引冲突必须有一方让位，否则两条链永远不可能一致。让位规则是纯函数
+    /// （blockHash 字典序小者胜出），所以所有节点会算出同一个结果。
+    /// </para>
+    /// <para>
+    /// 让位不能只删冲突那一块 —— 它后面每一块的 <c>PrevHash</c> 都指向它，删掉就断链了。
+    /// 所以整段摘下来重挂。而重挂要改 <c>Index</c> 和 <c>PrevHash</c>，这两个字段在签名范围内，
+    /// 于是<b>只有本节点自己写的块能重签</b>；别人签的块我们没有它的私钥，只能丢弃，
+    /// 等其作者在自己那边做同样的 rebase 后重推。
+    /// </para>
+    /// <para>
+    /// 整个过程在一个事务里：中途崩掉不能留下一条断了的链。
+    /// </para>
+    /// </remarks>
+    private async Task<ApplyResult> RebaseAsync(SqliteConnection conn, Block winner, CancellationToken ct)
+    {
+        var displaced = await ReadFromAsync(conn, winner.ChainId, winner.Index, ct).ConfigureAwait(false);
+
+        await using var tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        await DeleteFromAsync(conn, tx, winner.ChainId, winner.Index, ct).ConfigureAwait(false);
+        await InsertAsync(conn, winner, ct, tx).ConfigureAwait(false);
+
+        var reattached = new List<Block>();
+        var dropped = 0;
+        var index = winner.Index;
+        var prevHash = winner.Hash();
+
+        foreach (var block in displaced)
+        {
+            if (block.ElectorId != _identity.Id)
+            {
+                // 别人的块改了 Index/PrevHash 就签不回去了，只能丢，等其作者重推。
+                dropped++;
+                continue;
+            }
+
+            index++;
+            var moved = block with { Index = index, PrevHash = prevHash, Signature = string.Empty };
+            moved = moved with { Signature = _identity.Sign(moved.SigningPayload()) };
+
+            await InsertAsync(conn, moved, ct, tx).ConfigureAwait(false);
+            prevHash = moved.Hash();
+            reattached.Add(moved);
+        }
+
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+
+        _logger.LogWarning(
+            "索引冲突 {Chain}#{Index}：远端块胜出，本地重挂 {Reattached} 块、丢弃 {Dropped} 块（待其作者重推）",
+            winner.ChainId, winner.Index, reattached.Count, dropped);
+
+        return new ApplyResult(ApplyOutcome.Applied, reattached);
+    }
+
+    private static async Task<IReadOnlyList<Block>> ReadFromAsync(
+        SqliteConnection conn, string chainId, long fromIndex, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT chain_id, block_index, prev_hash, created_at, kind, payload,
+                   elector_id, public_key, signature
+            FROM blocks
+            WHERE chain_id = $chain AND block_index >= $from
+            ORDER BY block_index
+            """;
+        _ = cmd.Parameters.AddWithValue("$chain", chainId);
+        _ = cmd.Parameters.AddWithValue("$from", fromIndex);
+        return await ReadAllAsync(cmd, ct).ConfigureAwait(false);
+    }
+
+    private static async Task DeleteFromAsync(
+        SqliteConnection conn, System.Data.Common.DbTransaction tx,
+        string chainId, long fromIndex, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx as SqliteTransaction;
+        cmd.CommandText = "DELETE FROM blocks WHERE chain_id = $chain AND block_index >= $from";
+        _ = cmd.Parameters.AddWithValue("$chain", chainId);
+        _ = cmd.Parameters.AddWithValue("$from", fromIndex);
+        _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    private static async Task InsertAsync(
+        SqliteConnection conn, Block block, CancellationToken ct,
+        System.Data.Common.DbTransaction? tx = null)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx as SqliteTransaction;
         cmd.CommandText = """
             INSERT INTO blocks
                 (chain_id, block_index, prev_hash, block_hash, created_at, kind, payload,

@@ -1,6 +1,7 @@
 using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
+using Conclave.Infrastructure.Mesh;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -71,7 +72,7 @@ public static class ConclaveServiceCollectionExtensions
         _ = services.AddSingleton<SqliteActa>();
         _ = services.AddSingleton<IActaStore>(sp => sp.GetRequiredService<SqliteActa>());
 
-        _ = services.AddSingleton<IMesh>(sp =>
+        _ = services.AddSingleton(sp =>
         {
             var identity = sp.GetRequiredService<ElectorIdentity>();
             var logger = sp.GetRequiredService<ILogger<LocalMesh>>();
@@ -90,15 +91,32 @@ public static class ConclaveServiceCollectionExtensions
                 logger.LogError(ex, "读不到 az 登录身份 —— 「不评审自己的 PR」将失效，请跑 az devops login");
             }
 
-            return new LocalMesh(new Elector
+            return new Elector
             {
                 Id = identity.Id,
                 PublicKey = identity.PublicKey,
                 AzIdentity = azIdentity,
                 MaxConcurrent = opts.MaxConcurrent,
                 LastHeartbeat = DateTimeOffset.UtcNow,
-            });
+            };
         });
+
+        // mesh 关掉时用 LocalMesh（成员只有自己），席位分配的代码两边完全一样 ——
+        // 于是 P0 的行为和 P1 的行为走的是同一条编排逻辑。
+        if (opts.Mesh.Enabled)
+        {
+            _ = services.AddSingleton(sp => new HttpMesh(
+                sp.GetRequiredService<Elector>(),
+                sp.GetRequiredService<IElectorAllowList>(),
+                sp.GetRequiredService<ConclaveOptions>(),
+                sp.GetRequiredService<ILogger<HttpMesh>>()));
+            _ = services.AddSingleton<IMesh>(sp => sp.GetRequiredService<HttpMesh>());
+            _ = services.AddHostedService<MeshService>();
+        }
+        else
+        {
+            _ = services.AddSingleton<IMesh>(sp => new LocalMesh(sp.GetRequiredService<Elector>()));
+        }
 
         _ = services.AddSingleton<DiscoveryService>();
         _ = services.AddSingleton<ReviewOrchestrator>();

@@ -1,4 +1,5 @@
 using Conclave.Application;
+using Conclave.Application.Ports;
 using Conclave.Domain;
 using Conclave.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -138,7 +139,7 @@ public sealed class SqliteActaTests : IDisposable
         var block = SignAs(stranger, Rev.ChainId, 0, Block.GenesisPrevHash);
 
         // 白名单不是「以后再加」：别人的块会让别人的评审任务落到本机跑 Bash。
-        Assert.False(await _acta.TryApplyAsync(block, ct));
+        Assert.False((await _acta.TryApplyAsync(block, ct)).Applied);
         Assert.Empty(await _acta.ReadChainAsync(Rev.ChainId, ct));
     }
 
@@ -151,7 +152,7 @@ public sealed class SqliteActaTests : IDisposable
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
 
-        Assert.True(await _acta.TryApplyAsync(block, ct));
+        Assert.True((await _acta.TryApplyAsync(block, ct)).Applied);
         Assert.Single(await _acta.ReadChainAsync(Rev.ChainId, ct));
     }
 
@@ -165,11 +166,11 @@ public sealed class SqliteActaTests : IDisposable
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
         var tampered = block with { PayloadJson = """{"evil":true}""" };
 
-        Assert.False(await _acta.TryApplyAsync(tampered, ct));
+        Assert.False((await _acta.TryApplyAsync(tampered, ct)).Applied);
     }
 
     [Fact]
-    public async Task Re_applying_the_same_block_is_idempotent()
+    public async Task Re_applying_the_same_block_is_idempotent_but_not_novel()
     {
         var ct = CancellationToken.None;
         using var peer = ElectorIdentity.Create();
@@ -177,8 +178,18 @@ public sealed class SqliteActaTests : IDisposable
 
         var block = SignAs(peer, Rev.ChainId, 0, Block.GenesisPrevHash);
 
-        Assert.True(await _acta.TryApplyAsync(block, ct));
-        Assert.True(await _acta.TryApplyAsync(block, ct));   // gossip 送了两遍
+        var first = await _acta.TryApplyAsync(block, ct);
+        var second = await _acta.TryApplyAsync(block, ct);   // gossip 送了两遍
+
+        Assert.Equal(ApplyOutcome.Applied, first.Outcome);
+        Assert.True(first.Novel);
+
+        // 第二遍仍算「在账本里」，但**不是新块** —— gossip 只转发新块，
+        // 否则区块会在两个节点之间无限回弹，实测把进程 OOM 掉过。
+        Assert.Equal(ApplyOutcome.AlreadyPresent, second.Outcome);
+        Assert.True(second.Applied);
+        Assert.False(second.Novel);
+
         Assert.Single(await _acta.ReadChainAsync(Rev.ChainId, ct));
     }
 
@@ -192,7 +203,7 @@ public sealed class SqliteActaTests : IDisposable
         // index 5 但本地链是空的 —— 需要先补链（P2 的 PullChain），不能直接落。
         var block = SignAs(peer, Rev.ChainId, 5, Block.GenesisPrevHash);
 
-        Assert.False(await _acta.TryApplyAsync(block, ct));
+        Assert.False((await _acta.TryApplyAsync(block, ct)).Applied);
     }
 
     [Fact]
@@ -205,7 +216,7 @@ public sealed class SqliteActaTests : IDisposable
         _ = await _acta.AppendAsync(Rev.ChainId, BlockKind.Summons, Summons(), ct);
         var block = SignAs(peer, Rev.ChainId, 1, prevHash: new string('9', 64));
 
-        Assert.False(await _acta.TryApplyAsync(block, ct));
+        Assert.False((await _acta.TryApplyAsync(block, ct)).Applied);
     }
 
     [Fact]

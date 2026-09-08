@@ -32,6 +32,12 @@ internal sealed class Program
             return HeadlessReview(args, prId);
         }
 
+        // 无 UI 常驻：只贡献算力的 worker 机器用这个，也是本机跑多节点联调的方式。
+        if (args is ["serve", ..])
+        {
+            return Serve(args);
+        }
+
         var builder = CreateBuilder(args);
         _ = builder.Services.AddConclaveNode(builder.Configuration);
         _ = builder.Services.AddSingleton<MainViewModel>();
@@ -53,6 +59,23 @@ internal sealed class Program
     }
 
     /// <summary>
+    /// 起全部后台服务但不开窗口，直到 Ctrl+C。
+    /// </summary>
+    /// <remarks>
+    /// 跟 UI 模式的区别只有「不启动 Avalonia」—— 轮询、编排、mesh 三个后台服务
+    /// 完全一样。这也是 <c>Application 不引任何 UI 框架</c> 那条架构守卫的实际用途。
+    /// </remarks>
+    private static int Serve(string[] args)
+    {
+        var builder = CreateBuilder(args);
+        _ = builder.Services.AddConclaveNode(builder.Configuration);
+
+        using var host = builder.Build();
+        host.Run();
+        return 0;
+    }
+
+    /// <summary>
     /// 配置来源，从弱到强：程序目录的 appsettings.json → <c>~/.conclave/appsettings.json</c>
     /// → <c>CONCLAVE_</c> 前缀的环境变量 → 命令行。
     /// </summary>
@@ -63,9 +86,7 @@ internal sealed class Program
     private static HostApplicationBuilder CreateBuilder(string[] args)
     {
         var builder = Host.CreateApplicationBuilder(args);
-
-        var home = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".conclave");
+        var home = ResolveHome(args);
 
         _ = builder.Configuration
             // 显式加程序目录那份：Host.CreateApplicationBuilder 默认从 ContentRoot（工作目录）读，
@@ -83,6 +104,28 @@ internal sealed class Program
         });
 
         return builder;
+    }
+
+    /// <summary>
+    /// 先探出 <c>Conclave:HomeDirectory</c>。
+    /// </summary>
+    /// <remarks>
+    /// 配置文件本身就放在这个目录下，所以必须先知道目录才能加载它 —— 直接把路径写死成
+    /// <c>~/.conclave</c> 会导致：用 <c>CONCLAVE_Conclave__HomeDirectory</c> 换了目录之后，
+    /// 私钥和账本搬走了，配置却还在读老地方。实测本机跑双节点时两个节点都读到了
+    /// <c>mesh 关</c>，正是这个原因。
+    /// </remarks>
+    private static string ResolveHome(string[] args)
+    {
+        var bootstrap = new ConfigurationBuilder()
+            .AddEnvironmentVariables("CONCLAVE_")
+            .AddCommandLine(args)
+            .Build();
+
+        var configured = bootstrap["Conclave:HomeDirectory"];
+        return string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".conclave")
+            : configured;
     }
 
     /// <summary>

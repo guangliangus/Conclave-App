@@ -32,7 +32,7 @@ public sealed class LocalMesh : IMesh
         }
     }
 
-    public IReadOnlyList<Elector> Alive => [Self];
+    public IReadOnlyList<Elector> Members => [Self];
 
     /// <summary>P0 无对等节点，空操作。</summary>
     public Task BroadcastAsync(Block block, CancellationToken ct) => Task.CompletedTask;

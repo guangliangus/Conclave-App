@@ -18,9 +18,11 @@ Conclave.Infrastructure   SqliteActa / AzCliPrSource / ClaudeReviewRunner
 前置：`.NET 10 SDK`、`az`（已 `az devops login`）、`claude`、`git`。
 
 ```bash
-dotnet test Conclave.slnx                            # 103 个测试
-dotnet run --project src/Conclave.App                # 起 UI + 后台轮询
+dotnet test Conclave.slnx                            # 136 个测试
+dotnet run --project src/Conclave.App                # 起 UI + 后台服务
+dotnet run --project src/Conclave.App -- serve       # 无 UI 常驻（worker 机器 / 本机联调）
 dotnet run --project src/Conclave.App -- review 2878 # 无头：只评这一个 PR 然后退出
+scripts/package-macos.sh                             # 打成 dist/Conclave.app
 ```
 
 无头模式的退出码给脚本用：
@@ -73,10 +75,32 @@ skill（`~/.claude/skills/az-pr-review/SKILL.md` §7）在这个模式下**跳�
 **为什么 skill 必须跳过投递**：quorum=3 时有 3 个节点跑同一个 PR，若各自都投递，
 一个 PR 会收到 3 条重复评论和 3 次投票。投递只由最低未弃权席位的节点在收齐票后做一次。
 
+## 组 mesh
+
+1. 每台机器起一次，记下 UI 左上角或日志里的 `elector` 指纹
+2. 互相把对方的指纹写进 `~/.conclave/electors.allow`（改动即时生效，见
+   `scripts/electors.allow.example`）
+3. 在 `~/.conclave/appsettings.json` 里打开 `Conclave.Mesh.Enabled`
+
+```
+UDP 多播 239.255.42.7:47707   ← 签名心跳（谁在线 + HTTP 端点 + 能力）
+HTTP     :47708               ← POST /blocks · GET /chains/{id} · GET /elector
+```
+
+**白名单决定「谁的评审任务可以在你的机器上跑 Bash」**，只加同一团队、本来就都有对应
+repo 权限的人的机器。文件不存在 = 只信任自己 = 单机模式。
+
+本机跑两个节点联调：
+
+```bash
+CONCLAVE_Conclave__HomeDirectory=/tmp/node-a dotnet run --project src/Conclave.App -- serve
+CONCLAVE_Conclave__HomeDirectory=/tmp/node-b dotnet run --project src/Conclave.App -- serve
+```
+
 ## 已知限制
 
-- **mesh 只有自己**（`LocalMesh`）。P1 才接 mDNS + gRPC，届时**节点白名单必须同步上线** ——
-  别人的 Seating 块会让别人的评审任务在你机器上跑 `Bash`。
+- **跨网段不通**。UDP 多播只在同一网段内扩散，远程办公需要一个固定 IP 的种子节点
+  （尚未实现）。
 - **diff 统计依赖本机 clone**。`RepoSearchRoots` 里找不到对应 repo 时统计为 0，
   quorum 退到 1（安全方向）。定位器按目录名**和** `origin` 解析出的远端仓库名两者登记，
   所以 `~/projects/user_svc`（远端叫 `liontrip-user`）也能认出来。
@@ -93,3 +117,9 @@ skill（`~/.claude/skills/az-pr-review/SKILL.md` §7）在这个模式下**跳�
    要用 `bigEndian: true` 重载，否则派生出来的 UUID 版本号是错的。
 4. **测试里别调 `SqliteConnection.ClearAllPools()`** —— 它是进程全局的，会把并行跑的
    其他测试的连接池一起清掉，制造难查的偶发失败。
+5. **中文紧贴 shell 变量要加花括号** —— bash 把多字节字符当成变量名的合法字符，
+   `"$executed，"` 会被解析成变量名 `executed，`，在 `set -u` 下报未绑定。
+6. **配置绑定对集合是追加语义**（接口类型集合有没有 setter 都一样），属性初始化器里
+   带默认值 + 配置文件再列一遍 = 两份。默认值要在绑定后判空回填。
+7. **gossip 只能转发新块** —— 对「本来就有」也转发会让区块在两节点间无限回弹，
+   实测把进程 OOM 掉过。

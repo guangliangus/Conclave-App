@@ -30,6 +30,23 @@ public sealed class DiscoveryService(
         // 首轮先探一次身份与 project 权限，失败就退化成空闲循环而不是崩掉 UI。
         await RefreshSelfAsync(stoppingToken).ConfigureAwait(false);
 
+        // mesh 冷启动时谁都还没收到别人的心跳，于是每个节点都以为 34 个 project 全归自己 ——
+        // 结果同一批 PR 被所有节点各召集一遍，在 index 0 上撞成一堆索引冲突。
+        // 等两个心跳周期，让成员表先收敛。
+        if (options.Mesh.Enabled)
+        {
+            var settle = options.Mesh.BeaconInterval * 2;
+            logger.LogInformation("等 {Settle} 让 mesh 成员表收敛后再开始轮询", settle);
+            try
+            {
+                await Task.Delay(settle, stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+
         using var timer = new PeriodicTimer(options.PollInterval);
         do
         {
@@ -61,7 +78,7 @@ public sealed class DiscoveryService(
             ? options.ProjectAllowList.ToList()
             : (await prSource.ListProjectsAsync(ct).ConfigureAwait(false)).ToList();
 
-        var share = SeatAssignment.DiscoveryShare(self.Id, projects, mesh.Alive, DateTimeOffset.UtcNow);
+        var share = SeatAssignment.DiscoveryShare(self.Id, projects, mesh.Members, DateTimeOffset.UtcNow);
         state.SetStatus($"轮询 {share.Count}/{projects.Count} 个 project（其余由 mesh 内其他节点负责）");
 
         var summoned = 0;

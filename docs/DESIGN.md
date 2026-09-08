@@ -109,11 +109,56 @@ public sealed record Block(
 [5] Promulgation decision=reject  merged=6  threadId=8821
 ```
 
-**落库**：SQLite，主键 `(ChainId, Index)`。append 前校验三件事——签名有效、
-`ElectorId` 在白名单、`PrevHash` 等于本地链尾哈希。
+**落库**：SQLite，自增代理主键 + `(chain_id, block_index)` 唯一索引。append 前校验三件事——
+签名有效、`ElectorId` 在白名单、`PrevHash` 等于本地链尾哈希。
 
-**冲突解决**（网络分区合并后同 `(ChainId, Index)` 收到两个块）：取 **blockHash
-字典序小**者胜出，另一个 rebase 到下一个 index。确定性，无需协商。
+### 冲突解决与 append-only 的边界
+
+同 `(ChainId, Index)` 收到两个不同块时（网络分区合并后），取 **blockHash 字典序小**者胜出。
+规则是纯函数，双方各自执行会得到同一结果，无需协商。
+
+**「append-only」的准确说法是「无冲突时只追加」。** 让位必须真的删块，否则两条链不可能一致。
+而且不能只删冲突那一块——它后面每一块的 `PrevHash` 都指向它，删掉就断链了，所以整段摘下来重挂。
+
+重挂要改 `Index` 和 `PrevHash`，这两个字段在签名范围内，于是：
+
+| 被挤下来的块 | 处理 |
+|---|---|
+| **本节点自己写的** | 改索引后重新签名，挂到新链尾 |
+| **别人写的** | 丢弃 —— 我们没有它的私钥，签不回去；等其作者在自己那边做同样的 rebase 后重推 |
+
+重挂出来的块**必须继续广播**（`ApplyResult.Rebased`）。否则对端不知道它们换了索引，
+两边永远不会收敛——这一步漏了的话单测都是绿的，只有双节点跑起来才看得出。
+
+整个过程在一个事务里：中途崩掉不能留下一条断了的链。
+
+## 5.5 传输层：两处偏离本文档原方案
+
+| 原方案 | 实际采用 | 理由 |
+|---|---|---|
+| mDNS / Bonjour | **UDP 多播信标**（`239.255.42.7:47707`） | 这里需要的只是「谁在线 + 它的 HTTP 端点」，不需要 DNS-SD 的服务/实例/TXT 那一整套。`Makaretu.Dns` 久未维护，自己发一个签名 JSON 约 120 行且零依赖，`nc -ul 47707` 就能看 |
+| gRPC | **`HttpListener` 上的 HTTP/JSON** | 区块本来就是 JSON，上 gRPC 要多一个 `.proto` 并让它跟 `Block` record 保持同步；Kestrel 还要把 ASP.NET Core 框架引用拖进 Avalonia 进程、把 host 从 `HostApplicationBuilder` 改造成 `WebApplicationBuilder`。内网三个接口不值得 |
+
+接口：`POST /blocks` 收区块、`GET /chains/{id}` 供对方补链、`GET /elector` 方便 curl 排查。
+
+### 心跳必须签名
+
+席位分配完全由心跳里的字段决定（有哪些 repo、哪些 project、当前负载），
+伪造一个「空闲、什么 repo 都有」的心跳就能把席位全吸到自己名下然后永不出票——
+那会让所有 PR 卡在弃权重试的循环里。所以 `Beacon` 带签名，收方验四件事：
+签名有效、公钥指纹与自称 Id 一致、在白名单内、时间戳新鲜（挡重放）。
+
+### gossip 只转发新块
+
+转发前必须区分「刚落进来」和「本来就有」。对后者也转发会让区块在两个节点之间
+**无限回弹**，每跳都新起 HTTP 请求——双节点实测时进程直接 `Out of memory` 崩了。
+只转发新块也顺带解决了三节点以上的环路：转一圈回来时本地已经有了。
+
+### 冷启动要先等成员表收敛
+
+`DiscoveryService` 的第一轮轮询是立即执行的（do-while）。mesh 冷启动时谁都还没收到
+别人的心跳，于是每个节点都以为所有 project 全归自己，同一批 PR 被所有节点各召集一遍，
+在 index 0 上撞成一堆索引冲突。所以 mesh 开启时第一轮轮询前先等两个心跳周期。
 
 ## 6. 发现层：34 个 project 怎么分
 
@@ -254,8 +299,8 @@ Conclave.Infrastructure   SqliteActa / AzCliPrSource / ClaudeReviewRunner
 |---|---|---|
 | **P0** | Avalonia 壳 + az 轮询 + 本地 Acta + 手动触发 review | ✅ 2026-09-08 |
 | **P0.5** | `srcCommit` 幂等键跑通：PR 新 push 自动重跑，不 push 不重复烧 token | ✅ 2026-09-08 |
-| **P1** | mDNS 发现 + gRPC 心跳，心跳带 `Repos/Projects/AzIdentity/RunningJobs` | ⬜ |
-| **P2** | Block gossip + PullChain 补链 + 冲突解决 | ⬜ |
+| **P1** | mesh 发现 + 签名心跳，心跳带 `Repos/Projects/AzIdentity/RunningJobs` | ✅ 2026-09-08 |
+| **P2** | Block gossip + 补链 + 索引冲突让位重挂 | ✅ 2026-09-08 |
 | **P3** | project 分片轮询 + 硬规则过滤 + 加权 HRW 认领 | ⬜ |
 | **P4** | quorum 自适应 + findings 合并 + 单节点投递 | ⬜ |
 | ~~P5~~ | ~~飞书 gateway~~ —— 主动轮询比被动等消息更完整，`bridge.sh` 只留「手动指定 PR 号插队」 | ❌ 砍掉 |
@@ -274,8 +319,10 @@ Conclave.Infrastructure   SqliteActa / AzCliPrSource / ClaudeReviewRunner
 
 ## 14. 安全约束
 
-1. **节点白名单是 P1 的一部分，不是「以后再加」。** 别人的 job 会在你的机器上跑
-   `Bash`。`Seating` 块必须验签且 `ElectorId` 在白名单内，否则拒绝 apply。
+1. **节点白名单已随 P1 上线。** 别人的 job 会在你的机器上跑 `Bash`。名单是
+   `~/.conclave/electors.allow`（每行一个 elector 指纹，`#` 注释，按 mtime 热重载）；
+   文件不存在 = 只信任自己 = 单机模式。区块与心跳都要过这道闸，且**白名单检查在冲突判定之前**——
+   否则外人只要造一个哈希更小的块就能改写别人的链。
 2. **`--disallowedTools "Bash"` 挡不住命令执行**——Claude 会用 Monitor/子代理绕过。
    要么锁全（含 Monitor/Agent/TaskCreate），要么按需正常放开。这条是踩过的坑。
 3. **代码会离开本机。** node-B 评审 payment-center 意味着 node-B 上有完整代码。
