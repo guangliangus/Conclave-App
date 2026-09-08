@@ -9,8 +9,15 @@ namespace Conclave.Domain;
 /// </remarks>
 public static class QuorumEngine
 {
-    /// <summary>行号分桶宽度。两个节点对同一问题报的行号常有几行偏差，硬按行号分组会拆开。</summary>
-    private const int LineBucket = 10;
+    /// <summary>
+    /// 认定「两个节点在说同一个问题」的行号容差。
+    /// </summary>
+    /// <remarks>
+    /// 不同节点对同一处问题报的行号常有几行偏差，硬按行号分组会把一条拆成两条低置信度的。
+    /// 用相对锚点的对称容差而不是 <c>line / 10</c> 分桶：分桶的边界是任意的 ——
+    /// 实测里 9 和 13 差 4 却分属不同桶，13 和 17 差 4 却同桶。
+    /// </remarks>
+    private const int LineTolerance = 5;
 
     public static PromulgationPayload Merge(
         string revisionId,
@@ -42,20 +49,11 @@ public static class QuorumEngine
             .First()
             .Key;
 
-        var findings = valid
-            .SelectMany(b => b.Findings.Select(f => (Ballot: b, Finding: f)))
-            .GroupBy(x => (
-                File: x.Finding.File.Replace('\\', '/').ToLowerInvariant(),
-                Bucket: x.Finding.Line / LineBucket))
-            .Select(g =>
-            {
-                var mentions = g.Select(x => x.Ballot.Round).Distinct().Count();
-                var best = g.Select(x => x.Finding)
-                    .OrderByDescending(f => f.Severity)
-                    .ThenBy(f => f.Line)
-                    .First();
-                return new MergedFinding(best, mentions, mentions / (double)valid.Count);
-            })
+        var findings = Cluster(valid)
+            .Select(c => new MergedFinding(
+                c.Findings.OrderByDescending(f => f.Severity).ThenBy(f => f.Line).First(),
+                c.Rounds.Count,
+                c.Rounds.Count / (double)valid.Count))
             .OrderByDescending(f => f.Confidence)
             .ThenByDescending(f => f.Best.Severity)
             .ThenBy(f => f.Best.File, StringComparer.Ordinal)
@@ -69,5 +67,70 @@ public static class QuorumEngine
             Degraded: ballots.Count < expectedQuorum,
             ActualQuorum: ballots.Count,
             ExpectedQuorum: expectedQuorum);
+    }
+
+    /// <summary>
+    /// 把各节点报的 finding 贪心聚成簇：同文件、行号在容差内、且该簇尚未收过这一轮的 finding。
+    /// </summary>
+    /// <remarks>
+    /// 「尚未收过这一轮」是关键约束。同一个节点报的两条 finding 必然是两个不同的问题，
+    /// 哪怕挨得很近 —— 实测一票里 <c>retry.sh:13</c> 和 <c>retry.sh:17</c> 是两回事，
+    /// 少了这条约束会把 4 条真实问题吞成 2 条。
+    /// </remarks>
+    private static List<FindingCluster> Cluster(IReadOnlyList<BallotPayload> valid)
+    {
+        var clusters = new List<FindingCluster>();
+
+        foreach (var ballot in valid.OrderBy(b => b.Round))
+        {
+            foreach (var finding in ballot.Findings)
+            {
+                var file = NormalizePath(finding.File);
+                var match = clusters.FirstOrDefault(c =>
+                    c.File == file
+                    && Math.Abs(c.AnchorLine - finding.Line) <= LineTolerance
+                    && !c.Rounds.Contains(ballot.Round));
+
+                if (match is null)
+                {
+                    clusters.Add(new FindingCluster(file, finding.Line, ballot.Round, finding));
+                }
+                else
+                {
+                    match.Add(ballot.Round, finding);
+                }
+            }
+        }
+
+        return clusters;
+    }
+
+    private static string NormalizePath(string path)
+        => path.Replace('\\', '/').ToLowerInvariant();
+
+    private sealed class FindingCluster
+    {
+        internal FindingCluster(string file, int anchorLine, int round, Finding first)
+        {
+            File = file;
+            AnchorLine = anchorLine;
+            Rounds = [round];
+            Findings = [first];
+        }
+
+        internal string File { get; }
+
+        /// <summary>簇的锚点行 = 第一条落进来的 finding 的行号。</summary>
+        internal int AnchorLine { get; }
+
+        internal HashSet<int> Rounds { get; }
+
+        internal List<Finding> Findings { get; }
+
+        internal void Add(int round, Finding finding)
+        {
+            _ = Rounds.Add(round);
+            Findings.Add(finding);
+        }
     }
 }

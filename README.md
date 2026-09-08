@@ -18,9 +18,20 @@ Conclave.Infrastructure   SqliteActa / AzCliPrSource / ClaudeReviewRunner
 前置：`.NET 10 SDK`、`az`（已 `az devops login`）、`claude`、`git`。
 
 ```bash
-dotnet test Conclave.slnx           # 76 个测试
-dotnet run --project src/Conclave.App
+dotnet test Conclave.slnx                            # 103 个测试
+dotnet run --project src/Conclave.App                # 起 UI + 后台轮询
+dotnet run --project src/Conclave.App -- review 2878 # 无头：只评这一个 PR 然后退出
 ```
+
+无头模式的退出码给脚本用：
+
+| 码 | 含义 |
+|---|---|
+| 0 | approve / approve-with-suggestions |
+| 1 | reject / wait-for-author |
+| 2 | 找不到这个 PR |
+| 3 | 执行失败（claude 子进程或契约解析） |
+| 4 | 超时前没出结论 |
 
 首次启动会在 `~/.conclave/` 下生成：
 
@@ -46,29 +57,30 @@ dotnet run --project src/Conclave.App
 | 自动评审 | **关** | 一开机就把所有活跃 PR 全评一遍会烧掉可观额度。先手动点几个确认链路 |
 | 投递到 AzDO | **关** | 确认合并结果质量之前不要往真实 PR 上发评论、投票 |
 
-## 还没接上的一环
+## 与 az-pr-review skill 的契约
 
 `ClaudeReviewRunner` 以 `REVIEW_MODE=collect` 起 `claude -p "/az-pr-review <id>"`，
-并期望回复末尾有一个 JSON 块：
+skill（`~/.claude/skills/az-pr-review/SKILL.md` §7）在这个模式下**跳过发评论与投票**，
+并在回复末尾输出：
 
 ```json
 {"decision":"reject","findings":[{"file":"src/A.cs","line":12,"severity":"major","title":"…","detail":"…"}]}
 ```
 
-`~/.claude/skills/az-pr-review/SKILL.md` 目前**还没有这个分支**，所以评审会出
-`Error` 票（链上留痕，不参与多数决 —— 刻意不去猜结论）。该 skill 已有 **Dry run**
-分支（"just show me" / "don't post"），改成读 `REVIEW_MODE` 环境变量并追加 JSON 输出即可。
+解析不到这个块就出 `Error` 票 —— 刻意不从自然语言里猜结论：猜错方向会放过该拦的 PR，
+而 Error 票只会让这一轮不计入多数决。
 
-这一步必须做对：quorum=3 时有 3 个节点跑同一个 PR，若各自都投递，一个 PR 会收到
-3 条重复评论和 3 次投票。投递只由 round=0 的节点在收齐票后做一次。
+**为什么 skill 必须跳过投递**：quorum=3 时有 3 个节点跑同一个 PR，若各自都投递，
+一个 PR 会收到 3 条重复评论和 3 次投票。投递只由最低未弃权席位的节点在收齐票后做一次。
 
 ## 已知限制
 
 - **mesh 只有自己**（`LocalMesh`）。P1 才接 mDNS + gRPC，届时**节点白名单必须同步上线** ——
   别人的 Seating 块会让别人的评审任务在你机器上跑 `Bash`。
 - **diff 统计依赖本机 clone**。`RepoSearchRoots` 里找不到对应 repo 时统计为 0，
-  quorum 退到 1（安全方向）。实测本机缺 `payment-center`、`edison-test`、`PIM-UI`
-  的 clone，这些 PR 目前都只会单跑。
+  quorum 退到 1（安全方向）。定位器按目录名**和** `origin` 解析出的远端仓库名两者登记，
+  所以 `~/projects/user_svc`（远端叫 `liontrip-user`）也能认出来。
+  本机仍缺 `payment-center`、`PIM-UI`、`cms-apostrophe` 的 clone。
 - **索引冲突的 rebase 留到 P2**：单节点走不到那条路径。
 
 ## 两个踩过的坑（写在代码注释里，这里也留一份）
@@ -77,3 +89,7 @@ dotnet run --project src/Conclave.App
 2. **`Conclave.Application`（分层名）会盖住 `Avalonia.Application`**，而 C# 名称解析里
    外层命名空间成员优先于编译单元级 using 别名 —— `using Application = Avalonia.Application;`
    在这里无效，只能全限定。见 `src/Conclave.App/App.axaml.cs`。
+3. **`new Guid(byte[])` 前三段按小端读**，所以按 RFC 4122 的字节位置改 version/variant
+   要用 `bigEndian: true` 重载，否则派生出来的 UUID 版本号是错的。
+4. **测试里别调 `SqliteConnection.ClearAllPools()`** —— 它是进程全局的，会把并行跑的
+   其他测试的连接池一起清掉，制造难查的偶发失败。

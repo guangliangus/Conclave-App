@@ -204,10 +204,17 @@ findings 调 `az repos pr set-vote` + 发 comment thread。
 ```
 decision = 多数决(ballots.decision)
 
-findings 按 (file, line/10) 分组   // 容忍行号小偏差
+findings 贪心聚类：同文件、行号在锚点 ±5 内、且该簇尚未收过这一轮的 finding
   Confidence = 独立提到该 finding 的节点数 / 有效 ballot 数
   排序：Confidence 降序，然后 Severity 降序
 ```
+
+「**尚未收过这一轮**」这条约束不能省。同一个节点报的两条 finding 必然是两个不同的问题，
+哪怕挨得很近。首次真实评审就撞上了：一票 4 条 finding，行号 9 / 13 / 17 / 13，
+早期实现按 `line / 10` 分桶，把 13、17、13 全塞进同一个桶，**4 条真实问题只剩 2 条**。
+
+顺带把分桶换成相对锚点的对称容差 —— 分桶的边界是任意的：9 和 13 差 4 却分属不同桶，
+13 和 17 差 4 却同桶。
 
 `Confidence == 1.0` 的 finding 基本不用人工复核；`Confidence < 0.5` 的建议只作提示
 不作阻塞。**这是引入 quorum 的全部回报。**
