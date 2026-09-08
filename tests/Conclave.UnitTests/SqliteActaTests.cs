@@ -253,7 +253,8 @@ public sealed class SqliteActaTests : IDisposable
     public void Dispose()
     {
         _identity.Dispose();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        // 刻意不调 SqliteConnection.ClearAllPools()：那是进程全局的，会把并行跑的
+        // 其他测试的连接池一起清掉，制造出难查的偶发失败。
         try
         {
             Directory.Delete(_home, recursive: true);

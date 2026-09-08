@@ -108,6 +108,33 @@ public class SeatAssignmentTests
     }
 
     [Fact]
+    public void Extra_rounds_are_retries_and_may_redraw_the_same_node()
+    {
+        var pr = TestElectors.Pr();                        // quorum = 1
+        var only = new[] { TestElectors.Make("n1") };
+
+        var seats = SeatAssignment.Seats(
+            pr.ToRevision(), pr, only, Reserved, TestElectors.Now, extraRounds: 2);
+
+        // 单节点 mesh 上弃权后必须还能重试，否则这个 PR 永远到不了终态：
+        // 没有票不能公布，也没有别人可以接管。
+        Assert.Equal(["n1", "n1", "n1"], seats);
+    }
+
+    [Fact]
+    public void Extra_rounds_never_pad_the_formal_quorum_seats()
+    {
+        var pr = TestElectors.Pr(files: 30, lines: 900);    // quorum = 3
+        var two = new[] { TestElectors.Make("n1"), TestElectors.Make("n2") };
+
+        var seats = SeatAssignment.Seats(pr.ToRevision(), pr, two, Reserved, TestElectors.Now);
+
+        // 正式席位互不重复：只有 2 个合格节点就只给 2 席（降级），不能拿重复节点凑满 3。
+        Assert.Equal(2, seats.Count);
+        Assert.Equal(2, seats.Distinct().Count());
+    }
+
+    [Fact]
     public void Discovery_share_partitions_projects_without_overlap_or_gaps()
     {
         var projects = Enumerable.Range(1, 34).Select(i => $"project-{i}").ToList();

@@ -50,15 +50,27 @@ public static class SeatAssignment
     /// 算出席位表：第 N 个元素就是 round=N 的评审节点 ID。
     /// </summary>
     /// <remarks>
-    /// 逐轮从「尚未入席的合格节点」里按加权 HRW 取一个，因此同一节点不会占两个席位。
+    /// <para>
+    /// 前 <c>quorum</c> 轮从「尚未入席的合格节点」里按加权 HRW 取，所以正式席位互不重复。
     /// 合格节点不足时返回的列表短于 quorum —— 调用方据此在 Promulgation 上标 degraded。
+    /// </para>
+    /// <para>
+    /// <paramref name="extraRounds"/> 是弃权重试用的追加轮次（调用方传链上的 Recess 数）。
+    /// 这些轮次在候选池用尽时会**重新蓄池**，允许再次抽到同一个节点 —— 否则单节点
+    /// mesh 上一次超时就会让这个 PR 永远卡住：没有票不能公布，也没有下一轮可以接管。
+    /// </para>
+    /// <para>
+    /// 各节点是按自己的链视图算 <paramref name="extraRounds"/> 的，gossip 有延迟时可能短暂
+    /// 不一致；收敛后自愈，因此不需要为它引入协商。
+    /// </para>
     /// </remarks>
     public static IReadOnlyList<string> Seats(
         Revision revision,
         PrMeta pr,
         IEnumerable<Elector> mesh,
         ReservedMatters reserved,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        int extraRounds = 0)
     {
         ArgumentNullException.ThrowIfNull(revision);
         ArgumentNullException.ThrowIfNull(pr);
@@ -70,11 +82,31 @@ public static class SeatAssignment
             return [];
         }
 
-        var pool = mesh.Where(e => Eligible(e, pr, now)).ToList();
-        var seats = new List<string>(quorum);
-
-        for (var round = 0; round < quorum && pool.Count > 0; round++)
+        var eligible = mesh.Where(e => Eligible(e, pr, now)).ToList();
+        if (eligible.Count == 0)
         {
+            return [];
+        }
+
+        var totalRounds = quorum + Math.Max(0, extraRounds);
+        var pool = new List<Elector>(eligible);
+        var seats = new List<string>(totalRounds);
+
+        for (var round = 0; round < totalRounds; round++)
+        {
+            if (pool.Count == 0)
+            {
+                if (round < quorum)
+                {
+                    // 正式席位必须互不重复：合格节点不够就降级，返回短于 quorum 的席位表，
+                    // 由调用方在 Promulgation 上标 degraded。
+                    break;
+                }
+
+                // 重试轮次才重新蓄池，允许再抽到同一个节点（单节点 mesh 上必然如此）。
+                pool.AddRange(eligible);
+            }
+
             var picked = Hrw.Pick(revision.Id, round, pool);
             if (picked is null)
             {
@@ -82,7 +114,7 @@ public static class SeatAssignment
             }
 
             seats.Add(picked.Id);
-            pool.Remove(picked);
+            _ = pool.Remove(picked);
         }
 
         return seats;

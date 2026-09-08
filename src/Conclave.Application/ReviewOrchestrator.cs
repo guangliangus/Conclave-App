@@ -31,8 +31,14 @@ public sealed class ReviewOrchestrator : BackgroundService
     private readonly ILogger<ReviewOrchestrator> _logger;
     private readonly ReservedMatters _reserved = ReservedMatters.Default;
 
-    /// <summary>正在跑的 <c>revisionId#round</c>，防止同一席位被重复开跑。</summary>
-    private readonly ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
+    /// <summary>
+    /// 正在跑的 <c>revisionId#round</c> → 该次评审的完成信号。
+    /// </summary>
+    /// <remarks>
+    /// 存 Task 而不是占位符，是为了 <see cref="WhenIdleAsync"/> 能等到评审真正收尾 ——
+    /// 测试要消掉 fire-and-forget 的不确定性，停机时也需要知道还有活没干完。
+    /// </remarks>
+    private readonly ConcurrentDictionary<string, Task> _inFlight = new(StringComparer.Ordinal);
 
     /// <summary>UI 手动点过「评审」的 Revision。绕过 <see cref="ConclaveOptions.AutoReview"/>。</summary>
     private readonly ConcurrentDictionary<string, byte> _requested = new(StringComparer.Ordinal);
@@ -87,7 +93,11 @@ public sealed class ReviewOrchestrator : BackgroundService
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
     }
 
-    private async Task TickAsync(CancellationToken ct)
+    /// <summary>
+    /// 单步驱动一轮编排。后台循环按 <see cref="ConclaveOptions.OrchestratorInterval"/> 调它，
+    /// 测试直接调它来避免依赖计时器。
+    /// </summary>
+    public async Task TickAsync(CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
         var self = _mesh.Self;
@@ -113,8 +123,12 @@ public sealed class ReviewOrchestrator : BackgroundService
             }
 
             var pr = chain.Summons.Pr;
-            var seats = SeatAssignment.Seats(revision, pr, _mesh.Alive, _reserved, now);
-            var mySeat = IndexOfSelf(seats, self.Id);
+
+            // 传入 Recess 数：每次弃权都追加一个重试轮次，否则单节点 mesh 上
+            // 一次超时会让这个 PR 永远卡在「没票也没人接管」。
+            var seats = SeatAssignment.Seats(
+                revision, pr, _mesh.Alive, _reserved, now, extraRounds: chain.Recessed.Count);
+            var mySeat = FirstOpenSeat(seats, self.Id, chain);
 
             views.Add(BuildView(revision, chain, mySeat));
 
@@ -126,7 +140,7 @@ public sealed class ReviewOrchestrator : BackgroundService
 
             var wanted = _options.AutoReview || _requested.ContainsKey(revision.Id);
 
-            await ReleaseTimedOutSeatsAsync(revision, chain, now, ct).ConfigureAwait(false);
+            var justRecessed = await ReleaseTimedOutSeatsAsync(revision, chain, now, ct).ConfigureAwait(false);
 
             if (wanted && mySeat >= 0 && !chain.Seatings.ContainsKey(mySeat))
             {
@@ -134,7 +148,12 @@ public sealed class ReviewOrchestrator : BackgroundService
                 continue;   // 下一轮再跑评审，让 Seating 先落链
             }
 
+            // 刚被弃权的席位不能接着开跑 —— 否则同一 tick 里既宣布弃权又开始评审，自相矛盾。
+            // 弃权后 round 会 +1 重新 HRW，接管者下一轮自己会认领。
+            var recessed = justRecessed.Contains(mySeat) || chain.Recessed.Contains(mySeat);
+
             if (mySeat >= 0
+                && !recessed
                 && chain.Seatings.TryGetValue(mySeat, out var seated)
                 && seated.ElectorId == self.Id
                 && !chain.Ballots.ContainsKey(mySeat))
@@ -142,7 +161,7 @@ public sealed class ReviewOrchestrator : BackgroundService
                 StartReview(revision, pr, mySeat);
             }
 
-            if (chain.CanPromulgate && IsPromulgator(seats, self.Id))
+            if (chain.CanPromulgate && IsPromulgator(seats, self.Id, chain))
             {
                 await PromulgateAsync(revision, pr, chain, ct).ConfigureAwait(false);
             }
@@ -152,13 +171,20 @@ public sealed class ReviewOrchestrator : BackgroundService
         _state.SetRecentBlocks(await _acta.ReadRecentAsync(60, ct).ConfigureAwait(false));
     }
 
-    private static int IndexOfSelf(IReadOnlyList<string> seats, string selfId)
+    /// <summary>
+    /// 本节点第一个仍然有效的席位轮次；没有则 -1。
+    /// </summary>
+    /// <remarks>
+    /// 必须跳过已弃权的轮次：重试轮次可能又抽到自己（单节点 mesh 上必然如此），
+    /// 若仍返回那个被弃权的轮次，本节点会认为自己无事可做而永远旁观。
+    /// </remarks>
+    private static int FirstOpenSeat(IReadOnlyList<string> seats, string selfId, ChainState chain)
     {
-        for (var i = 0; i < seats.Count; i++)
+        for (var round = 0; round < seats.Count; round++)
         {
-            if (seats[i] == selfId)
+            if (seats[round] == selfId && !chain.Recessed.Contains(round))
             {
-                return i;
+                return round;
             }
         }
 
@@ -166,11 +192,24 @@ public sealed class ReviewOrchestrator : BackgroundService
     }
 
     /// <summary>
-    /// round=0 的节点负责公布。席位表为空（合格节点都掉线了）时由任意节点兜底，
-    /// 否则一个 PR 会永远停在「票齐但没人公布」。
+    /// 由最低的未弃权席位的持有者负责公布。
     /// </summary>
-    private static bool IsPromulgator(IReadOnlyList<string> seats, string selfId)
-        => seats.Count == 0 || seats[0] == selfId;
+    /// <remarks>
+    /// 不能死盯 round=0：它可能已经弃权，那样就没人公布了。席位表为空
+    /// （合格节点都掉线）时由任意节点兜底，否则票齐了也永远停在那里。
+    /// </remarks>
+    private static bool IsPromulgator(IReadOnlyList<string> seats, string selfId, ChainState chain)
+    {
+        for (var round = 0; round < seats.Count; round++)
+        {
+            if (!chain.Recessed.Contains(round))
+            {
+                return seats[round] == selfId;
+            }
+        }
+
+        return true;
+    }
 
     private async Task TakeSeatAsync(Revision revision, int round, string selfId, CancellationToken ct)
     {
@@ -190,9 +229,11 @@ public sealed class ReviewOrchestrator : BackgroundService
     /// <remarks>
     /// 任何节点都可以写 Recess，不必是原认领者 —— 原认领者可能已经掉线了，这正是要处理的情况。
     /// </remarks>
-    private async Task ReleaseTimedOutSeatsAsync(
+    private async Task<IReadOnlyList<int>> ReleaseTimedOutSeatsAsync(
         Revision revision, ChainState chain, DateTimeOffset now, CancellationToken ct)
     {
+        var released = new List<int>();
+
         foreach (var (round, at) in chain.SeatedAt)
         {
             if (chain.Ballots.ContainsKey(round) || chain.Recessed.Contains(round))
@@ -218,8 +259,11 @@ public sealed class ReviewOrchestrator : BackgroundService
                 ct).ConfigureAwait(false);
 
             await _mesh.BroadcastAsync(block, ct).ConfigureAwait(false);
+            released.Add(round);
             _logger.LogWarning("席位超时 {Revision} round={Round}，已弃权", revision.Id, round);
         }
+
+        return released;
     }
 
     private static string SlotKey(string revisionId, int round) => $"{revisionId}#{round}";
@@ -230,7 +274,8 @@ public sealed class ReviewOrchestrator : BackgroundService
     private void StartReview(Revision revision, PrMeta pr, int round)
     {
         var slot = SlotKey(revision.Id, round);
-        if (!_inFlight.TryAdd(slot, 0))
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_inFlight.TryAdd(slot, completion.Task))
         {
             return;
         }
@@ -282,10 +327,15 @@ public sealed class ReviewOrchestrator : BackgroundService
                     _ = _slots.Release();
                 }
 
+                // 先摘牌再置信号：已经拿到快照的等待方仍会看到完成。
                 _ = _inFlight.TryRemove(slot, out _);
+                completion.SetResult();
             }
         });
     }
+
+    /// <summary>等当前所有在跑的评审收尾。</summary>
+    public Task WhenIdleAsync() => Task.WhenAll(_inFlight.Values.ToArray());
 
     private void UpdateLoad(int delta)
         => _mesh.UpdateSelf(self => self with
