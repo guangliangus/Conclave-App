@@ -64,6 +64,7 @@ public static class ConclaveServiceCollectionExtensions
             return identity;
         });
 
+        _ = services.AddSingleton<ExecutableResolver>();
         _ = services.AddSingleton<NodeState>();
         _ = services.AddSingleton<IElectorAllowList, FileElectorAllowList>();
         _ = services.AddSingleton<IRepoLocator, FileSystemRepoLocator>();
@@ -86,6 +87,13 @@ public static class ConclaveServiceCollectionExtensions
                 azIdentity = sp.GetRequiredService<IPrSource>()
                     .GetAuthenticatedIdentityAsync(CancellationToken.None)
                     .GetAwaiter().GetResult();
+            }
+            catch (FileNotFoundException ex)
+            {
+                // 跟「没登录」是两回事，别把人指向 az devops login。
+                // 从 Finder 启动 .app 时 LaunchServices 只给最小 PATH，az 根本不在里面。
+                logger.LogError(ex, "找不到 az 可执行文件 —— 「不评审自己的 PR」将失效");
+                sp.GetRequiredService<NodeState>().SetToolProblem(ex.Message);
             }
             catch (Exception ex)
             {

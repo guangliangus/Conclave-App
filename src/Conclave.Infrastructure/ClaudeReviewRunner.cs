@@ -30,6 +30,7 @@ namespace Conclave.Infrastructure;
 public sealed class ClaudeReviewRunner(
     ConclaveOptions options,
     IRepoLocator repos,
+    ExecutableResolver executables,
     ILogger<ClaudeReviewRunner> logger) : IReviewRunner
 {
     public async Task<BallotPayload> RunAsync(
@@ -67,7 +68,8 @@ public sealed class ClaudeReviewRunner(
 
         var sw = Stopwatch.StartNew();
         var result = await ProcessRunner.RunAsync(
-            options.ClaudeExecutable, args, repoPath, env, ct).ConfigureAwait(false);
+            executables.Resolve(options.ClaudeExecutable), args, repoPath, env, ct)
+            .ConfigureAwait(false);
         sw.Stop();
 
         if (!result.Success)

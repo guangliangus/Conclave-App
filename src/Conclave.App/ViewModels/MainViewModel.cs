@@ -150,9 +150,15 @@ public sealed partial class MainViewModel : ViewModelBase
 
         NodeId = self.Id;
         AzIdentity = string.IsNullOrEmpty(self.AzIdentity) ? "(未取到)" : self.AzIdentity;
-        IdentityWarning = string.IsNullOrEmpty(self.AzIdentity)
-            ? "读不到 az 登录身份：「不评审自己的 PR」这条硬规则当前不生效。请跑 az devops login 后重启。"
-            : null;
+
+        // 工具找不到与「没登录」是两回事，提示必须分开：从 Finder 启动 .app 时
+        // LaunchServices 只给最小 PATH，az 根本不在里面，此时叫人去 az devops login
+        // 只会把人带偏。
+        IdentityWarning = _state.ToolProblem is { Length: > 0 } problem
+            ? problem
+            : string.IsNullOrEmpty(self.AzIdentity)
+                ? "读不到 az 登录身份：「不评审自己的 PR」这条硬规则当前不生效。请跑 az devops login 后重启。"
+                : null;
         Status = _state.Status;
         Capability = string.Format(
             CultureInfo.InvariantCulture,

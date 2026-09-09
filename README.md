@@ -145,3 +145,8 @@ CONCLAVE_Conclave__HomeDirectory=/tmp/node-b dotnet run --project src/Conclave.A
    带默认值 + 配置文件再列一遍 = 两份。默认值要在绑定后判空回填。
 7. **gossip 只能转发新块** —— 对「本来就有」也转发会让区块在两节点间无限回弹，
    实测把进程 OOM 掉过。
+8. **从 Finder / `open` 启动 `.app` 时 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`**。
+   `az` 在 `/opt/homebrew/bin`、`claude` 在 `~/.local/bin`，都不在里面 —— 同一个二进制
+   在终端里一切正常，双击图标就变成「读不到 az 登录身份」和「0 个 project」，
+   而提示还指向了错误的方向。`ExecutableResolver` 在进程内兜底（配置 → PATH →
+   常见安装目录），launchd 也是同一个坑。

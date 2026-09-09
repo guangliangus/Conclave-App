@@ -26,6 +26,7 @@ namespace Conclave.Infrastructure;
 public sealed class AzCliPrSource(
     ConclaveOptions options,
     IRepoLocator repos,
+    ExecutableResolver executables,
     ILogger<AzCliPrSource> logger) : IPrSource
 {
     public async Task<string> GetAuthenticatedIdentityAsync(CancellationToken ct)
@@ -168,13 +169,15 @@ public sealed class AzCliPrSource(
 
         try
         {
+            var git = executables.Resolve(options.GitExecutable);
+
             _ = await ProcessRunner.RunAsync(
-                "git", ["-C", repoPath, "fetch", "--quiet", "origin", pr.SourceBranch, pr.TargetBranch],
+                git, ["-C", repoPath, "fetch", "--quiet", "origin", pr.SourceBranch, pr.TargetBranch],
                 workingDirectory: repoPath, ct: ct).ConfigureAwait(false);
 
             // 三点语义：跟 PR 页面显示的一致（相对 merge-base 比较），而不是两个分支尖端直接 diff。
             var numstat = await ProcessRunner.RunAsync(
-                "git", ["-C", repoPath, "diff", "--numstat", $"origin/{pr.TargetBranch}...origin/{pr.SourceBranch}"],
+                git, ["-C", repoPath, "diff", "--numstat", $"origin/{pr.TargetBranch}...origin/{pr.SourceBranch}"],
                 workingDirectory: repoPath, ct: ct).ConfigureAwait(false);
 
             if (!numstat.Success)
@@ -334,7 +337,9 @@ public sealed class AzCliPrSource(
 
     private async Task<string> AzAsync(IReadOnlyList<string> args, CancellationToken ct)
     {
-        var result = await ProcessRunner.RunAsync(options.AzExecutable, args, ct: ct).ConfigureAwait(false);
+        var result = await ProcessRunner
+            .RunAsync(executables.Resolve(options.AzExecutable), args, ct: ct)
+            .ConfigureAwait(false);
 
         if (!result.Success)
         {

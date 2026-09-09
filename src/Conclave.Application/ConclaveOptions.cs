@@ -79,9 +79,24 @@ public sealed class ConclaveOptions
     /// </remarks>
     public bool PostToAzureDevOps { get; set; }
 
+    /// <summary><c>claude</c> 的命令名或绝对路径。</summary>
     public string ClaudeExecutable { get; set; } = "claude";
 
+    /// <summary><c>az</c> 的命令名或绝对路径。</summary>
     public string AzExecutable { get; set; } = "az";
+
+    /// <summary><c>git</c> 的命令名或绝对路径。</summary>
+    public string GitExecutable { get; set; } = "git";
+
+    /// <summary>
+    /// 找外部工具时优先看这些目录。
+    /// </summary>
+    /// <remarks>
+    /// 从 Finder 启动 <c>.app</c> 时 LaunchServices 只给一个最小 PATH，
+    /// <c>az</c> 和 <c>claude</c> 都不在里面。解析器自带常见安装目录的兜底，
+    /// 装在非常规位置时用这个补。
+    /// </remarks>
+    public IList<string> ExtraToolPaths { get; set; } = [];
 
     /// <summary>展开 <c>~</c> 前缀。</summary>
     public static string ExpandHome(string path)

@@ -34,8 +34,31 @@ public sealed class NodeState
     private IReadOnlyList<PrView> _prs = [];
     private IReadOnlyList<Block> _blocks = [];
     private string _status = "启动中";
+    private string? _toolProblem;
 
     public event EventHandler? Changed;
+
+    /// <summary>
+    /// 外部工具找不到时的说明；null 表示一切正常。
+    /// </summary>
+    /// <remarks>
+    /// 与「az 没登录」区分开：从 Finder 启动 .app 时 PATH 里没有 az / claude，
+    /// 那时提示「请跑 az devops login」会把人带到错误的方向。
+    /// </remarks>
+    public string? ToolProblem
+    {
+        get { lock (_gate) { return _toolProblem; } }
+    }
+
+    public void SetToolProblem(string? problem)
+    {
+        lock (_gate)
+        {
+            _toolProblem = problem;
+        }
+
+        Raise();
+    }
 
     public IReadOnlyList<PrView> Pipeline
     {
