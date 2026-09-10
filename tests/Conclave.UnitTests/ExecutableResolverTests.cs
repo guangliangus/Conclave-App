@@ -55,6 +55,9 @@ public sealed class ExecutableResolverTests : IDisposable
     [Fact]
     public void The_real_az_and_claude_are_found_even_with_a_LaunchServices_style_PATH()
     {
+        // 先在完整 PATH 下解析一次，作为「这台机器上它到底在哪」的基准。
+        var full = new[] { "az", "claude" }.ToDictionary(t => t, t => Build().TryResolve(t));
+
         var original = Environment.GetEnvironmentVariable("PATH");
         try
         {
@@ -62,16 +65,20 @@ public sealed class ExecutableResolverTests : IDisposable
             Environment.SetEnvironmentVariable("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
             var resolver = Build();
 
-            // 兜底目录里包含 Homebrew 与 ~/.local/bin，所以这两个仍应找得到。
-            // 机器上没装时跳过断言 —— 不让测试依赖开发机的安装状态。
+            // 兜底目录里包含 Homebrew 与 ~/.local/bin，所以这两个仍应找得到 ——
+            // 判据是「最小 PATH 下解析到的，跟完整 PATH 下是同一个文件」。
+            //
+            // 早先这里断言的是「路径不是 /usr/bin/xxx」，那写的是「我这台 Mac 上 az 装在
+            // Homebrew」这个事实，不是解析器的行为：CI 的 ubuntu 镜像预装了
+            // /usr/bin/az，于是解析完全正确，断言照样红。
             foreach (var tool in (string[])["az", "claude"])
             {
-                var resolved = resolver.TryResolve(tool);
-                if (resolved is not null)
+                if (full[tool] is not { } expected)
                 {
-                    Assert.True(File.Exists(resolved), $"{tool} 解析到了不存在的路径 {resolved}");
-                    Assert.DoesNotContain("/usr/bin/" + tool, resolved, StringComparison.Ordinal);
+                    continue;   // 这台机器上没装，跳过
                 }
+
+                Assert.Equal(expected, resolver.TryResolve(tool));
             }
         }
         finally

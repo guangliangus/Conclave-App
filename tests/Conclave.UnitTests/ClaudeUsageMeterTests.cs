@@ -29,12 +29,22 @@ public sealed class ClaudeUsageMeterTests : IDisposable
     /// 五个工作日整。周三中午已过 2.42 个工作日，故周阈值 = (2.42+1)/5 ≈ 68%。
     /// </para>
     /// </remarks>
+    /// <remarks>
+    /// 时刻与时区都写死成 <b>+08</b>（跟下面假 <c>/usage</c> 文本里声明的 Asia/Shanghai 一致）。
+    /// 早先这里是 <c>DateTimeKind.Local</c>：<c>now</c> 跟着 runner 的时区走，而重置时刻是从
+    /// 那段文本里按 Asia/Shanghai 解析出来的<b>绝对</b>时刻 —— 两边只在 UTC+8 上对得上。
+    /// CI（UTC）上周阈值从 68% 变成 70%，于是卡住的窗口从 7d 翻成 5h，同一份输入得出另一个数。
+    /// </remarks>
     private static readonly DateTimeOffset Wednesday =
-        new(new DateTime(2026, 9, 9, 12, 0, 0, DateTimeKind.Local));
+        new(2026, 9, 9, 12, 0, 0, TimeSpan.FromHours(8));
 
+    /// <summary>固定时钟 + 固定时区。用自造的偏移时区，不依赖机器上有没有 tzdata。</summary>
     private sealed class FixedClock(DateTimeOffset at) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => at;
+
+        public override TimeZoneInfo LocalTimeZone { get; } = TimeZoneInfo.CreateCustomTimeZone(
+            "conclave-test-utc8", TimeSpan.FromHours(8), "UTC+08", "UTC+08");
     }
 
     private readonly string _dir = Path.Combine(

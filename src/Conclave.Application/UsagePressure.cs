@@ -39,7 +39,10 @@ namespace Conclave.Application;
 /// 所以是常量而不是配置项。
 /// </para>
 /// <para>
-/// 纯函数，<c>now</c> 由调用方传入 —— 判定要看「现在是周几」，而这一层不许读时钟。
+/// 纯函数，<c>now</c> 与<b>时区</b>都由调用方传入 —— 判定要看「现在是周几」，
+/// 而这一层既不许读时钟，也不该读进程的环境。时区不显式传的话，同一份输入在
+/// UTC 的 CI 机器上和 +08 的开发机上算出的阈值不一样，测试就成了「看运气」
+/// （实测：CI 上卡住的窗口从 7d 变成了 5h）。
 /// </para>
 /// </remarks>
 public static class UsagePressure
@@ -81,14 +84,21 @@ public static class UsagePressure
     /// （<c>seven_day:Fable</c>）打满不妨碍用 Opus 评审，拿它挡人是错的。
     /// </remarks>
     /// <returns>没有可判定的窗口时返回 <c>null</c>。</returns>
-    public static Binding? Tightest(IEnumerable<UsageWindow> windows, DateTimeOffset now)
+    /// <param name="windows">候选窗口。</param>
+    /// <param name="now">判定时刻，由调用方传入。</param>
+    /// <param name="zone">
+    /// 判定「周几」用的时区；null = 本机时区。生产上就是本机（工作周是人的作息），
+    /// 测试传一个固定时区，免得结论跟着 runner 的 TZ 变。
+    /// </param>
+    public static Binding? Tightest(
+        IEnumerable<UsageWindow> windows, DateTimeOffset now, TimeZoneInfo? zone = null)
     {
         ArgumentNullException.ThrowIfNull(windows);
 
         Binding? tightest = null;
         foreach (var window in windows.Where(w => w.Gates))
         {
-            var gate = GateFor(window, now);
+            var gate = GateFor(window, now, zone);
             var value = gate <= 0 ? 1.0 : window.Utilization / gate;
 
             if (tightest is null || value > tightest.Value.Value)
@@ -124,11 +134,13 @@ public static class UsagePressure
     /// 未知的键按会话窗口处理 —— 保守方向：宁可少接活，也不要因为多了一种没见过的窗口
     /// 就把它当成不设限。
     /// </remarks>
-    public static double GateFor(UsageWindow window, DateTimeOffset now)
+    public static double GateFor(UsageWindow window, DateTimeOffset now, TimeZoneInfo? zone = null)
     {
         ArgumentNullException.ThrowIfNull(window);
 
-        return window.Key == SevenDay ? WeeklyGate(window.ResetsAt, now) : SessionGate;
+        return window.Key == SevenDay
+            ? WeeklyGate(window.ResetsAt, now, zone ?? TimeZoneInfo.Local)
+            : SessionGate;
     }
 
     private const string SevenDay = "seven_day";
@@ -148,15 +160,20 @@ public static class UsagePressure
     /// 有了它，规则读作「允许超前一个工作日，超前两天就歇着」。
     /// </para>
     /// <para>
-    /// 周几按<b>本地时间</b>判定：工作周是人的作息，不是 UTC 的。实测这台机器上
-    /// 周窗口正好是周一 01:59 到周一 01:59，五个工作日整。
+    /// 周几按<b>调用方给的时区</b>判定，生产上就是本机时区：工作周是人的作息，不是 UTC 的。
+    /// 实测这台机器上周窗口正好是周一 01:59 到周一 01:59，五个工作日整。
+    /// <para>
+    /// ⚠️ 于是<b>时区也是节点间协议的一部分</b>：跨时区的两个节点对同一个周窗口会算出
+    /// 不同的阈值，上报的压力值不完全可比。同处一地的团队无所谓，真要跨时区部署时
+    /// 得把这里统一成一个约定时区。
+    /// </para>
     /// </para>
     /// <para>
     /// 拿不到重置时刻就退回 <see cref="WeeklyCeiling"/> —— 算不出配速时不该假装能算，
     /// 但也不能因此完全不设限。
     /// </para>
     /// </remarks>
-    private static double WeeklyGate(DateTimeOffset? resetsAt, DateTimeOffset now)
+    private static double WeeklyGate(DateTimeOffset? resetsAt, DateTimeOffset now, TimeZoneInfo zone)
     {
         if (resetsAt is not { } reset)
         {
@@ -164,14 +181,14 @@ public static class UsagePressure
         }
 
         var start = reset - WeeklyWindow;
-        var total = WorkingDaysBetween(start, reset);
+        var total = WorkingDaysBetween(start, reset, zone);
         if (total <= 0)
         {
             // 整个窗口里一个工作日都没有（理论上不会，除非放假配置或时区极端）。
             return WeeklyCeiling;
         }
 
-        var elapsed = WorkingDaysBetween(start, Clamp(now, start, reset));
+        var elapsed = WorkingDaysBetween(start, Clamp(now, start, reset), zone);
         var pace = (elapsed + 1.0) / total;   // +1 = 允许超前一个工作日
 
         return Math.Min(WeeklyCeiling, pace);
@@ -188,7 +205,7 @@ public static class UsagePressure
     /// 所以最多迭代八次，不值得为它做闭式推导 —— 那种算术很容易在跨月、跨夏令时的
     /// 边界上悄悄错一天。
     /// </remarks>
-    private static double WorkingDaysBetween(DateTimeOffset from, DateTimeOffset to)
+    private static double WorkingDaysBetween(DateTimeOffset from, DateTimeOffset to, TimeZoneInfo zone)
     {
         if (to <= from)
         {
@@ -196,8 +213,8 @@ public static class UsagePressure
         }
 
         var days = 0.0;
-        var cursor = from.ToLocalTime();
-        var end = to.ToLocalTime();
+        var cursor = TimeZoneInfo.ConvertTime(from, zone);
+        var end = TimeZoneInfo.ConvertTime(to, zone);
 
         while (cursor < end)
         {

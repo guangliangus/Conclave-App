@@ -113,7 +113,9 @@ public sealed class ClaudeUsageMeter(
 
         // 各窗口各有各的阈值，取「离自己那条线最近」的那个，不是用量最大的那个。
         // 周额度用工作日配速判，理由见 UsagePressure。
-        var binding = UsagePressure.Tightest(gating, now)
+        // 时区从 TimeProvider 拿，不读 TimeZoneInfo.Local —— 那样这段就没法在
+        // 固定时区下测试，而周阈值恰恰取决于「现在是周几」。
+        var binding = UsagePressure.Tightest(gating, now, _time.LocalTimeZone)
             ?? new UsagePressure.Binding(gating[0], UsagePressure.SessionGate, 0);
 
 
