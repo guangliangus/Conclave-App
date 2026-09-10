@@ -26,18 +26,33 @@ for rid in $RIDS; do
   echo "==> 打包 ${rid}"
   RID="$rid" VERSION="$VERSION" CONFIG=Release scripts/package-macos.sh
 
+  # 两种包都出，因为它们的<b>隔离标记</b>行为不同（实测）：
+  #   tar -xzf   → 解出的 .app 完全没有 com.apple.quarantine，Gatekeeper 不拦
+  #   ditto/unzip → 隔离标记会传染给解出的 .app，于是要么在系统设置里放行、
+  #                 要么 xattr -dr
+  # 所以 NOTES 里推荐 tar 那条路；zip 留着，因为 app 内更新器下载的就是它
+  # （它自己写文件、没有隔离标记，而且解完还会 xattr -dr 兜一层）。
   zip="${OUT}/Conclave-${VERSION}-${rid}.zip"
+  tarball="${OUT}/Conclave-${VERSION}-${rid}.tar.gz"
   # 先把打包机上的扩展属性全清掉，再用 --norsrc 不写 ._ 文件。不然 zip 里会带着
   # 构建机的 com.apple.provenance / quarantine，解开时原样落到对方文件上 ——
   # 实测第一版 zip 里就有 ._Info.plist、._appsettings.json 这些 AppleDouble 条目。
   # ditto 而不是 zip：保住权限位，解开还是一个能双击的 bundle。
-  xattr -cr dist/Conclave.app
-  ditto -c -k --keepParent --norsrc dist/Conclave.app "$zip"
+  # 打包时<b>必须保留</b>扩展属性，不能再用 --norsrc：codesign 对 Contents/MacOS 里那些
+  # 非 Mach-O 文件（.NET 的托管 dll）把签名存在 com.apple.cs.CodeDirectory 扩展属性里，
+  # 丢掉它们，解出来的 bundle 就是 "code object is not signed at all（In subcomponent:
+  # …dll）"，Gatekeeper 照样报「已损坏」。构建机自己的 provenance/quarantine 由
+  # package-macos.sh 在<b>签名之前</b> xattr -cr 掉，所以这里留下的只有签名本身。
+  # 代价是 zip 里有一批 ._ 的 AppleDouble 条目 —— 那正是扩展属性的载体，不是垃圾。
+  ditto -c -k --keepParent dist/Conclave.app "$zip"
+  # -C 到 dist：tar 里要的是 Conclave.app 本身，不是 dist/Conclave.app 这条路径
+  tar -czf "$tarball" -C dist Conclave.app
   echo "    → ${zip} ($(du -h "$zip" | cut -f1))"
+  echo "    → ${tarball} ($(du -h "$tarball" | cut -f1))"
 done
 
 echo "==> 校验和与 manifest"
-( cd "$OUT" && shasum -a 256 ./*.zip > SHA256SUMS )
+( cd "$OUT" && shasum -a 256 ./*.zip ./*.tar.gz > SHA256SUMS )
 
 python3 - "$VERSION" "$OUT" <<'PY'
 import hashlib, json, os, subprocess, sys, datetime
@@ -70,11 +85,29 @@ PY
 cat > "${OUT}/NOTES.md" <<MD
 ## 安装
 
+包<b>没有 Apple 公证</b>（那需要付费的 Developer ID），所以下载后 macOS 默认会拦。
+用 \`tar\` 解压可以完全绕开这件事 —— 实测 \`tar\` 不会把下载来的隔离标记传染给解出的
+\`.app\`，而 \`unzip\` / 双击（归档工具）会：
+
 \`\`\`bash
 # 选自己的芯片：Apple Silicon 用 osx-arm64，Intel 用 osx-x64
-unzip Conclave-${VERSION}-osx-arm64.zip -d /Applications
-xattr -dr com.apple.quarantine /Applications/Conclave.app   # 未签名，必须去掉隔离标记
+tar -xzf Conclave-${VERSION}-osx-arm64.tar.gz -C /Applications
 open /Applications/Conclave.app
+\`\`\`
+
+用 zip 的话（双击解压也是这条路）多一步去隔离标记：
+
+\`\`\`bash
+unzip Conclave-${VERSION}-osx-arm64.zip -d /Applications
+xattr -dr com.apple.quarantine /Applications/Conclave.app
+open /Applications/Conclave.app
+\`\`\`
+
+要常驻后台（关掉窗口继续跑轮询与评审）：
+
+\`\`\`bash
+cp scripts/com.liontravel.conclave.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.liontravel.conclave.plist
 \`\`\`
 
 ⚠️ **整个 mesh 要一起升级** —— 心跳协议有变动时新旧节点会互相验签失败。

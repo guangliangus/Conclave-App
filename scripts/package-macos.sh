@@ -81,6 +81,43 @@ PLIST
 rm -rf dist/publish
 
 # 自检：只看文件在不在是不够的 —— 缺原生库时文件全在，一跑就炸。
+# ── 签名 ─────────────────────────────────────────────────────────────
+# 必须签，而且必须在 bundle 组装完（Info.plist 与 .icns 都写好）之后签。
+#
+# 为什么：.NET SDK 会给 apphost 打一个 ad-hoc 签名，而那个签名<b>声明自己属于一个
+# bundle</b>（要求存在 _CodeSignature/CodeResources）。我们是 publish 完再手工组装
+# bundle 的，从不在 bundle 级签名，于是签名<b>无效</b>而不是「没签名」：
+#
+#   codesign -v --deep --strict Conclave.app
+#   → code has no resources but signature indicates they must be present
+#
+# Gatekeeper 对无效签名的说法是「已损坏，你应该将它移到废纸篓」—— 没有任何出路，
+# 比「无法验证开发者」（那个至少能在系统设置里放行）糟得多。实测同事下载后就撞上这个。
+#
+# 有 Developer ID 就传 CODESIGN_IDENTITY，那时这一步顺带把公证前的准备也做齐了
+# （--options runtime 是公证的硬要求）；没有就 ad-hoc（"-"），至少让签名自洽。
+# 先清干净再签，顺序不能反。构建机上的 com.apple.provenance / quarantine 会跟着
+# 扩展属性一路进包，而<b>签名本身也存在扩展属性里</b>（托管 dll 那些）——
+# 反过来先签后清，等于把刚签好的签名擦掉，实测就是这么发出一个「已损坏」的包的。
+echo "==> 清扩展属性"
+xattr -cr "${APP}"
+
+echo "==> 签名（${CODESIGN_IDENTITY:-ad-hoc}）"
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+  codesign --force --deep --timestamp --options runtime     --sign "${CODESIGN_IDENTITY}" "${APP}"
+else
+  codesign --force --deep --sign - "${APP}"
+fi
+
+# 签完立刻验。不验的话，无效签名照样能打进包发出去 —— 这次就是这么发出去的。
+echo "==> 校验签名"
+if ! codesign -v --deep --strict "${APP}" 2>dist/codesign.err; then
+  echo "❌ 签名无效，不发这个包：" >&2
+  sed -n '1,10p' dist/codesign.err >&2
+  exit 1
+fi
+rm -f dist/codesign.err
+
 # 交叉打包（在 arm64 机器上出 osx-x64 的包）时，自检要靠 Rosetta 才跑得起来。
 # GitHub 的 macOS runner 带 Rosetta，所以 CI 上两个架构都真跑；本机没装的话只跳过自检、
 # 不让打包失败 —— 但要说出来，别让人以为验过了。
