@@ -62,11 +62,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: v${{ steps.ver.outputs.version }}
         run: |
+          # 资产列表刻意不写死后缀：release-assets.sh 出什么就发什么（zip + tar.gz +
+          # SHA256SUMS + manifest.json），只把 NOTES.md 排除 —— 它是 release 正文，
+          # 不是下载物。第一版写死了 release/*.zip，于是 tar.gz 生成了却没上传，
+          # 而 NOTES 正指着那个不存在的文件让人 tar -xzf。
+          mapfile -t ASSETS < <(find release -type f ! -name NOTES.md | sort)
+          printf '发布资产：%s\n' "${ASSETS[*]}"
+
           # 重跑同一个 tag 时 create 会失败，那就改成往已有的 release 上传（覆盖同名文件）。
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release/*.zip release/SHA256SUMS release/manifest.json --clobber
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
-            gh release create "$TAG" release/*.zip release/SHA256SUMS release/manifest.json \
+            gh release create "$TAG" "${ASSETS[@]}" \
               --target "$GITHUB_SHA" \
               --title "Conclave $TAG" \
               --notes-file release/NOTES.md \
