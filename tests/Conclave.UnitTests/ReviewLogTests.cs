@@ -289,4 +289,35 @@ public sealed class ReviewLogTests : IDisposable
             // 临时目录清不掉不影响结论
         }
     }
+    [Fact]
+    public async Task A_report_on_a_fresh_machine_creates_its_own_directory()
+    {
+        // conclave report 只解析 IReviewLog：它<b>不</b>构造 SqliteActa（原先建目录的地方），
+        // 也不碰 ElectorIdentity 的 DI 工厂（另一处建目录的地方）。而 SQLite 只建文件不建
+        // 父目录，于是全新机器上直接 SQLite Error 14: unable to open database file。
+        //
+        // 这个类其余用例都在构造函数里先建了 SqliteActa，顺手把目录建好了 —— 所以这条路
+        // 一直没被走到。实测炸在 CI 的干净 runner 上（release 打包的自检），
+        // 而开发机上 ~/.conclave 早就存在，本地永远复现不出来。
+        var fresh = Path.Combine(
+            Path.GetTempPath(), "conclave-fresh-" + Guid.NewGuid().ToString("N"), "dot-conclave");
+
+        try
+        {
+            var log = new SqliteReviewLog(new ConclaveOptions { HomeDirectory = fresh });
+            var total = await log.ReadTotalAsync(null, null, CancellationToken.None);
+
+            Assert.Equal(0, total.Reviews);
+            Assert.True(Directory.Exists(fresh), "读取侧自己没把目录建出来");
+        }
+        finally
+        {
+            var parent = Path.GetDirectoryName(fresh)!;
+            if (Directory.Exists(parent))
+            {
+                Directory.Delete(parent, recursive: true);
+            }
+        }
+    }
+
 }

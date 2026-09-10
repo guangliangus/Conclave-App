@@ -10,11 +10,26 @@ namespace Conclave.Infrastructure;
 /// 于是 <c>conclave report</c> 这种只解析 <c>IReviewLog</c> 的路径会撞上
 /// <c>no such table: reviews</c> —— 表的存在依赖了另一个类恰好被构造过。
 /// 让读取侧去假依赖写入侧也能解决，但那是把顺序约束藏进 DI；这里显式且幂等。
+/// <para>
+/// 同理，<b>父目录也在这里建</b>。SQLite 只建文件不建目录，而 <c>~/.conclave</c> 的创建
+/// 原先只发生在 <c>ElectorIdentity</c> 的 DI 工厂里 —— <c>conclave report</c> 只解析
+/// <see cref="Conclave.Application.Ports.IReviewLog"/>，从不碰那个工厂，于是全新机器上
+/// 直接 <c>SQLite Error 14: unable to open database file</c>。
+/// 实测在 CI 的干净 runner 上炸掉了 release 打包的自检，而开发机上 <c>~/.conclave</c>
+/// 早就存在，永远看不到。跟上面那条是同一种病：状态的存在依赖了另一个类恰好被构造过。
+/// </para>
 /// </remarks>
 internal static class ActaSchema
 {
     internal static void EnsureCreated(string connectionString)
     {
+        var dataSource = new SqliteConnectionStringBuilder(connectionString).DataSource;
+        var dir = Path.GetDirectoryName(dataSource);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            _ = Directory.CreateDirectory(dir);
+        }
+
         using var conn = new SqliteConnection(connectionString);
         conn.Open();
         using var cmd = conn.CreateCommand();

@@ -97,7 +97,10 @@ else
   echo "==> 自检（跑一次 report）"
   if ! "${APP}/Contents/MacOS/conclave" report >/dev/null 2>dist/smoke.err; then
     echo "❌ bundle 起不来：" >&2
-    tail -5 dist/smoke.err >&2
+    # 要 head 不要 tail：.NET 未处理异常的<b>第一行</b>才是消息（"SQLite Error 14: unable to
+    # open database file"），后面全是栈帧。原先 tail -5 只印栈尾，CI 上失败了也看不出原因，
+    # 得在本机复刻环境才能诊断 —— 这条自检的价值一半在于它说得清。
+    sed -n '1,40p' dist/smoke.err >&2
     exit 1
   fi
   rm -f dist/smoke.err
