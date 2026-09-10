@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22" role="img" aria-label="Conclave">
+  <title>Conclave — 菜单栏模板图 · 空闲（闭眼打盹）</title>
+  <!--
+    空闲的那张：眼睛闭着，两道向下弯的弧缝。它在菜单栏里待一整天，打盹比瞪着眼诚实 ——
+    自动评审默认关着，多数时候它确实闲着；一睁眼（conclave-owl-tray-busy.svg）就是在评了。
+    弧缝用 mask 挖穿而不是画一条底色的线：模板图没有底色，洞必须是真透明。
+    缝宽 12 单位，缩到 18px 约 2px —— 再细就被抗锯齿抹成灰，看不出是闭着的眼。
+  -->
+  <defs>
+    <mask id="lids">
+      <rect width="256" height="256" fill="#fff"/>
+      <path d="M78 116 C86 130 114 130 122 116 M134 116 C142 130 170 130 178 116"
+            fill="none" stroke="#000" stroke-width="12" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g transform="scale(0.0859375) translate(0 -6)" fill="#000">
+    <path mask="url(#lids)" d="
+      M62 52
+      C56 72 52 96 52 120
+      C52 160 66 196 100 206
+      L156 206
+      C190 196 204 160 204 120
+      C204 96 200 72 194 52
+      C186 66 174 78 158 76
+      C146 70 110 70 98 76
+      C82 78 70 66 62 52 Z"/>
+    <rect x="94" y="202" width="22" height="20" rx="6"/>
+    <rect x="140" y="202" width="22" height="20" rx="6"/>
+    <rect x="50" y="216" width="156" height="18" rx="9"/>
+  </g>
+</svg>

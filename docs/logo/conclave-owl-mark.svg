@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
+     viewBox="0 0 256 256" role="img" aria-label="Conclave">
+  <title>Conclave — 猫头鹰剪影（透明底，单色，供浅色页面与字标拼接）</title>
+  <!-- 没有圆徽，剪影本身用近黑；挖空处真的是透明（evenodd），放在任何底色上都成立 -->
+  <g transform="translate(0 -8)" fill="#24292F">
+    <path fill-rule="evenodd" d="
+      M62 52
+      C56 72 52 96 52 120
+      C52 160 66 196 100 206
+      L156 206
+      C190 196 204 160 204 120
+      C204 96 200 72 194 52
+      C186 66 174 78 158 76
+      C146 70 110 70 98 76
+      C82 78 70 66 62 52 Z
+      M76 118 a24 24 0 1 0 48 0 a24 24 0 1 0 -48 0 Z M132 118 a24 24 0 1 0 48 0 a24 24 0 1 0 -48 0 Z
+      M119 138 L137 138 L128 154 Z"/>
+    <circle cx="102" cy="120" r="9"/>
+    <circle cx="154" cy="120" r="9"/>
+    <rect x="98" y="200" width="18" height="18" rx="6"/>
+    <rect x="140" y="200" width="18" height="18" rx="6"/>
+    <path fill-rule="evenodd" d="M53 220 a15 15 0 1 0 30 0 a15 15 0 1 0 -30 0 Z M62 220 a6 6 0 1 0 12 0 a6 6 0 1 0 -12 0 Z"/>
+    <rect x="80" y="214" width="108" height="12" rx="6"/>
+    <rect x="164" y="224" width="8" height="14" rx="2"/>
+    <rect x="176" y="224" width="8" height="10" rx="2"/>
+  </g>
+</svg>

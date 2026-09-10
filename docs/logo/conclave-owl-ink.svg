@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
+     viewBox="0 0 256 256" role="img" aria-label="Conclave">
+  <title>Conclave — 猫头鹰，品牌色版（墨蓝底 · 羊皮纸白 · 金瞳）</title>
+  <!--
+    GitHub Octocat 式：一枚近黑的圆徽，里面一个白色剪影，细节靠挖空。
+
+    为什么是猫头鹰：一群猫头鹰在英文里就叫 parliament（议会）——
+    这套东西做的正是「几台机器各自看完、投票、落一个结论」；大眼睛是审阅本身；
+    夜行是它平时的样子（菜单栏里一个图标，后台一直在跑）。
+    脚下那把钥匙：conclave 的词源 cum clave，「以钥匙锁闭」。
+
+    形体上刻意跟猫拉开距离：耳羽矮、向外撇，头比身子宽，眼睛占掉半张脸。
+  -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#212150"/>
+      <stop offset="1" stop-color="#111228"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="128" fill="url(#plate)"/>
+
+  <g transform="translate(0 -8)">
+    <!-- 身体 + 头 + 两撮耳羽，一笔闭合 -->
+    <path fill="#F2EDE4" d="
+      M62 52
+      C56 72 52 96 52 120
+      C52 160 66 196 100 206
+      L156 206
+      C190 196 204 160 204 120
+      C204 96 200 72 194 52
+      C186 66 174 78 158 76
+      C146 70 110 70 98 76
+      C82 78 70 66 62 52 Z"/>
+
+    <!-- 眼睛：挖空 + 瞳孔，瞳孔略向内下 —— 在看东西，不是在发呆 -->
+    <circle cx="100" cy="118" r="24" fill="#151635"/>
+    <circle cx="156" cy="118" r="24" fill="#151635"/>
+    <circle cx="102" cy="120" r="9" fill="#E2AC44"/>
+    <circle cx="154" cy="120" r="9" fill="#E2AC44"/>
+
+    <!-- 喙 -->
+    <path fill="#151635" d="M119 138 L137 138 L128 154 Z"/>
+
+    <!-- 收拢的翅膀：两道刻线，小尺寸下自然消失 -->
+    <path fill="none" stroke="#151635" stroke-width="5" stroke-linecap="round"
+          d="M70 150 C64 172 70 190 84 200 M186 150 C192 172 186 190 172 200"/>
+
+    <!-- 脚：跨过身体与钥匙之间那道缝 -->
+    <rect x="98" y="200" width="18" height="18" rx="6" fill="#F2EDE4"/>
+    <rect x="140" y="200" width="18" height="18" rx="6" fill="#F2EDE4"/>
+
+    <!-- 钥匙：左环、横杆、右端两个齿 -->
+    <circle cx="68" cy="220" r="15" fill="#F2EDE4"/>
+    <circle cx="68" cy="220" r="6" fill="#151635"/>
+    <rect x="80" y="214" width="108" height="12" rx="6" fill="#F2EDE4"/>
+    <rect x="164" y="224" width="8" height="14" rx="2" fill="#F2EDE4"/>
+    <rect x="176" y="224" width="8" height="10" rx="2" fill="#F2EDE4"/>
+  </g>
+</svg>
