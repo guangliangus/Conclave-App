@@ -1,0 +1,29 @@
+# 门禁：推到 main 或开 PR 就跑一遍测试。跟 release.yml 的测试步骤一致，
+# 差别只是这里用 Linux（快、便宜）而不打包 —— 打包只在打 tag 时做。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: 构建
+        run: dotnet build Conclave.slnx --nologo -c Release
+
+      # trx 是给下面那步读的：架构守卫是这个项目正确性的两根支柱（领域层纯函数、依赖朝内），
+      # 而「0 个测试」也是绿的 —— 门禁脚本会数它到底跑了几个。
+      - name: 测试
+        run: dotnet test Conclave.slnx --nologo -c Release --no-build --logger trx
+
+      - name: 架构守卫真的跑过
+        run: scripts/ci/assert-architecture-tests-ran.sh
