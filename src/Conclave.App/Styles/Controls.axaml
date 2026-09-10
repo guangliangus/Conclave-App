@@ -1,0 +1,535 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!--
+    控件样式表。两条约定：
+
+    1. 每个文字类都显式设自己的 Foreground。Avalonia 里 Style 的 setter 优先级高于
+       继承值，所以一旦在祖先上设了颜色，子级的继承色不会生效 —— 逐类写清最省事。
+    2. 按钮和分段切换用自带模板的 ControlTheme，不去改 Fluent 模板的内部 part。
+       part 名字是别人的实现细节，跟着 Avalonia 大版本变；自带模板不会。
+  -->
+
+
+  <!-- ── 结构 ───────────────────────────────────────────────────────── -->
+
+  <!--
+    整窗最外层，只管底色。
+
+    圆角、边框、阴影、那三个红黄绿按钮都交回系统标题栏 —— 自己画的那一版要靠
+    「窗口透明 + 这层裁剪」，而 Avalonia 的 ClipToBounds 裁的是矩形边界、不跟
+    CornerRadius 走，于是顶栏那条白底会把四个角重新填成方的、边缘还漏出后面窗口的颜色。
+    系统给的圆角没有这个问题，而且免费带阴影。
+  -->
+  <Style Selector="Border.shell">
+    <Setter Property="Background" Value="{DynamicResource BgBrush}" />
+  </Style>
+
+  <Style Selector="Border.topbar">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Padding" Value="18,12" />
+  </Style>
+
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+
+  <Style Selector="Border.cardhead">
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Padding" Value="14,10" />
+  </Style>
+
+  <!-- 表头：跟行同一套列宽，靠 Surface2 与下边框跟数据分开 -->
+  <Style Selector="Border.thead">
+    <Setter Property="Background" Value="{DynamicResource Surface2Brush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+    <Setter Property="Padding" Value="14,7" />
+  </Style>
+
+  <Style Selector="Border.tile">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="13,10" />
+  </Style>
+
+  <!-- 数据行。悬浮高亮是这张表唯一的交互反馈，所以必须有 -->
+  <Style Selector="Border.row">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Padding" Value="14,0" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+  <!--
+    队列分组。顺序有讲究：分组底色写在悬浮之前，悬浮的三条写在最后 ——
+    Avalonia 里同权重的 setter 按出现顺序覆盖，反了的话有底色的行就没有悬浮反馈。
+  -->
+  <Style Selector="Border.row.busy">
+    <Setter Property="Background" Value="{DynamicResource RowBusyBrush}" />
+  </Style>
+
+  <!-- 本节点手上的活。整张表里最该被一眼挑出来的那几行，所以用品牌金 -->
+  <Style Selector="Border.row.mine">
+    <Setter Property="Background" Value="{DynamicResource RowMineBrush}" />
+  </Style>
+
+  <Style Selector="Border.row:pointerover">
+    <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+  </Style>
+  <Style Selector="Border.row.busy:pointerover">
+    <Setter Property="Background" Value="{DynamicResource RowBusyHoverBrush}" />
+  </Style>
+  <Style Selector="Border.row.mine:pointerover">
+    <Setter Property="Background" Value="{DynamicResource RowMineHoverBrush}" />
+  </Style>
+  <Style Selector="Border.row.pr">
+    <Setter Property="MinHeight" Value="38" />
+  </Style>
+  <Style Selector="Border.row.dense">
+    <Setter Property="MinHeight" Value="30" />
+  </Style>
+
+  <!-- 通知一行两截（标题 + 补充信息），高度由内容定，所以给上下内边距而不是 MinHeight -->
+  <Style Selector="Border.row.note">
+    <Setter Property="Padding" Value="14,8" />
+  </Style>
+
+  <Style Selector="Border.banner">
+    <Setter Property="Background" Value="{DynamicResource WarnSoftBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource WarnBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="13,10" />
+  </Style>
+
+  <Style Selector="GridSplitter.splitter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Height" Value="10" />
+  </Style>
+
+  <!-- ── 文字 ───────────────────────────────────────────────────────── -->
+
+  <Style Selector="TextBlock.wordmark">
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="LetterSpacing" Value="3" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.tagline">
+    <Setter Property="FontSize" Value="10.5" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.card-title">
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.card-note">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.tile-label">
+    <Setter Property="FontSize" Value="10.5" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="0.8" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.tile-hint">
+    <Setter Property="FontSize" Value="10.5" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.th">
+    <Setter Property="FontSize" Value="10.5" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+  </Style>
+
+  <Style Selector="TextBlock.cell">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="Menlo,Monaco,Consolas,monospace" />
+    <Setter Property="FontSize" Value="11" />
+  </Style>
+
+  <!-- .dim / .muted 放在最后：跟 .cell 同权重，靠顺序覆盖它的颜色 -->
+  <Style Selector="TextBlock.dim">
+    <Setter Property="Foreground" Value="{DynamicResource TextDimBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <!-- .gold = 「跟本节点有关」，不是「可点」—— 见 Theme.axaml 顶部关于三类颜色的说明 -->
+  <Style Selector="TextBlock.gold">
+    <Setter Property="Foreground" Value="{DynamicResource GoldBrush}" />
+  </Style>
+
+  <!--
+    可点的文字。用 Accent 而不是普通文字色：Theme.axaml 里定的规矩是
+    「Accent = 可交互」，PR 号现在真的可点，所以它该是这个颜色。
+    下划线只在悬浮时出现 —— 表格里几十行常驻下划线太吵。
+  -->
+  <Style Selector="TextBlock.link">
+    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+  </Style>
+
+  <Style Selector="Button:pointerover TextBlock.link">
+    <Setter Property="TextDecorations" Value="Underline" />
+  </Style>
+
+  <!-- 拼不出地址时不藏起 PR 号，只是不再显得可点（tooltip 说明原因） -->
+  <Style Selector="Button:disabled TextBlock.link">
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+
+  <!--
+    顶栏那句「空闲 / 评审中 #1234」。只管字号字重，<b>不设颜色</b> ——
+    颜色一律由同时挂上去的 .ok / .gold 给，那两个类跟状态点用的是同一套语义色。
+    这里再设一次 Foreground 的话，谁生效就要看样式先后顺序，那是个一改布局就会翻车的规矩。
+  -->
+  <Style Selector="TextBlock.status">
+    <Setter Property="FontSize" Value="11.5" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <!-- 语义色里原先缺了「正常/通过」这一档：徽章和状态点都有，文字没有 -->
+  <Style Selector="TextBlock.ok">
+    <Setter Property="Foreground" Value="{DynamicResource OkBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.warn">
+    <Setter Property="Foreground" Value="{DynamicResource WarnBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.bad">
+    <Setter Property="Foreground" Value="{DynamicResource BadBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.num">
+    <Setter Property="TextAlignment" Value="Right" />
+  </Style>
+
+  <Style Selector="TextBlock.empty">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="TextAlignment" Value="Center" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <!-- ── 徽章与胶囊 ─────────────────────────────────────────────────── -->
+
+  <!--
+    操作提示浮条。浮在内容区顶部，不占布局、也不挡点击（IsHitTestVisible=False 在 XAML 里设），
+    所以加它不用动任何一行的 Grid.Row。
+  -->
+  <!--
+    右对齐而不是居中：右边正是「立即轮询/退出」和每行「操作」列所在的位置，
+    反馈落在手边而不是屏幕中央。配色跟身份胶囊同一档（表面色 + 一根发丝边），
+    只用一个语义色点区分成败 —— 原先金底金边金字三层金，比它要传达的信息响得多。
+  -->
+  <Style Selector="Border.toast">
+    <Setter Property="Background" Value="{DynamicResource Surface2Brush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="11,6" />
+    <Setter Property="Margin" Value="0,9,4,0" />
+    <Setter Property="HorizontalAlignment" Value="Right" />
+    <Setter Property="VerticalAlignment" Value="Top" />
+    <Setter Property="Opacity" Value="0" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.16" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- 用透明度淡入淡出而不是 IsVisible：它是叠在内容区上的浮层，不占布局，
+       所以一直挂着也不影响任何东西，而淡入比硬闪一下体面 -->
+  <Style Selector="Border.toast.on">
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+
+  <Style Selector="Border.toast TextBlock">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+
+  <!-- 身份胶囊：顶栏那排「elector / az / project / 负载 / 额度」 -->
+  <Style Selector="Border.chip">
+    <Setter Property="Background" Value="{DynamicResource Surface2Brush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="7" />
+    <Setter Property="Padding" Value="9,4" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <Style Selector="Border.chip > TextBlock">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="Foreground" Value="{DynamicResource TextDimBrush}" />
+  </Style>
+
+  <Style Selector="Border.chip.gold">
+    <Setter Property="Background" Value="{DynamicResource GoldSoftBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource GoldBrush}" />
+  </Style>
+
+  <Style Selector="Border.chip.gold > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource GoldBrush}" />
+  </Style>
+
+  <!--
+    结论/阶段徽章。色带只有五种，含义固定：
+      ok 通过 · warn 待处理 · bad 驳回 · info 进行中 · mute 未开始/无
+  -->
+  <!--
+    tab 名字后面那个上标数字。做成小药丸而不是纯文字：光靠字号变小在 12.5px 的标题旁边
+    几乎看不出是角标，加个底色才读得出「这是个计数」。
+    VerticalAlignment=Top 加负上边距把它顶上去 —— Avalonia 没有真正的上标排版。
+  -->
+  <Style Selector="Border.tabcount">
+    <Setter Property="Background" Value="{DynamicResource MutedSoftBrush}" />
+    <Setter Property="CornerRadius" Value="5" />
+    <Setter Property="Padding" Value="4,0" />
+    <Setter Property="MinWidth" Value="15" />
+    <Setter Property="VerticalAlignment" Value="Top" />
+    <Setter Property="Margin" Value="0,-3,0,0" />
+  </Style>
+
+  <Style Selector="Border.tabcount > TextBlock">
+    <Setter Property="FontSize" Value="9.5" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="TextAlignment" Value="Center" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <!--
+    只给三个有语义的染色，其余留中性。金色在这套主题里专指「本节点相关」，
+    绿/橙/红只表达状态 —— 给每个 tab 随便配一种颜色会把这条约定冲掉，
+    六个彩色角标并排也就没有一个是突出的了。
+  -->
+  <Style Selector="Border.tabcount.gold">
+    <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+  </Style>
+  <Style Selector="Border.tabcount.gold > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+  </Style>
+
+  <Style Selector="Border.tabcount.ok">
+    <Setter Property="Background" Value="{DynamicResource OkSoftBrush}" />
+  </Style>
+  <Style Selector="Border.tabcount.ok > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource OkBrush}" />
+  </Style>
+
+  <Style Selector="Border.tabcount.warn">
+    <Setter Property="Background" Value="{DynamicResource WarnSoftBrush}" />
+  </Style>
+  <Style Selector="Border.tabcount.warn > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource WarnBrush}" />
+  </Style>
+
+  <Style Selector="Border.tabcount.bad">
+    <Setter Property="Background" Value="{DynamicResource BadSoftBrush}" />
+  </Style>
+  <Style Selector="Border.tabcount.bad > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource BadBrush}" />
+  </Style>
+
+  <Style Selector="Border.badge">
+    <Setter Property="Background" Value="{DynamicResource MutedSoftBrush}" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="7,2" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <Style Selector="Border.badge > TextBlock">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <Style Selector="Border.badge.ok">
+    <Setter Property="Background" Value="{DynamicResource OkSoftBrush}" />
+  </Style>
+  <Style Selector="Border.badge.ok > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource OkBrush}" />
+  </Style>
+
+  <Style Selector="Border.badge.warn">
+    <Setter Property="Background" Value="{DynamicResource WarnSoftBrush}" />
+  </Style>
+  <Style Selector="Border.badge.warn > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource WarnBrush}" />
+  </Style>
+
+  <Style Selector="Border.badge.bad">
+    <Setter Property="Background" Value="{DynamicResource BadSoftBrush}" />
+  </Style>
+  <Style Selector="Border.badge.bad > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource BadBrush}" />
+  </Style>
+
+  <Style Selector="Border.badge.info">
+    <Setter Property="Background" Value="{DynamicResource InfoSoftBrush}" />
+  </Style>
+  <Style Selector="Border.badge.info > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource InfoBrush}" />
+  </Style>
+
+  <!-- 「还没有结论」：保留徽章的排版位置，但去掉底色 —— 一格灰胶囊看起来像个可点的东西 -->
+  <Style Selector="Border.badge.bare">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+
+  <Style Selector="Border.badge.gold">
+    <Setter Property="Background" Value="{DynamicResource GoldSoftBrush}" />
+  </Style>
+  <Style Selector="Border.badge.gold > TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource GoldBrush}" />
+  </Style>
+
+  <!-- 计数徽章：卡片标题右边那个数字 -->
+  <Style Selector="Border.count">
+    <Setter Property="Background" Value="{DynamicResource Surface2Brush}" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="7,1" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <Style Selector="Border.count > TextBlock">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource TextDimBrush}" />
+  </Style>
+
+  <!-- 状态点。跟徽章共用同一套语义色 -->
+  <Style Selector="Ellipse.dot">
+    <Setter Property="Width" Value="7" />
+    <Setter Property="Height" Value="7" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Fill" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+  <Style Selector="Ellipse.dot.ok">
+    <Setter Property="Fill" Value="{DynamicResource OkBrush}" />
+  </Style>
+  <Style Selector="Ellipse.dot.gold">
+    <Setter Property="Fill" Value="{DynamicResource GoldBrush}" />
+  </Style>
+  <Style Selector="Ellipse.dot.bad">
+    <Setter Property="Fill" Value="{DynamicResource BadBrush}" />
+  </Style>
+
+  <!-- ── 其他控件 ───────────────────────────────────────────────────── -->
+
+  <Style Selector="ToggleSwitch">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{DynamicResource TextDimBrush}" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="Cursor" Value="Hand" />
+  </Style>
+
+  <!-- 弹出层。跟卡片一套配色，圆角比卡片小一档 -->
+  <Style Selector="FlyoutPresenter">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="5" />
+    <Setter Property="MinWidth" Value="0" />
+  </Style>
+
+  <Style Selector="StackPanel.menu">
+    <Setter Property="Spacing" Value="1" />
+    <Setter Property="MinWidth" Value="146" />
+  </Style>
+
+  <Style Selector="Border.menu-sep">
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="6,4" />
+    <Setter Property="Background" Value="{DynamicResource BorderBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.menu-label">
+    <Setter Property="FontSize" Value="10.5" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="0.8" />
+    <Setter Property="Margin" Value="10,3,10,2" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <!-- 这个应用几乎每个字段都有 tooltip 解释，所以它值得跟卡片一套配色 -->
+  <Style Selector="ToolTip">
+    <Setter Property="Background" Value="{DynamicResource Surface2Brush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="10,7" />
+    <Setter Property="FontSize" Value="11.5" />
+    <Setter Property="MaxWidth" Value="460" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+
+  <!-- MinWidth 必须显式归零：Fluent 给 ProgressBar 的默认 MinWidth 是 200，
+       放进表格里会把整列撑宽、把右边几列顶歪 -->
+  <!--
+    额度条。变色的两条线不是随便挑的：0.8 是 Elector.MaxUtilization（越过就不再入席），
+    所以界面变红的那一刻，正是这个节点真的停止接活的那一刻。
+  -->
+  <Style Selector="ProgressBar.quota">
+    <Setter Property="Height" Value="6" />
+    <Setter Property="MinHeight" Value="6" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="CornerRadius" Value="3" />
+    <Setter Property="Background" Value="{DynamicResource MutedSoftBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+  </Style>
+
+  <Style Selector="ProgressBar.quota.warn">
+    <Setter Property="Foreground" Value="{DynamicResource WarnBrush}" />
+  </Style>
+
+  <Style Selector="ProgressBar.quota.bad">
+    <Setter Property="Foreground" Value="{DynamicResource BadBrush}" />
+  </Style>
+
+  <Style Selector="ProgressBar.votes">
+    <Setter Property="Height" Value="3" />
+    <Setter Property="MinHeight" Value="3" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="Background" Value="{DynamicResource MutedSoftBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+  </Style>
+
+</Styles>

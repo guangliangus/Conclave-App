@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"
+     viewBox="0 0 512 512" role="img" aria-label="Conclave">
+  <title>Conclave — 一方印：盖章即定论</title>
+  <defs>
+    <!-- 底板四层材质沿用上一版（渐变 + 高光 + 暗角 + 顶边轮廓），那是试了十几版才稳下来的 -->
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#212150"/>
+      <stop offset="1" stop-color="#111228"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx=".3" cy=".14" r=".85">
+      <stop offset="0" stop-color="#fff" stop-opacity=".15"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vig" cx=".5" cy=".54" r=".78">
+      <stop offset=".5" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".32"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2=".55">
+      <stop offset="0" stop-color="#fff" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <!-- 印面：羊皮纸白，左上亮右下暗，像一块打磨过的石面 -->
+    <linearGradient id="face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FBF6EC"/>
+      <stop offset="1" stop-color="#E7DECB"/>
+    </linearGradient>
+    <clipPath id="squircle"><rect width="512" height="512" rx="115"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect width="512" height="512" fill="url(#plate)"/>
+    <rect width="512" height="512" fill="url(#sheen)"/>
+    <rect width="512" height="512" fill="url(#vig)"/>
+  </g>
+  <rect x="1.4" y="1.4" width="509.2" height="509.2" rx="113.8"
+        fill="none" stroke="url(#rim)" stroke-width="2.8"/>
+
+  <!--
+    印章。微微斜着（-7°）：盖下去的章从来不是正的，正了就成了对话框里的方框。
+    金色只在石头的两个侧面 —— 那是「金石」的一小截，不是主色。
+    印面上阴刻一个方笃笃的 C：Conclave 的首字母，篆刻式的直角转折，16px 下仍是一个 C。
+  -->
+  <g transform="translate(256 256) rotate(-7)">
+    <!-- 石头侧面：右面亮金、底面暗金，光从左上来 -->
+    <path d="M150 -150 L172 -128 L172 172 L150 150 Z" fill="#D9A23F"/>
+    <path d="M-150 150 L-128 172 L172 172 L150 150 Z" fill="#B27B26"/>
+    <!-- 印面 -->
+    <rect x="-150" y="-150" width="300" height="300" rx="16" fill="url(#face)"/>
+    <!-- 阴刻的 C：先铺一层偏亮的刻痕边，再压上深色，左上便有一道被光扫到的刻壁 -->
+    <path d="M-86 -86 H90 V-36 H-36 V36 H90 V86 H-86 Z" fill="#4A4C7A"/>
+    <path d="M-88 -92 H88 V-40 H-36 V40 H88 V92 H-88 Z" fill="#1A1C3E"/>
+  </g>
+</svg>

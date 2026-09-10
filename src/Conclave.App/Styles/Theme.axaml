@@ -1,0 +1,311 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!--
+    设计令牌。
+
+    底色走中性冷灰（浅色）/ 石板黑（深色），不再用羊皮纸米色 —— 米底会把所有语义色
+    一起拉暖，绿的不够绿、灰的发黄，整屏看起来像旧照片。中性底下同一组语义色的
+    区分度高得多，而卡片、表头、行悬浮这三层灰阶也才拉得开。
+
+    分层四级，深浅两套一一对应：
+      Bg       窗口底色
+      Surface  卡片（浅色下是纯白，卡片才「浮」在底色上）
+      Surface2 表头、页脚、徽章底
+      Hover    行悬浮
+
+    颜色分三类，各有各的职责，不混用：
+      Accent  墨蓝 —— 可交互：主按钮、当前 tab、进度条、焦点框
+      Gold    金   —— 「跟本节点有关」：本机指纹、本机在评、本机持席
+      语义色  绿/琥珀/红/青 —— 只表达评审结论与阶段
+
+    金色原先兼任 Accent 与「本节点」两职，于是 revision 号、按钮、进度条、
+    自己的活全是同一个橙金，扫一眼分不出哪个是「可点」哪个是「我的」。拆开之后
+    金色在整屏上只出现在真正跟本机相关的地方，反而更醒目。
+  -->
+  <ResourceDictionary.ThemeDictionaries>
+
+    <ResourceDictionary x:Key="Dark">
+      <SolidColorBrush x:Key="BgBrush" Color="#0C0F14" />
+      <SolidColorBrush x:Key="SurfaceBrush" Color="#141821" />
+      <SolidColorBrush x:Key="Surface2Brush" Color="#1A1F29" />
+      <SolidColorBrush x:Key="HoverBrush" Color="#212834" />
+      <SolidColorBrush x:Key="BorderBrush" Color="#222937" />
+      <SolidColorBrush x:Key="BorderStrongBrush" Color="#374050" />
+
+      <SolidColorBrush x:Key="TextBrush" Color="#E7EAF1" />
+      <SolidColorBrush x:Key="TextDimBrush" Color="#9EA8B9" />
+      <SolidColorBrush x:Key="TextMutedBrush" Color="#6B7585" />
+
+      <SolidColorBrush x:Key="AccentBrush" Color="#7B97FF" />
+      <SolidColorBrush x:Key="AccentSoftBrush" Color="#2E7B97FF" />
+      <SolidColorBrush x:Key="AccentInkBrush" Color="#0C0F14" />
+
+      <!-- 品牌金，只给「本节点」用 -->
+      <SolidColorBrush x:Key="GoldBrush" Color="#E2AC44" />
+      <SolidColorBrush x:Key="GoldSoftBrush" Color="#2EE2AC44" />
+
+      <SolidColorBrush x:Key="OkBrush" Color="#45C08A" />
+      <SolidColorBrush x:Key="OkSoftBrush" Color="#2E45C08A" />
+      <SolidColorBrush x:Key="WarnBrush" Color="#E89A4E" />
+      <SolidColorBrush x:Key="WarnSoftBrush" Color="#2EE89A4E" />
+      <SolidColorBrush x:Key="BadBrush" Color="#E86A62" />
+      <SolidColorBrush x:Key="BadSoftBrush" Color="#2EE86A62" />
+      <!-- 青而不是蓝：Accent 已经占了蓝，徽章大小的两块蓝分不开 -->
+      <SolidColorBrush x:Key="InfoBrush" Color="#4EBFCF" />
+      <SolidColorBrush x:Key="InfoSoftBrush" Color="#2E4EBFCF" />
+      <SolidColorBrush x:Key="MutedSoftBrush" Color="#229EA8B9" />
+
+      <!--
+        队列行的分组底色。比徽章底更淡：一行 1000px 宽的色块跟一枚 60px 的徽章
+        用同一个透明度，整行会盖过它上面的文字。悬浮态各自加深，
+        否则「本节点那几行」在鼠标划过时会退回普通灰，反馈和分组打架。
+      -->
+      <SolidColorBrush x:Key="RowMineBrush" Color="#22E2AC44" />
+      <SolidColorBrush x:Key="RowMineHoverBrush" Color="#33E2AC44" />
+      <SolidColorBrush x:Key="RowBusyBrush" Color="#1E4EBFCF" />
+      <SolidColorBrush x:Key="RowBusyHoverBrush" Color="#2E4EBFCF" />
+
+      <!--
+        覆盖 Fluent 的系统强调色，让还在用 Fluent 模板的控件（开关、焦点框、
+        滚动条拇指）也跟着走 Accent —— 比逐个控件去改它们各自的资源键少一个数量级的代码。
+      -->
+      <Color x:Key="SystemAccentColor">#7B97FF</Color>
+      <Color x:Key="SystemAccentColorLight1">#95ACFF</Color>
+      <Color x:Key="SystemAccentColorLight2">#AFC1FF</Color>
+      <Color x:Key="SystemAccentColorLight3">#C9D6FF</Color>
+      <Color x:Key="SystemAccentColorDark1">#6079E0</Color>
+      <Color x:Key="SystemAccentColorDark2">#4A5FBC</Color>
+      <Color x:Key="SystemAccentColorDark3">#374796</Color>
+    </ResourceDictionary>
+
+    <ResourceDictionary x:Key="Light">
+      <SolidColorBrush x:Key="BgBrush" Color="#ECEEF3" />
+      <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="Surface2Brush" Color="#F4F6FA" />
+      <SolidColorBrush x:Key="HoverBrush" Color="#EDF1F8" />
+      <SolidColorBrush x:Key="BorderBrush" Color="#E0E4EC" />
+      <SolidColorBrush x:Key="BorderStrongBrush" Color="#C2C9D6" />
+
+      <SolidColorBrush x:Key="TextBrush" Color="#101420" />
+      <SolidColorBrush x:Key="TextDimBrush" Color="#4A5364" />
+      <SolidColorBrush x:Key="TextMutedBrush" Color="#78828F" />
+
+      <!--
+        浅色下语义色一律压深：白底上要读得清，靠的是深色文字 + 极淡的同色底。
+        原来那套是把深色用的亮色直接搬过来，于是徽章文字全都糊在自己的底色里。
+      -->
+      <SolidColorBrush x:Key="AccentBrush" Color="#2C4ECC" />
+      <SolidColorBrush x:Key="AccentSoftBrush" Color="#1A2C4ECC" />
+      <SolidColorBrush x:Key="AccentInkBrush" Color="#FFFFFF" />
+
+      <SolidColorBrush x:Key="GoldBrush" Color="#8A6410" />
+      <SolidColorBrush x:Key="GoldSoftBrush" Color="#22C08D2A" />
+
+      <SolidColorBrush x:Key="OkBrush" Color="#0F6E4A" />
+      <SolidColorBrush x:Key="OkSoftBrush" Color="#1A119668" />
+      <SolidColorBrush x:Key="WarnBrush" Color="#8D5305" />
+      <SolidColorBrush x:Key="WarnSoftBrush" Color="#1FC9821A" />
+      <SolidColorBrush x:Key="BadBrush" Color="#B42E25" />
+      <SolidColorBrush x:Key="BadSoftBrush" Color="#1AD04A3E" />
+      <SolidColorBrush x:Key="InfoBrush" Color="#0E6070" />
+      <SolidColorBrush x:Key="InfoSoftBrush" Color="#1A128A9E" />
+      <SolidColorBrush x:Key="MutedSoftBrush" Color="#124A5364" />
+
+      <!-- 见深色那套的说明 -->
+      <SolidColorBrush x:Key="RowMineBrush" Color="#18C08D2A" />
+      <SolidColorBrush x:Key="RowMineHoverBrush" Color="#2CC08D2A" />
+      <SolidColorBrush x:Key="RowBusyBrush" Color="#12128A9E" />
+      <SolidColorBrush x:Key="RowBusyHoverBrush" Color="#22128A9E" />
+
+      <Color x:Key="SystemAccentColor">#2C4ECC</Color>
+      <Color x:Key="SystemAccentColorLight1">#4665D6</Color>
+      <Color x:Key="SystemAccentColorLight2">#6480E0</Color>
+      <Color x:Key="SystemAccentColorLight3">#8C9FE9</Color>
+      <Color x:Key="SystemAccentColorDark1">#2542AD</Color>
+      <Color x:Key="SystemAccentColorDark2">#1E368E</Color>
+      <Color x:Key="SystemAccentColorDark3">#17296F</Color>
+    </ResourceDictionary>
+
+  </ResourceDictionary.ThemeDictionaries>
+
+  <!-- ── 控件模板 ─────────────────────────────────────────────────── -->
+
+  <!-- 主按钮：墨蓝底白字，全窗口只有「立即轮询」用它 -->
+  <ControlTheme x:Key="PrimaryButton" TargetType="Button">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Padding" Value="14,7" />
+    <Setter Property="Foreground" Value="{DynamicResource AccentInkBrush}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="bg" CornerRadius="8" Padding="{TemplateBinding Padding}"
+                Background="{DynamicResource AccentBrush}">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            Foreground="{TemplateBinding Foreground}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+
+    <Style Selector="^:pointerover /template/ Border#bg">
+      <Setter Property="Opacity" Value="0.85" />
+    </Style>
+    <Style Selector="^:pressed /template/ Border#bg">
+      <Setter Property="Opacity" Value="0.7" />
+    </Style>
+    <Style Selector="^:disabled /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource Surface2Brush}" />
+    </Style>
+    <Style Selector="^:disabled">
+      <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+    </Style>
+  </ControlTheme>
+
+  <!-- 幽灵按钮：描边，行内动作用 -->
+  <ControlTheme x:Key="GhostButton" TargetType="Button">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="FontSize" Value="11.5" />
+    <Setter Property="Padding" Value="10,4" />
+    <Setter Property="Foreground" Value="{DynamicResource TextDimBrush}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="bg" CornerRadius="7" Padding="{TemplateBinding Padding}"
+                Background="Transparent" BorderThickness="1"
+                BorderBrush="{DynamicResource BorderStrongBrush}">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            Foreground="{TemplateBinding Foreground}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+
+    <Style Selector="^:pointerover /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+    </Style>
+    <Style Selector="^:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+    </Style>
+    <Style Selector="^:pressed /template/ Border#bg">
+      <Setter Property="Opacity" Value="0.7" />
+    </Style>
+    <Style Selector="^:disabled /template/ Border#bg">
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+    </Style>
+    <!-- 手型光标是「这儿能点」的承诺，灰掉之后得收回来 -->
+    <Style Selector="^:disabled">
+      <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+      <Setter Property="Cursor" Value="Arrow" />
+    </Style>
+  </ControlTheme>
+
+  <!--
+    链接按钮：表格里可点的 PR 号用它。
+    按钮而不是给 TextBlock 挂 PointerPressed —— 后者拿不到键盘焦点也没有按下反馈，
+    而这是整张表里唯一会把人带出应用的动作，值得让它看起来就是个链接。
+  -->
+  <ControlTheme x:Key="LinkButton" TargetType="Button">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="Transparent" Padding="{TemplateBinding Padding}">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            HorizontalAlignment="Left" VerticalAlignment="Center" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+  </ControlTheme>
+
+  <!--
+    菜单项。行尾「⋯」弹出来的那几个动作用它。
+
+    刻意<b>不</b>用 MenuFlyout + MenuItem：Fluent 给 MenuItem 的模板自带图标列、
+    快捷键列和 32px 行高，外面能改的只有 Foreground / Padding 这几个，
+    悬浮态、圆角、选中高亮都锁在模板内部的 part 上 —— 那些 part 名字是 Avalonia 的
+    实现细节，改它们等于赌下一个大版本不改名。自己一个 Button 模板反而更短更稳，
+    代价是「指派给…」的子菜单要拍平成一段带小标题的列表（见 MainWindow.axaml）。
+  -->
+  <ControlTheme x:Key="MenuButton" TargetType="Button">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Padding" Value="10,6" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="bg" CornerRadius="7" Padding="{TemplateBinding Padding}"
+                Background="Transparent">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            Foreground="{TemplateBinding Foreground}"
+                            HorizontalAlignment="Left" VerticalAlignment="Center" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+
+    <Style Selector="^:pointerover /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+    </Style>
+    <Style Selector="^:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+    </Style>
+    <Style Selector="^:pressed /template/ Border#bg">
+      <Setter Property="Opacity" Value="0.7" />
+    </Style>
+
+    <!--
+      灰掉的一档。原先没有 —— 于是「刚点过」的菜单项跟能点的长得一模一样，
+      还照样有悬浮高亮和手型光标，点下去却什么都不发生。
+      写在悬浮态后面：同权重时后来者胜，灰掉要压过悬浮。
+    -->
+    <Style Selector="^:disabled">
+      <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+      <Setter Property="Cursor" Value="Arrow" />
+    </Style>
+    <Style Selector="^:disabled /template/ Border#bg">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+  </ControlTheme>
+
+  <!--
+    主 tab。五张表（PR 队列 / 我的 PR / 评审记录 / Acta / 在线节点）平级切换。
+    用 RadioButton 而不是 TabControl：TabControl 的 Fluent 头部自带大字与 32px 内边距，
+    要压到这个密度得改一堆内部 part，而 part 名字是 Avalonia 的实现细节。
+    选中态用底色而不是下划线：卡片头本身有下边框，两条横线会打架。
+  -->
+  <ControlTheme x:Key="TabButton" TargetType="RadioButton">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="FontSize" Value="12.5" />
+    <Setter Property="Padding" Value="13,6" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="bg" CornerRadius="8" Padding="{TemplateBinding Padding}"
+                Background="Transparent">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            Foreground="{TemplateBinding Foreground}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+
+    <Style Selector="^:pointerover /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+    </Style>
+    <Style Selector="^:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+    </Style>
+    <Style Selector="^:checked /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+    </Style>
+    <Style Selector="^:checked">
+      <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+  </ControlTheme>
+
+</ResourceDictionary>

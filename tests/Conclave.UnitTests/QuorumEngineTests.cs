@@ -60,7 +60,7 @@ public class QuorumEngineTests
     }
 
     [Fact]
-    public void Line_bucketing_does_not_merge_findings_that_are_far_apart()
+    public void Findings_far_apart_in_the_same_file_are_not_merged()
     {
         var result = QuorumEngine.Merge("r", [
             Ballot(0, ReviewDecision.Reject, F("src/A.cs", 12)),
@@ -69,6 +69,58 @@ public class QuorumEngineTests
 
         Assert.Equal(2, result.Findings.Count);
         Assert.All(result.Findings, f => Assert.Equal(1, f.Mentions));
+    }
+
+    [Fact]
+    public void Two_findings_from_the_same_ballot_are_never_merged()
+    {
+        // 首次真实评审的原始数据：一票 4 条 finding，行号 9 / 13 / 17 / 13。
+        // 旧的 line/10 分桶把 13、17、13 全塞进同一个桶，4 条真实问题只剩 2 条。
+        var result = QuorumEngine.Merge("r", [
+            Ballot(0, ReviewDecision.Reject,
+                F("scripts/retry.sh", 9, Severity.Critical, "只传次数不传命令时返回 0"),
+                F("scripts/retry.sh", 13, Severity.Major, "最后一次失败后仍白等一轮退避"),
+                F("scripts/retry.sh", 17, Severity.Major, "退出码被压成 1"),
+                F("scripts/retry.sh", 13, Severity.Minor, "退避无上限且无 jitter")),
+        ], 1);
+
+        // 同一个节点报的两条 finding 必然是两个不同的问题，哪怕挨得很近。
+        Assert.Equal(4, result.Findings.Count);
+        Assert.All(result.Findings, f => Assert.Equal(1, f.Mentions));
+        Assert.All(result.Findings, f => Assert.Equal(1.0, f.Confidence, 3));
+        Assert.Equal(Severity.Critical, result.Findings[0].Best.Severity);
+    }
+
+    [Fact]
+    public void Adjacent_findings_from_different_ballots_still_merge()
+    {
+        var result = QuorumEngine.Merge("r", [
+            Ballot(0, ReviewDecision.Reject, F("scripts/retry.sh", 13), F("scripts/retry.sh", 17)),
+            Ballot(1, ReviewDecision.Reject, F("scripts/retry.sh", 14), F("scripts/retry.sh", 18)),
+        ], 2);
+
+        // 两票各报两条、两两对应 → 合成两条，各 2 次提及。
+        Assert.Equal(2, result.Findings.Count);
+        Assert.All(result.Findings, f => Assert.Equal(2, f.Mentions));
+    }
+
+    [Fact]
+    public void Tolerance_is_relative_to_the_anchor_not_an_arbitrary_bucket()
+    {
+        // 9 和 13 差 4，在容差内 → 该合并。旧的 line/10 分桶会把它们分到 0 和 1 桶。
+        var merged = QuorumEngine.Merge("r", [
+            Ballot(0, ReviewDecision.Reject, F("a.cs", 9)),
+            Ballot(1, ReviewDecision.Reject, F("a.cs", 13)),
+        ], 2);
+        Assert.Single(merged.Findings);
+        Assert.Equal(2, merged.Findings[0].Mentions);
+
+        // 10 和 19 差 9，超出容差 → 不该合并。旧分桶里 10 和 19 同属 1 桶。
+        var split = QuorumEngine.Merge("r", [
+            Ballot(0, ReviewDecision.Reject, F("a.cs", 10)),
+            Ballot(1, ReviewDecision.Reject, F("a.cs", 19)),
+        ], 2);
+        Assert.Equal(2, split.Findings.Count);
     }
 
     [Fact]

@@ -6,6 +6,7 @@
     <Project Path="src/Conclave.Infrastructure/Conclave.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Conclave.ArchitectureTests/Conclave.ArchitectureTests.csproj" />
     <Project Path="tests/Conclave.UnitTests/Conclave.UnitTests.csproj" />
   </Folder>
   <Folder Name="/docs/">

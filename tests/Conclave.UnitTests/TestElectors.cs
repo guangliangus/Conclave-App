@@ -10,22 +10,24 @@ internal static class TestElectors
     internal static Elector Make(
         string id,
         string azIdentity = "someone",
-        string[]? repos = null,
         string[]? projects = null,
         int running = 0,
         int reviews24h = 0,
         int maxConcurrent = 2,
+        double utilization = 0,
         DateTimeOffset? heartbeat = null) => new()
         {
             Id = id,
             PublicKey = "pk-" + id,
             AzIdentity = azIdentity,
-            Repos = repos ?? ["cms-apostrophe"],
             Projects = projects ?? ["liontrip-cms"],
             RunningJobs = running,
             Reviews24h = reviews24h,
             MaxConcurrent = maxConcurrent,
+            Utilization = utilization,
             LastHeartbeat = heartbeat ?? Now,
+            ProtocolVersion = Beacon.ProtocolVersion,
+            AppVersion = "1.0.0-test",
         };
 
     internal static PrMeta Pr(
@@ -33,7 +35,6 @@ internal static class TestElectors
         string author = "LIONMAIL\\youngsun",
         bool draft = false,
         int files = 3,
-        int lines = 40,
         string[]? paths = null) => new()
         {
             PrId = id,
@@ -46,7 +47,7 @@ internal static class TestElectors
             SourceBranch = "feature/x",
             TargetBranch = "develop",
             FilesChanged = files,
-            LinesChanged = lines,
             ChangedPaths = paths ?? ["src/Foo.cs"],
+            RemoteUrl = "https://az.invalid/LionTechShanghai/liontrip-cms/_git/cms-apostrophe",
         };
 }

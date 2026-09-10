@@ -10,3 +10,5 @@ TestResults/
 acta.db
 acta.db-*
 elector.key
+dist/
+release/

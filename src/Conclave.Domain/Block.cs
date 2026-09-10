@@ -7,8 +7,17 @@ namespace Conclave.Domain;
 /// Acta（会议录）上的一个区块。
 /// </summary>
 /// <remarks>
-/// 刻意不做全局单链 —— 每个 PR 一条独立链（<see cref="ChainId"/>），
-/// 于是不需要全局排序，也就不需要 PoW/BFT 那一套。见 docs/DESIGN.md §5。
+/// <para>
+/// 全 mesh 共用一条链，<see cref="ChainId"/> 恒为 <see cref="Acta.ChainId"/> ——
+/// 不是每个 PR 一条。早期确实是每 PR 一条（那样单写者居多、撞索引是罕见情况），
+/// 改成单链之后并发写<b>必然</b>争同一个 index，让位重挂因此从异常路径变成常态路径，
+/// 见 <see cref="Acta.ChainId"/> 与 <c>SqliteActa.RebaseAsync</c>。
+/// </para>
+/// <para>
+/// 换来的是一条真正的全局时间线：谁在什么时候评审了什么，按链序读一遍就是。
+/// 仍然不需要 PoW/BFT —— 冲突解决靠「同 index 取 <see cref="Hash"/> 字典序小者」，
+/// 是纯函数、确定性收敛。见 docs/DESIGN.md §5。
+/// </para>
 /// </remarks>
 public sealed record Block
 {

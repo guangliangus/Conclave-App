@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22" role="img" aria-label="Conclave">
+  <title>Conclave — 菜单栏模板图（纯黑单色，macOS 自己按深浅色反相）</title>
+  <!--
+    不斜、不带侧面：18px 上一斜就是一圈抗锯齿的灰毛边。
+    实心方块挖一个 C（evenodd），笔画 3.4 单位 ≈ 3px，抗锯齿抹不掉。
+  -->
+  <path fill="#000" fill-rule="evenodd"
+        d="M4 2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z
+           M5.6 5.6h11v3.4H9v4h7.6v3.4h-11Z"/>
+</svg>

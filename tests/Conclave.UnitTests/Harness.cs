@@ -16,7 +16,7 @@ internal sealed class Harness : IDisposable
 {
     private readonly string _home;
 
-    internal Harness(int maxConcurrent = 2, params string[] repos)
+    internal Harness(int maxConcurrent = 2, double utilization = 0)
     {
         _home = Path.Combine(Path.GetTempPath(), "conclave-orch-" + Guid.NewGuid().ToString("N"));
         Options = new ConclaveOptions
@@ -27,34 +27,41 @@ internal sealed class Harness : IDisposable
             PostToAzureDevOps = false,
         };
 
-        Identity = ElectorIdentity.CreateEphemeral();
-        Acta = new SqliteActa(Options, Identity, NullLogger<SqliteActa>.Instance);
+        Identity = ElectorIdentity.Create();
+        AllowList = new MutableAllowList(Identity.Id);
+        Acta = new SqliteActa(Options, Identity, AllowList, NullLogger<SqliteActa>.Instance);
 
         Mesh = new FakeMesh(new Elector
         {
             Id = Identity.Id,
             PublicKey = Identity.PublicKey,
             AzIdentity = "alan",
-            Repos = repos.Length > 0 ? repos : ["cms-apostrophe"],
             Projects = ["liontrip-cms"],
             MaxConcurrent = maxConcurrent,
+            Utilization = utilization,
             LastHeartbeat = DateTimeOffset.UtcNow,
+            ProtocolVersion = Beacon.ProtocolVersion,
         });
 
         PrSource = new FakePrSource();
         Runner = new FakeReviewRunner();
+        Notifier = new FakeNotifier();
         State = new NodeState();
-        Repos = new FakeRepoLocator(repos.Length > 0 ? repos : ["cms-apostrophe"]);
+        Usage = new FakeUsageMeter(utilization);
 
         Discovery = new DiscoveryService(
-            PrSource, Acta, Mesh, Repos, State, Options, NullLogger<DiscoveryService>.Instance);
+            PrSource, Acta, Mesh, Usage, State, Options, NullLogger<DiscoveryService>.Instance);
+        ReviewLog = new SqliteReviewLog(Options);
         Orchestrator = new ReviewOrchestrator(
-            Acta, Mesh, Runner, PrSource, State, Options, NullLogger<ReviewOrchestrator>.Instance);
+            Acta, Mesh, Runner, PrSource, ReviewLog, Notifier, State, Options,
+            NullLogger<ReviewOrchestrator>.Instance);
     }
 
     internal ConclaveOptions Options { get; }
 
     internal ElectorIdentity Identity { get; }
+
+    internal MutableAllowList AllowList { get; }
 
     internal SqliteActa Acta { get; }
 
@@ -64,7 +71,12 @@ internal sealed class Harness : IDisposable
 
     internal FakeReviewRunner Runner { get; }
 
-    internal FakeRepoLocator Repos { get; }
+    internal FakeNotifier Notifier { get; }
+
+    internal FakeUsageMeter Usage { get; }
+
+    /// <summary>真实的投影表读取 —— 「fix 之后由同一个节点复审」这条要靠它反查归属。</summary>
+    internal SqliteReviewLog ReviewLog { get; }
 
     internal NodeState State { get; }
 
@@ -88,6 +100,33 @@ internal sealed class Harness : IDisposable
         return pr;
     }
 
+    /// <summary>
+    /// 让发现循环把这个 PR 上报进实时状态，返回它的 revision。
+    /// </summary>
+    /// <remarks>
+    /// 队列不再来自链上历史，所以编排测试得先有「上报」这一步。刻意走真实的
+    /// <see cref="DiscoveryService.PollOnceAsync"/> 而不是直接塞 <c>LiveState</c> ——
+    /// 那样连「上报是全量覆盖」这条语义也一起被覆盖到了。
+    /// </remarks>
+    /// <param name="pr">要上报的 PR。</param>
+    /// <param name="append">
+    /// true 表示保留已有的活跃 PR（测多个 PR 同时排队）；默认只留这一个。
+    /// </param>
+    internal async Task<Revision> ReportAsync(PrMeta pr, bool append = false)
+    {
+        if (!append)
+        {
+            foreach (var list in PrSource.Active.Values)
+            {
+                list.Clear();
+            }
+        }
+
+        _ = Publish(pr);
+        await Discovery.PollOnceAsync(CancellationToken.None);
+        return pr.ToRevision();
+    }
+
     /// <summary>跑一轮编排，并等到本轮开跑的评审收尾。</summary>
     internal async Task TickAsync()
     {
@@ -96,7 +135,11 @@ internal sealed class Harness : IDisposable
     }
 
     internal Task<IReadOnlyList<Block>> ChainAsync(Revision rev)
-        => Acta.ReadChainAsync(rev.ChainId, CancellationToken.None);
+        => Acta.ReadRevisionAsync(rev.Id, CancellationToken.None);
+
+    /// <summary>整条全局链，用来验证索引连续与哈希链完整。</summary>
+    internal Task<IReadOnlyList<Block>> WholeChainAsync()
+        => Acta.ReadChainAsync(0, CancellationToken.None);
 
     internal async Task<ChainState> StateOfAsync(Revision rev)
         => ActaProjection.Project(await ChainAsync(rev), rev.Id);
@@ -108,13 +151,14 @@ internal sealed class Harness : IDisposable
     /// HRW 是内容哈希决定的，没法直接指定谁坐哪一席。测试要覆盖「只有 round=0 负责公布」，
     /// 就得反过来搜一个满足条件的 PR 号 —— 这本身也顺带验证了席位分配是纯函数。
     /// </remarks>
-    internal int FindPrIdSeating(int wantedRound, PrMeta template, IEnumerable<Elector> mesh)
+    internal int FindPrIdSeating(
+        int wantedRound, PrMeta template, IEnumerable<Elector> mesh, int quorum = 1)
     {
         for (var prId = 1; prId < 20000; prId++)
         {
             var candidate = template with { PrId = prId };
             var seats = SeatAssignment.Seats(
-                candidate.ToRevision(), candidate, mesh, ReservedMatters.Default, DateTimeOffset.UtcNow);
+                candidate.ToRevision(), candidate, mesh, quorum, DateTimeOffset.UtcNow);
 
             if (seats.Count > wantedRound && seats[wantedRound] == SelfId)
             {

@@ -3,148 +3,1060 @@
         xmlns:vm="using:Conclave.App.ViewModels"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="1180" d:DesignHeight="760"
+        mc:Ignorable="d" d:DesignWidth="1280" d:DesignHeight="840"
         x:Class="Conclave.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
-        Width="1180" Height="760"
-        MinWidth="900" MinHeight="520"
-        Icon="/Assets/avalonia-logo.ico"
+        Width="1100" Height="820"
+        MinWidth="700" MinHeight="560"
+        Icon="/Assets/conclave.ico"
+        Background="{DynamicResource BgBrush}"
         Title="Conclave">
 
-  <Window.Styles>
-    <Style Selector="TextBlock.h">
-      <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="Opacity" Value="0.65" />
-      <Setter Property="FontSize" Value="11" />
-    </Style>
-    <Style Selector="TextBlock.mono">
-      <Setter Property="FontFamily" Value="Menlo,Monaco,Consolas,monospace" />
-      <Setter Property="FontSize" Value="11" />
-    </Style>
-    <Style Selector="TextBlock.cell">
-      <Setter Property="VerticalAlignment" Value="Center" />
-      <Setter Property="TextTrimming" Value="CharacterEllipsis" />
-    </Style>
-  </Window.Styles>
+  <!--
+    四段结构，从上到下：
+      顶栏     本节点是谁、能干什么、两个开关
+      指标条   累计花了多少、账本多长
+      额度     本机 Claude 订阅额度的三个窗口
+      主卡片   五张平级的表，tab 切换
+      状态栏   一行当前状态
 
-  <Grid RowDefinitions="Auto,Auto,*,4,240,Auto" Margin="12">
+    五张表：PR 队列 / 我的 PR / 评审记录 / Acta / 在线节点。它们同级 ——
+    原先「队列」独占上半屏、账本挤在下半屏并用分段控件切换，于是「在线节点」这类
+    同样重要的东西没地方放，而上下两块各自带滚动条，一屏里出现两条滚动条很难用。
 
-    <!-- 节点信息与开关 -->
-    <Border Grid.Row="0" Padding="12" CornerRadius="6"
-            Background="{DynamicResource SystemControlBackgroundListLowBrush}">
-      <Grid ColumnDefinitions="*,Auto">
-        <StackPanel Grid.Column="0" Spacing="4">
-          <TextBlock Text="Conclave" FontSize="20" FontWeight="Bold" />
-          <StackPanel Orientation="Horizontal" Spacing="16">
-            <TextBlock Classes="mono" Text="{Binding NodeId, StringFormat='elector {0}'}" />
-            <TextBlock Classes="mono" Text="{Binding AzIdentity, StringFormat='az {0}'}" />
-            <TextBlock Classes="mono" Text="{Binding Capability}" />
+    表格一律「表头 Border + 行 ItemsControl」，两处用同一串 ColumnDefinitions。
+    刻意不用 ListBox：这几张表都不需要选中态，而 Fluent 的 ListBoxItem 自带内边距
+    和选中高亮，会让行跟表头错开并盖掉行内的语义色。
+  -->
+  <Window.Resources>
+    <!--
+      PR 行模板。「PR 队列」和「我的 PR」共用 —— 两张表的列完全一样，
+      只有数据源不同（后者按作者筛）。复制一份的话，以后改列就得改两处，
+      而漏改的那一处会静默地跟表头错列。
+    -->
+    <DataTemplate x:Key="PrRowTemplate" x:DataType="vm:PrRow">
+      <!-- 底色分组：金 = 本节点在处理，青 = 别的节点在处理，无色 = 还没人接 -->
+      <Border Classes="row pr"
+              Classes.mine="{Binding IsHandledHere}"
+              Classes.busy="{Binding IsHandledElsewhere}">
+        <DockPanel LastChildFill="True">
+
+          <!-- PR 号 + 源 commit：一个 PR 每被 push 一次就多一行，光看 PR 号会以为界面重了 -->
+          <StackPanel DockPanel.Dock="Left" Width="84" Spacing="1" VerticalAlignment="Center">
+            <Button Theme="{StaticResource LinkButton}" Click="OnPrLinkClick"
+                    IsEnabled="{Binding HasUrl}" ToolTip.Tip="{Binding UrlTip}">
+              <TextBlock Classes="cell mono link" FontWeight="SemiBold" Text="{Binding PrNumber}" />
+            </Button>
+            <TextBlock Classes="cell mono muted" FontSize="10" Text="{Binding Commit}"
+                       ToolTip.Tip="{Binding RevisionId, StringFormat='revision {0}'}" />
           </StackPanel>
+
+          <!-- 仓库最先让位；作者一直留着 —— 最窄时的三列是 PR 号 · 作者 · 状态 -->
+          <TextBlock DockPanel.Dock="Left" Width="148" Classes="cell" Margin="0,0,12,0"
+                     IsVisible="{Binding Layout.Wide}"
+                     Text="{Binding Repo}"
+                     ToolTip.Tip="{Binding Project, StringFormat='project {0}'}" />
+
+          <TextBlock DockPanel.Dock="Left" Width="104" Classes="cell dim" Margin="0,0,12,0"
+                     Text="{Binding Author}" ToolTip.Tip="{Binding AuthorFull}" />
+
+          <!--
+            四个动作收进一个菜单。常驻四个按钮时它们占 150px、而且每一行都在喊
+            「点我」—— 表格是用来扫的，动作是偶尔才用的。
+
+            用 Flyout + 自己的按钮，不用 MenuFlyout（理由见 Theme.axaml 的 MenuButton）。
+            代价是子菜单得拍平：「指派给」变成一段小标题加每个节点一行，
+            而 mesh 通常只有两三个节点，拍平之后反而少一次悬浮展开。
+            点完要自己收起浮层 —— 见 OnRowActionClick。
+          -->
+          <!--
+            够宽就把动作直接摆出来 —— 一次点击而不是两次。窄了才收进「⋯」：
+            那时候每一列都在抢宽度，四个按钮占的 190px 比任何一列都贵。
+            两套都在，靠 Layout.Wide 互斥显示。
+          -->
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="4" Width="152"
+                      VerticalAlignment="Center" IsVisible="{Binding Layout.Wide}">
+            <!-- 有人在评的时候，这一行唯一有用的动作就是看它评到哪了 -->
+            <Button Theme="{StaticResource GhostButton}" Content="日志" Padding="8,3"
+                    IsVisible="{Binding CanShowLog}"
+                    Command="{Binding ShowLogCommand}" CommandParameter="{Binding}"
+                    ToolTip.Tip="在表格下面开出实时日志（拉代码、调工具、模型的分析都在里面）" />
+
+            <!--
+              IsVisible = 这一行有没有这个动作，IsEnabled = 此刻点不点得动，tooltip 说
+              灰着的原因。三态的划分见 PrRow 里那段「按钮的三种状态」——
+              最要紧的是「刚点过」那十几秒：按钮灰着，人才知道点上了、不用再点。
+            -->
+            <Button Theme="{StaticResource GhostButton}" Content="评审" Padding="8,3"
+                    IsVisible="{Binding ShowReview}" IsEnabled="{Binding CanReview}"
+                    Command="{Binding ReviewCommand}" CommandParameter="{Binding}"
+                    ToolTip.Tip="{Binding ReviewTip}" />
+
+            <Button Theme="{StaticResource GhostButton}" Content="认领" Padding="8,3"
+                    IsVisible="{Binding ShowClaim}" IsEnabled="{Binding CanClaim}"
+                    Command="{Binding ClaimCommand}" CommandParameter="{Binding}"
+                    ToolTip.Tip="{Binding ClaimTip}" />
+
+            <Button Theme="{StaticResource GhostButton}" Content="撤销" Padding="8,3"
+                    IsVisible="{Binding ShowRelease}" IsEnabled="{Binding CanRelease}"
+                    Command="{Binding ReleaseCommand}" CommandParameter="{Binding}"
+                    ToolTip.Tip="{Binding ReleaseTip}" />
+
+            <!--
+              指派要选人，所以它仍然是个下拉。没有对端、或者刚点过还没有答复时，
+              按钮留在原地灰着 —— 整段消失的话这个功能看起来就像不存在，
+              而「为什么现在点不了」由 tooltip（AssignTip）讲。
+            -->
+            <Button Theme="{StaticResource GhostButton}" Content="指派" Padding="8,3"
+                    IsVisible="{Binding ShowAssign}" IsEnabled="{Binding CanAssign}"
+                    ToolTip.Tip="{Binding AssignTip}">
+              <Button.Flyout>
+                <Flyout Placement="BottomEdgeAlignedRight">
+                  <StackPanel Classes="menu">
+                    <!-- 浮层只有在按钮可点时才打得开，所以这里一定有候选，不必再判空 -->
+                    <ItemsControl ItemsSource="{Binding AssignTargets}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AssignTarget">
+                          <Button Theme="{StaticResource MenuButton}" Content="{Binding Label}"
+                                  Click="OnRowActionClick"
+                                  Command="{Binding Command}" CommandParameter="{Binding}" />
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                </Flyout>
+              </Button.Flyout>
+            </Button>
+          </StackPanel>
+
+          <Panel DockPanel.Dock="Right" Width="34" IsVisible="{Binding !Layout.Wide}">
+            <Button Theme="{StaticResource GhostButton}" Content="⋯"
+                    Padding="8,2" VerticalAlignment="Center"
+                    IsVisible="{Binding HasActions}"
+                    ToolTip.Tip="评审 · 认领 · 指派">
+              <Button.Flyout>
+                <Flyout Placement="BottomEdgeAlignedRight">
+                  <StackPanel Classes="menu">
+                    <Button Theme="{StaticResource MenuButton}" Content="查看评审日志"
+                            IsVisible="{Binding CanShowLog}" Click="OnRowActionClick"
+                            Command="{Binding ShowLogCommand}" CommandParameter="{Binding}"
+                            ToolTip.Tip="在表格下面开出实时日志" />
+
+                    <!-- 跟宽布局同一套三态：不适用的不画，点不了的灰着 -->
+                    <Button Theme="{StaticResource MenuButton}" Content="立即评审"
+                            IsVisible="{Binding ShowReview}" IsEnabled="{Binding CanReview}"
+                            Click="OnRowActionClick"
+                            Command="{Binding ReviewCommand}" CommandParameter="{Binding}"
+                            ToolTip.Tip="{Binding ReviewTip}" />
+
+                    <Button Theme="{StaticResource MenuButton}" Content="认领"
+                            IsVisible="{Binding ShowClaim}" IsEnabled="{Binding CanClaim}"
+                            Click="OnRowActionClick"
+                            Command="{Binding ClaimCommand}" CommandParameter="{Binding}"
+                            ToolTip.Tip="{Binding ClaimTip}" />
+
+                    <Button Theme="{StaticResource MenuButton}" Content="撤销认领"
+                            IsVisible="{Binding ShowRelease}" IsEnabled="{Binding CanRelease}"
+                            Click="OnRowActionClick"
+                            Command="{Binding ReleaseCommand}" CommandParameter="{Binding}"
+                            ToolTip.Tip="{Binding ReleaseTip}" />
+
+                    <Border Classes="menu-sep" IsVisible="{Binding ShowAssign}" />
+                    <TextBlock Classes="menu-label" Text="指派给"
+                               IsVisible="{Binding ShowAssign}"
+                               ToolTip.Tip="对方同意才生效。自己的 PR 没有合格节点时，这是它唯一的出路" />
+
+                    <!-- 这里的候选是摊平在菜单里的，没法像宽布局那样靠按钮自己灰掉，
+                         所以整段跟着 CanAssign 一起 IsEnabled —— IsEnabled 会传给子项 -->
+                    <ItemsControl ItemsSource="{Binding AssignTargets}"
+                                  IsVisible="{Binding ShowAssign}"
+                                  IsEnabled="{Binding CanAssign}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AssignTarget">
+                          <Button Theme="{StaticResource MenuButton}" Content="{Binding Label}"
+                                  Click="OnRowActionClick"
+                                  Command="{Binding Command}" CommandParameter="{Binding}" />
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- 没有对端时也要说明「功能在，是没有对象可指」，不然像是没做 -->
+                    <TextBlock Classes="menu-label" Text="{Binding AssignHint}"
+                               IsVisible="{Binding HasAssignHint}"
+                               ToolTip.Tip="指派需要 mesh 里有别的节点：把 Conclave:Mesh:Enabled 打开，并把对端的 elector 指纹写进 ~/.conclave/electors.allow" />
+                  </StackPanel>
+                </Flyout>
+              </Button.Flyout>
+            </Button>
+          </Panel>
+
+          <Panel DockPanel.Dock="Right" Width="104" IsVisible="{Binding Layout.Mid}">
+            <Border Classes="badge"
+                    Classes.ok="{Binding Outcome.IsOk}"
+                    Classes.warn="{Binding Outcome.IsWarn}"
+                    Classes.bad="{Binding Outcome.IsBad}"
+                    Classes.bare="{Binding Outcome.IsBare}">
+              <TextBlock Text="{Binding Outcome.Text}" />
+            </Border>
+          </Panel>
+
+          <!-- 阶段徽章 + 谁在处理 + 已评时长，一格讲完「这个 PR 现在怎么样」 -->
+          <StackPanel DockPanel.Dock="Right" Width="176" Margin="0,0,12,0" Spacing="4"
+                      VerticalAlignment="Center" ToolTip.Tip="{Binding StageTip}">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Border Classes="badge"
+                      Classes.ok="{Binding Stage.IsOk}"
+                      Classes.warn="{Binding Stage.IsWarn}"
+                      Classes.bad="{Binding Stage.IsBad}"
+                      Classes.info="{Binding Stage.IsInfo}"
+                      Classes.gold="{Binding Stage.IsGold}">
+                <TextBlock Text="{Binding Stage.Text}" />
+              </Border>
+              <TextBlock Classes="cell dim" FontSize="11" VerticalAlignment="Center"
+                         Text="{Binding Elapsed}"
+                         IsVisible="{Binding Elapsed, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
+
+            <!--
+              徽章之外补的那半句：谁在处理它。徽章已经点名「（本节点）」时它是空的，
+              空了就整行不占位 —— 否则每行都留着一条空白，行高白涨一截。
+            -->
+            <TextBlock Classes="cell" FontSize="11"
+                       Classes.gold="{Binding HandlerIsSelf}"
+                       Text="{Binding Handler}"
+                       IsVisible="{Binding Handler, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+            <!--
+              「刚发生了什么」（对方接受/拒绝了指派）。它不是状态，所以不能占徽章 ——
+              占了的话「状态」那一格里写着一句描述，真实状态反倒看不见。挂在下面，几分钟后自己消失。
+            -->
+            <TextBlock Classes="cell" FontSize="11" TextWrapping="Wrap"
+                       Classes.ok="{Binding NoteIsOk}"
+                       Classes.warn="{Binding NoteIsWarn}"
+                       Classes.bad="{Binding NoteIsBad}"
+                       Text="{Binding Note}" IsVisible="{Binding HasNote}" />
+
+            <ProgressBar Classes="votes" Value="{Binding VoteProgress}"
+                         IsVisible="{Binding ShowProgress}" />
+          </StackPanel>
+
+          <!--
+            描述吃掉剩下的宽度，同时也是最先让位的那一列：再长也只是一句话，
+            截断了信息还在（悬浮能看全），而 PR 号 / 作者 / 状态 少一个这张表就读不懂了。
+          -->
+          <StackPanel Margin="0,0,16,0" Spacing="2" IsVisible="{Binding Layout.Mid}"
+                      VerticalAlignment="Center" ToolTip.Tip="{Binding StageTip}">
+            <TextBlock Classes="cell" Text="{Binding Title}" />
+            <TextBlock Classes="cell muted mono" FontSize="10" Text="{Binding Subtitle}" />
+          </StackPanel>
+        </DockPanel>
+      </Border>
+    </DataTemplate>
+  </Window.Resources>
+
+  <!-- 圆角与边框归这层：没有系统标题栏之后，窗口自己的直角会露在外面 -->
+  <Border Classes="shell">
+    <Grid RowDefinitions="Auto,*">
+
+      <!--
+        顶栏。按住它也能拖窗口（见 OnChromeDrag）—— 系统标题栏很窄，而工具栏拖动
+        是 macOS 上的常规做法。落在按钮或开关上的按下会被它们先吃掉，不会误触发拖动。
+      -->
+      <Border Grid.Row="0" Classes="topbar" PointerPressed="OnChromeDrag">
+        <!--
+          中间那列是 Auto 而不是 <c>*</c>：星号列拿的是「两边分完剩下的」，窗口一窄
+          就被挤成 0，状态先被裁成半截字再整个消失 —— 而它恰恰是这排里最该活到最后的。
+          现在换成右边那列吃剩余宽度并靠右排：品牌与状态各自拿够，挤没了的会是
+          右边那组按钮之间的空隙，而不是「这台机器在不在干活」。
+        -->
+        <Grid ColumnDefinitions="Auto,Auto,*">
+
+          <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="11">
+            <!-- 用图标本体，不另画一个：三条横杠画出来会被当成汉堡菜单 -->
+            <Image Source="/Assets/conclave.png" Width="30" Height="30" VerticalAlignment="Center" />
+            <StackPanel VerticalAlignment="Center" Spacing="2">
+              <!--
+                字标与版本号窄了一起扔，只留图标。这排东西按「没了最不心疼」排序让位：
+                标语 → 字标 → elector 指纹，而<b>状态、两个开关、退出</b>一个都不能少 ——
+                退出更是这个应用唯一的退出口（accessory 应用没有 Cmd+Q）。
+                图标留着，认得出这是哪个窗口就够了。
+              -->
+              <StackPanel Orientation="Horizontal" Spacing="7" IsVisible="{Binding Layout.Mid}">
+                <TextBlock Classes="wordmark" Text="CONCLAVE" />
+                <!-- 版本号原先在浮层头上。浮层退役了，但「我跑的是哪一版」还得看得见 -->
+                <TextBlock Name="VersionText" Classes="mono muted" VerticalAlignment="Bottom" />
+              </StackPanel>
+              <!-- 一句说明，窄了先扔：它是纯装饰，而挤下去会把右边的「退出」切掉 -->
+              <TextBlock Classes="tagline" IsVisible="{Binding Layout.Mid}"
+                         Text="分布式 AI code review · 决议封存在一条签名哈希链上" />
+            </StackPanel>
+          </StackPanel>
+
+          <!--
+            本节点：身份 + 此刻在干什么。
+
+            原先这里有五枚胶囊（elector 指纹、az 身份、N 个 project、在跑 1/2、额度 46%），
+            窗口收窄之后它们跟右边的两个开关叠在一起，再收就被裁成半截字。
+            现在只留两枚：<b>elector 指纹</b>（席位、签名、认领、指派全都按它认人，
+            az 身份归进 tooltip）和<b>状态</b>（空闲 / 评审中 #1234）。
+            project 数与额度在别处都有（「在线节点」表的本机行、下面那条额度）。
+
+            状态那枚到 Mid 就显示、身份那枚要 Wide —— 窄的时候「在不在干活」比
+            「我是谁」有用：指纹一直没变过，状态每分钟都可能变。
+          -->
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7"
+                      Margin="24,0" VerticalAlignment="Center">
+            <Border Classes="chip gold" IsVisible="{Binding Layout.Wide}">
+              <TextBlock Classes="mono" Text="{Binding NodeIdShort, StringFormat='elector {0}'}"
+                         ToolTip.Tip="{Binding AzIdentity, StringFormat='az 身份 {0}（席位与签名都按 elector 指纹认人）'}" />
+            </Border>
+
+            <!--
+              本节点此刻在干什么。
+
+              刻意<b>不</b>做成胶囊：胶囊有底色有描边，跟右边的「退出」长得一样，
+              看起来像能点 —— 而它只是个状态，点不动。一个色点加一句话就够，
+              颜色本身就是状态：绿 = 空闲、金 = 在评（用的是全局那套语义色，
+              见 Controls.axaml 的 Ellipse.dot）。
+
+              也<b>不再跟着窗口宽度让位</b>。顶栏上最该一眼看到的就是「这台机器
+              在不在干活」：指纹那枚窄了可以扔（它从来不变），这枚不能 ——
+              而且脱掉胶囊的边框内衬之后它本来就窄了一截，最窄的窗口也放得下。
+            -->
+            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                        ToolTip.Tip="{Binding SelfActivityTip}">
+              <Ellipse Classes="dot"
+                       Classes.ok="{Binding !SelfIsBusy}"
+                       Classes.gold="{Binding SelfIsBusy}" />
+              <TextBlock Classes="status"
+                         Classes.ok="{Binding !SelfIsBusy}"
+                         Classes.gold="{Binding SelfIsBusy}"
+                         Text="{Binding SelfActivityText}" />
+            </StackPanel>
+          </StackPanel>
+
+          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="12"
+                      HorizontalAlignment="Right" VerticalAlignment="Center">
+            <ToggleSwitch OnContent="自动评审" OffContent="自动评审"
+                          IsChecked="{Binding AutoReview}"
+                          ToolTip.Tip="关闭时只有手动点「评审」才会跑 claude，避免一开机就把所有活跃 PR 全评一遍" />
+            <ToggleSwitch OnContent="投递到 AzDO" OffContent="投递到 AzDO"
+                          IsChecked="{Binding PostToAzureDevOps}"
+                          ToolTip.Tip="开启后公布结论时会往真实 PR 发评论并投票" />
+            <!-- 文字跟着状态变：只变灰跟「按钮坏了」长得一样，见 MainViewModel.PollLabel -->
+            <Button Theme="{StaticResource PrimaryButton}" Content="{Binding PollLabel}"
+                    Command="{Binding PollCommand}" IsEnabled="{Binding !IsPolling}" />
+            <!--
+              退出必须在这里。标题栏那个红色的 x <b>只是隐藏</b>（关掉之后轮询与评审在
+              后台继续跑，见 App.OnDashboardClosing），而 accessory 应用没有自己的菜单栏、
+              Cmd+Q 失效 —— 少了这个按钮就只能去活动监视器杀进程。
+              走 code-behind 而不是绑 VM 命令：退出是 Avalonia 生命周期的事，
+              ViewModel 不该知道 desktop.Shutdown() 的存在。
+            -->
+            <Button Content="退出" Click="OnQuitClick"
+                    ToolTip.Tip="退出 Conclave。后台的轮询与评审会一起停，正在跑的 claude 子进程有 5 秒收尾" />
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <!-- ── 内容区 ───────────────────────────────────────────────────── -->
+      <!--
+        行高由 code-behind 按「日志开没开、表格收没收」改（见 ApplyLogLayout）：
+        RowDefinition 不在可视树里，DataContext 到不了它，Height 绑不了。
+        索引常量也在那边，改这里的行顺序要同步改过去。
+      -->
+      <Grid Grid.Row="1" Name="ContentGrid" Margin="16,14,16,12">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />        <!-- 0 告警条 -->
+          <RowDefinition Height="Auto" />        <!-- 1 待确认的评审指派 -->
+          <RowDefinition Height="Auto" />        <!-- 2 额度与账单 -->
+          <RowDefinition Height="*" MinHeight="0" />    <!-- 3 主卡片（六张表） -->
+          <RowDefinition Height="Auto" />        <!-- 4 分隔条 -->
+          <RowDefinition Height="0" MinHeight="0" />    <!-- 5 日志面板 -->
+          <RowDefinition Height="Auto" />        <!-- 6 状态栏 -->
+        </Grid.RowDefinitions>
+
+        <!--
+          行 0 叠两条横幅：告警（az 身份缺失 / 外部工具找不到 / 额度用满）与更新提示。
+          两条可能同时出现，各自带下边距、各自显隐 —— 都没有时这一行高度为零。
+        -->
+        <StackPanel Grid.Row="0">
+          <Border Classes="banner" Margin="0,0,0,14" IsVisible="{Binding HasWarning}">
+            <Grid ColumnDefinitions="Auto,*">
+              <Border Width="18" Height="18" CornerRadius="9" VerticalAlignment="Top"
+                      Background="{DynamicResource WarnBrush}">
+                <TextBlock Text="!" FontSize="12" FontWeight="Bold"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SurfaceBrush}" />
+              </Border>
+              <TextBlock Grid.Column="1" Margin="10,0,0,0" FontSize="12" TextWrapping="Wrap"
+                         VerticalAlignment="Center" Foreground="{DynamicResource TextBrush}"
+                         Text="{Binding IdentityWarning}" />
+            </Grid>
+          </Border>
+
+          <!--
+            有新版本。装是人点的：安装器会先下载校验，等手上那个 PR 评完再替换 .app 并重启。
+            所以「立即更新」不因为正在评审而灰掉，只在已经点过、正在进行时灰。
+          -->
+          <Border Classes="banner gold" Margin="0,0,0,14" IsVisible="{Binding HasUpdate}">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                <TextBlock Classes="cell" Text="{Binding UpdateText}" />
+                <TextBlock Classes="cell dim" FontSize="11" Text="{Binding UpdateStatus}"
+                           IsVisible="{Binding UpdateStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+              </StackPanel>
+
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <Button Theme="{StaticResource GhostButton}" Content="发布说明"
+                        Click="OnReleasePageClick"
+                        ToolTip.Tip="在浏览器里打开这一版的 GitHub Release 页面" />
+                <Button Theme="{StaticResource PrimaryButton}" Content="立即更新"
+                        IsEnabled="{Binding CanUpdate}"
+                        Command="{Binding UpdateCommand}"
+                        ToolTip.Tip="{Binding UpdateTip}" />
+              </StackPanel>
+            </Grid>
+          </Border>
         </StackPanel>
 
-        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-          <CheckBox Content="自动评审" IsChecked="{Binding AutoReview}"
-                    ToolTip.Tip="关闭时只有手动点「评审」才会跑 claude，避免一开机就把所有活跃 PR 全评一遍" />
-          <CheckBox Content="投递到 AzDO" IsChecked="{Binding PostToAzureDevOps}"
-                    ToolTip.Tip="开启后公布结论时会往真实 PR 发评论并投票" />
-          <Button Content="立即轮询" Command="{Binding PollCommand}"
-                  IsEnabled="{Binding !IsPolling}" />
+        <!--
+          待确认的评审指派。用横幅而不是队列里的一行：它是要人当场做决定的东西，
+          混在队列里很容易被划过去，而请求方那边会一直等着。
+          刻意不自动接受 —— 别人的评审任务会在你的机器上跑 Bash、烧你的 Claude 额度。
+        -->
+        <ItemsControl Grid.Row="1" Margin="0,0,0,14" ItemsSource="{Binding Pending}"
+                      IsVisible="{Binding HasPending}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:PendingRow">
+              <Border Classes="banner gold" Margin="0,0,0,6">
+                <Grid ColumnDefinitions="*,Auto">
+                  <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Classes="cell" Text="{Binding Summary}"
+                               ToolTip.Tip="{Binding From}" />
+                    <TextBlock Classes="cell dim" FontSize="11" Text="{Binding Note}"
+                               IsVisible="{Binding HasNote}" />
+                  </StackPanel>
+
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6"
+                              VerticalAlignment="Center">
+                    <TextBlock Classes="cell dim mono" FontSize="11" Text="{Binding At}"
+                               VerticalAlignment="Center" Margin="0,0,6,0" />
+                    <!-- 答复要发一次 HTTP，这期间两个一起灰掉：只灰被点的那个的话，
+                         「同意」之后还能点「拒绝」，同一条请求就被答了两遍 -->
+                    <Button Theme="{StaticResource GhostButton}" Content="同意"
+                            IsEnabled="{Binding CanRespond}"
+                            Command="{Binding AcceptCommand}" CommandParameter="{Binding}"
+                            ToolTip.Tip="{Binding AcceptTip}" />
+                    <Button Theme="{StaticResource GhostButton}" Content="拒绝"
+                            IsEnabled="{Binding CanRespond}"
+                            Command="{Binding DeclineCommand}" CommandParameter="{Binding}"
+                            ToolTip.Tip="{Binding DeclineTip}" />
+                  </StackPanel>
+                </Grid>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!--
+          Claude 额度 + 账单，一行讲完。
+
+          原先是两行：六个指标格（队列 / 今日 / 累计 / TOKEN / 缓存命中 / 账本）加一条额度。
+          「队列」「累计」「账本」这三个数现在都写在 tab 标题上（PR 队列 29 · 评审记录 5 ·
+          Acta 12），留在这里只是同一个数字占两处地方；TOKEN 与缓存命中是「累计」的分解，
+          没有评审时永远是 0 和「—」，不值各占一整格。并成一行省下的高度全给了表格。
+
+          额度数字每 30 秒重读一次（见 MainViewModel.RefreshInterval）—— 真值来自
+          claude -p "/usage"，探针自带 60 秒缓存，没有事件可订阅。「读于」那个时间戳
+          不是装饰：数字冻住时界面上必须看得出来，否则「没有变化」和「没在刷新」分不开。
+        -->
+        <Border Grid.Row="2" Classes="tile" Margin="0,0,0,12" Padding="14,10">
+          <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+            <StackPanel Grid.Column="0" Spacing="3" Margin="0,0,22,0" VerticalAlignment="Center"
+                        ToolTip.Tip="{Binding UsageDetail}">
+              <TextBlock Classes="tile-label" Text="CLAUDE 额度" />
+              <TextBlock Classes="tile-hint mono" Text="{Binding UsageSource}" />
+              <TextBlock Classes="tile-hint mono" Text="{Binding UsageUpdatedText}" />
+            </StackPanel>
+
+            <ItemsControl Grid.Column="1" ItemsSource="{Binding UsageWindows}"
+                          IsVisible="{Binding !UsageEmpty}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                  <UniformGrid Rows="1" />
+                </ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:UsageWindowRow">
+                  <StackPanel Margin="0,0,20,0" Spacing="6" VerticalAlignment="Center"
+                              ToolTip.Tip="{Binding Tip}">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                      <TextBlock Grid.Column="0" Classes="cell" Text="{Binding Label}" />
+                      <TextBlock Grid.Column="1" Classes="cell muted" Margin="10,0"
+                                 TextAlignment="Right" Text="{Binding ResetText}" />
+                      <TextBlock Grid.Column="2" Classes="cell mono" FontWeight="SemiBold"
+                                 Classes.warn="{Binding IsWarn}" Classes.bad="{Binding IsBad}"
+                                 Text="{Binding PercentText}" />
+                    </Grid>
+                    <ProgressBar Classes="quota" Value="{Binding Percent}"
+                                 Classes.warn="{Binding IsWarn}" Classes.bad="{Binding IsBad}" />
+                  </StackPanel>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <TextBlock Grid.Column="1" Classes="cell muted" TextWrapping="Wrap"
+                       VerticalAlignment="Center" IsVisible="{Binding UsageEmpty}"
+                       Text="{Binding UsageHint}" />
+
+            <Border Grid.Column="2" Width="1" Margin="8,2"
+                    Background="{DynamicResource BorderBrush}" />
+
+            <StackPanel Grid.Column="3" Spacing="3" Margin="16,0,0,0" MinWidth="150"
+                        VerticalAlignment="Center"
+                        ToolTip.Tip="账本里的评审次数与折算金额。金额按 API 目录价算，不是实际扣费 —— 走 Max/Pro 订阅时边际成本为 0">
+              <TextBlock Classes="tile-label" Text="账单" />
+              <TextBlock Classes="cell mono" Text="{Binding TodayLine}" />
+              <TextBlock Classes="cell mono dim" Text="{Binding TotalLine}" />
+              <TextBlock Classes="tile-hint mono" Text="{Binding TokenLine}" />
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <!-- ── 主卡片：六张平级的表 ───────────────────────────────────── -->
+        <Border Grid.Row="3" Classes="card">
+          <Grid RowDefinitions="Auto,*">
+
+            <Border Grid.Row="0" Classes="cardhead" Padding="8,6">
+              <Grid ColumnDefinitions="Auto,*,Auto">
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="2">
+                  <!--
+                    每个 tab = 名字 + 一个上标计数。计数为空时整个角标不占位，
+                    所以「Acta」在没有区块时就是干干净净两个字。
+                  -->
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowQueue}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="PR 队列" />
+                      <Border Classes="tabcount"
+                              IsVisible="{Binding QueueCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding QueueCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <!-- 「我的 PR」用金色：这套主题里金色专指「跟本节点相关」 -->
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowMine}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="我的 PR" />
+                      <Border Classes="tabcount gold"
+                              IsVisible="{Binding MineCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding MineCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowReviews}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="评审记录" />
+                      <Border Classes="tabcount"
+                              IsVisible="{Binding ReviewsCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding ReviewsCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowActa}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="Acta" />
+                      <Border Classes="tabcount"
+                              IsVisible="{Binding ActaCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding ActaCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <!-- 有节点掉线就转橙：3/3 和 2/3 光看数字差别太小，而后者意味着有 PR 要重新分配 -->
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowNodes}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="在线节点" />
+                      <Border Classes="tabcount"
+                              Classes.ok="{Binding NodesAllAlive}"
+                              Classes.warn="{Binding !NodesAllAlive}"
+                              IsVisible="{Binding NodesCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding NodesCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <!-- 未读通知转红：它是唯一一个「有数字就该去看」的角标 -->
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowNotices}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="通知" />
+                      <Border Classes="tabcount bad"
+                              IsVisible="{Binding NoticesCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding NoticesCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+                </StackPanel>
+
+                <!-- 每张表一句说明。同一格里叠六个、按 tab 显隐，比在每张表里各写一遍紧凑 -->
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowQueue}"
+                           Text="一行 = 一个 PR 版本。作者一 push 就是新的一行，PR 号下面那串是源 commit" />
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowMine}"
+                           Text="队列里作者是本机 az 身份的那些。「状态」列写明它在排队、还是被哪个节点评着" />
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowReviews}"
+                           Text="投影表，可由链重建。悬浮任意一行看 token 拆解与分模型明细" />
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowActa}"
+                           Text="全局唯一一条链，每块含前块哈希与签名。索引冲突时哈希小者胜出，输的一段重挂到链尾" />
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowNodes}"
+                           Text="额度、在跑、近 24H 三列正好是权重的三个输入 —— 席位为什么落在某台机器上，看这一行就够" />
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowNotices}"
+                           Text="本机看到的事，最近的在最上面。只在内存里，重启即清空 —— 事实本身在 Acta 与评审记录里" />
+
+                <!-- 收件箱空着时清了也没有任何变化，那一下只会弹一条「通知已清空」 -->
+                <Button Grid.Column="2" Theme="{StaticResource GhostButton}" Content="清空"
+                        IsVisible="{Binding ShowNotices}" IsEnabled="{Binding !NoticesEmpty}"
+                        Command="{Binding ClearNoticesCommand}"
+                        ToolTip.Tip="只清这份收件箱，不动链和账本" />
+              </Grid>
+            </Border>
+
+            <Panel Grid.Row="1">
+
+              <!-- PR 队列 -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowQueue}">
+                <Border Grid.Row="0" Classes="thead">
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Width="84" Classes="th" Text="PR" />
+                    <TextBlock DockPanel.Dock="Left" Width="148" Classes="th" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Wide}" Text="仓库" />
+                    <TextBlock DockPanel.Dock="Left" Width="104" Classes="th" Margin="0,0,12,0"
+                               Text="作者" />
+                    <TextBlock DockPanel.Dock="Right" Width="152" Classes="th"
+                               IsVisible="{Binding Layout.Wide}" Text="操作" />
+                    <Panel DockPanel.Dock="Right" Width="34"
+                           IsVisible="{Binding !Layout.Wide}" />
+                    <TextBlock DockPanel.Dock="Right" Width="104" Classes="th"
+                               IsVisible="{Binding Layout.Mid}" Text="结论" />
+                    <TextBlock DockPanel.Dock="Right" Width="176" Classes="th" Margin="0,0,12,0"
+                               Text="状态" />
+                    <TextBlock Classes="th" IsVisible="{Binding Layout.Mid}" Text="描述" />
+                  </DockPanel>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Pipeline}"
+                                  ItemTemplate="{StaticResource PrRowTemplate}" />
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding PipelineEmpty}"
+                             Text="队列是空的&#10;下一轮轮询发现活跃 PR 后会出现在这里，也可以点右上角「立即轮询」" />
+                </Panel>
+              </Grid>
+
+              <!-- 我的 PR：同一套列、同一个模板，只是数据源按作者筛过 -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowMine}">
+                <Border Grid.Row="0" Classes="thead">
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Width="84" Classes="th" Text="PR" />
+                    <TextBlock DockPanel.Dock="Left" Width="148" Classes="th" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Wide}" Text="仓库" />
+                    <TextBlock DockPanel.Dock="Left" Width="104" Classes="th" Margin="0,0,12,0"
+                               Text="作者" />
+                    <TextBlock DockPanel.Dock="Right" Width="152" Classes="th"
+                               IsVisible="{Binding Layout.Wide}" Text="操作" />
+                    <Panel DockPanel.Dock="Right" Width="34"
+                           IsVisible="{Binding !Layout.Wide}" />
+                    <TextBlock DockPanel.Dock="Right" Width="104" Classes="th"
+                               IsVisible="{Binding Layout.Mid}" Text="结论" />
+                    <TextBlock DockPanel.Dock="Right" Width="176" Classes="th" Margin="0,0,12,0"
+                               Text="状态 · 谁在评" />
+                    <TextBlock Classes="th" IsVisible="{Binding Layout.Mid}" Text="描述" />
+                  </DockPanel>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Mine}"
+                                  ItemTemplate="{StaticResource PrRowTemplate}" />
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding MineEmpty}"
+                             Text="队列里没有你提的 PR&#10;这里按 az 登录身份认人（顶栏那个 az 胶囊），读不到身份时这张表会一直是空的" />
+                </Panel>
+              </Grid>
+
+              <!-- 评审记录 -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowReviews}">
+                <Border Grid.Row="0" Classes="thead">
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Width="98" Classes="th" Text="时间" />
+                    <TextBlock DockPanel.Dock="Right" Width="86" Classes="th num" Text="金额" />
+                    <TextBlock DockPanel.Dock="Right" Width="84" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Mid}" Text="TOKEN" />
+                    <TextBlock DockPanel.Dock="Right" Width="64" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Wide}" Text="问题" />
+                    <TextBlock DockPanel.Dock="Right" Width="140" Classes="th" Text="结论" />
+                    <TextBlock Classes="th" Text="评审" />
+                  </DockPanel>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Reviews}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ReviewRow">
+                          <Border Classes="row dense" ToolTip.Tip="{Binding Breakdown}">
+                            <DockPanel LastChildFill="True">
+                              <TextBlock DockPanel.Dock="Left" Width="98" Classes="cell mono dim"
+                                         Text="{Binding At}" />
+
+                              <!-- 耗时并进金额的 tooltip（Breakdown 已经有），省一列 -->
+                              <TextBlock DockPanel.Dock="Right" Width="86" Classes="cell mono num"
+                                         Text="{Binding Cost}" ToolTip.Tip="{Binding Duration}" />
+
+                              <!-- token 与问题数是金额的分解，窄了先让位 -->
+                              <TextBlock DockPanel.Dock="Right" Width="84" Classes="cell mono num"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Mid}"
+                                         Text="{Binding Tokens}" />
+                              <TextBlock DockPanel.Dock="Right" Width="64" Classes="cell mono num dim"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Wide}"
+                                         Text="{Binding Findings}" />
+
+                              <Panel DockPanel.Dock="Right" Width="140">
+                                <Border Classes="badge"
+                                        Classes.ok="{Binding Status.IsOk}"
+                                        Classes.warn="{Binding Status.IsWarn}"
+                                        Classes.bad="{Binding Status.IsBad}">
+                                  <TextBlock Text="{Binding Status.Text}" />
+                                </Border>
+                              </Panel>
+
+                              <!-- 标题占主位，PR 号/仓库/评审者压成下面一行小字（同 PR 队列） -->
+                              <StackPanel Margin="0,0,16,0" Spacing="1" VerticalAlignment="Center">
+                                <TextBlock Classes="cell" Text="{Binding Title}" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                  <Button Theme="{StaticResource LinkButton}" Click="OnPrLinkClick"
+                                          IsEnabled="{Binding HasUrl}" ToolTip.Tip="{Binding UrlTip}">
+                                    <TextBlock Classes="cell link" FontSize="11" Text="{Binding PrLabel}" />
+                                  </Button>
+                                  <TextBlock Classes="cell muted" FontSize="11"
+                                             Text="{Binding Subtitle}" ToolTip.Tip="{Binding ReviewerFull}" />
+                                </StackPanel>
+                              </StackPanel>
+                            </DockPanel>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding ReviewsEmpty}"
+                             Text="账本里还没有评审记录&#10;跑完第一次评审后，谁评的、烧了多少 token、折合多少钱都会记在这里" />
+                </Panel>
+              </Grid>
+
+              <!-- Acta 会议录 -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowActa}">
+                <Border Grid.Row="0" Classes="thead">
+                  <Grid ColumnDefinitions="102,48,132,74,116,*">
+                    <TextBlock Grid.Column="0" Classes="th" Text="时间" />
+                    <TextBlock Grid.Column="1" Classes="th num" Margin="0,0,12,0" Text="#" />
+                    <TextBlock Grid.Column="2" Classes="th" Text="REVISION" />
+                    <TextBlock Grid.Column="3" Classes="th" Text="类型" />
+                    <TextBlock Grid.Column="4" Classes="th" Text="HASH" />
+                    <TextBlock Grid.Column="5" Classes="th" Text="摘要" />
+                  </Grid>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Blocks}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:BlockRow">
+                          <Border Classes="row dense">
+                            <Grid ColumnDefinitions="102,48,132,74,116,*">
+                              <TextBlock Grid.Column="0" Classes="cell mono dim" Text="{Binding At}" />
+                              <TextBlock Grid.Column="1" Classes="cell mono num dim"
+                                         Margin="0,0,12,0" Text="{Binding Index}" />
+                              <TextBlock Grid.Column="2" Classes="cell mono gold"
+                                         Text="{Binding Revision}" />
+                              <Border Grid.Column="3" Classes="badge"
+                                      Classes.ok="{Binding Kind.IsOk}"
+                                      Classes.warn="{Binding Kind.IsWarn}"
+                                      Classes.info="{Binding Kind.IsInfo}"
+                                      Classes.gold="{Binding Kind.IsGold}">
+                                <TextBlock Text="{Binding Kind.Text}" />
+                              </Border>
+                              <TextBlock Grid.Column="4" Classes="cell mono dim" Margin="0,0,12,0"
+                                         Text="{Binding Hash}"
+                                         ToolTip.Tip="{Binding ElectorFull, StringFormat='签名节点 {0}'}" />
+                              <TextBlock Grid.Column="5" Classes="cell mono muted"
+                                         Text="{Binding Summary}" />
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding BlocksEmpty}"
+                             Text="链上还没有区块&#10;每评完一个 PR 落一块「出票」，够票时再落一块「公布」，每块都含前块哈希与签名" />
+                </Panel>
+              </Grid>
+
+              <!-- 在线节点 -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowNodes}">
+                <Border Grid.Row="0" Classes="thead">
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Right" Width="110" Classes="th num"
+                               IsVisible="{Binding Layout.Mid}" Text="心跳" />
+                    <TextBlock DockPanel.Dock="Right" Width="64" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Wide}" Text="权重" />
+                    <TextBlock DockPanel.Dock="Right" Width="72" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Wide}" Text="近 24H" />
+                    <TextBlock DockPanel.Dock="Right" Width="76" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Mid}" Text="在跑" />
+                    <TextBlock DockPanel.Dock="Right" Width="132" Classes="th" Margin="0,0,12,0"
+                               Text="CLAUDE 额度" />
+                    <TextBlock DockPanel.Dock="Right" Width="92" Classes="th" Text="状态" />
+                    <TextBlock Classes="th" Text="节点" />
+                  </DockPanel>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Nodes}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:NodeRow">
+                          <Border Classes="row pr" ToolTip.Tip="{Binding Tip}">
+                            <DockPanel LastChildFill="True">
+
+                              <TextBlock DockPanel.Dock="Right" Width="110"
+                                         Classes="cell mono num muted"
+                                         IsVisible="{Binding Layout.Mid}"
+                                         Text="{Binding HeartbeatText}" />
+                              <TextBlock DockPanel.Dock="Right" Width="64" Classes="cell mono num"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Wide}"
+                                         Text="{Binding WeightText}" />
+                              <TextBlock DockPanel.Dock="Right" Width="72" Classes="cell mono num dim"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Wide}"
+                                         Text="{Binding ReviewsText}" />
+                              <TextBlock DockPanel.Dock="Right" Width="76" Classes="cell mono num dim"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Mid}"
+                                         Text="{Binding LoadText}" />
+
+                              <!-- 百分比 + 条：条是用来横向对比几台机器的，光看数字对不齐 -->
+                              <StackPanel DockPanel.Dock="Right" Width="132" Margin="0,0,12,0"
+                                          Spacing="5" VerticalAlignment="Center">
+                                <TextBlock Classes="cell mono" FontWeight="SemiBold"
+                                           Classes.warn="{Binding IsWarn}" Classes.bad="{Binding IsBad}"
+                                           Text="{Binding QuotaText}" />
+                                <ProgressBar Classes="quota" Value="{Binding QuotaPercent}"
+                                             Classes.warn="{Binding IsWarn}" Classes.bad="{Binding IsBad}" />
+                              </StackPanel>
+
+                              <Panel DockPanel.Dock="Right" Width="92">
+                                <Border Classes="badge"
+                                        Classes.ok="{Binding Status.IsOk}"
+                                        Classes.warn="{Binding Status.IsWarn}"
+                                        Classes.bad="{Binding Status.IsBad}"
+                                        Classes.gold="{Binding Status.IsGold}">
+                                  <TextBlock Text="{Binding Status.Text}" />
+                                </Border>
+                              </Panel>
+
+                              <!-- 「谁的 node」：az 身份的短名，下面一行是指纹 · project 数 · 端点 -->
+                              <StackPanel Margin="0,0,16,0" Spacing="2" VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                  <TextBlock Classes="cell" FontWeight="SemiBold"
+                                             Classes.gold="{Binding IsSelf}"
+                                             Text="{Binding Name}" />
+                                  <TextBlock Classes="cell dim" FontSize="11" VerticalAlignment="Center"
+                                             Text="{Binding Reviewing}"
+                                             IsVisible="{Binding HasReviewing}" />
+                                </StackPanel>
+                                <TextBlock Classes="cell muted mono" FontSize="10"
+                                           Text="{Binding Subtitle}" />
+                              </StackPanel>
+                            </DockPanel>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding NodesEmpty}"
+                             Text="mesh 里还没有节点&#10;本机的心跳要过一轮才广播；同网段的其他机器启动后会自己出现在这里" />
+                </Panel>
+              </Grid>
+
+              <!--
+                通知
+                收件箱式的一张表，而不是堆叠的浮层：mesh 里的事多半在人不看屏幕时发生，
+                浮层几秒就没了。即时反馈仍归 toast，这里负责回看。
+              -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowNotices}">
+                <Border Grid.Row="0" Classes="thead">
+                  <Grid ColumnDefinitions="76,60,*">
+                    <TextBlock Grid.Column="0" Classes="th" Text="时间" />
+                    <TextBlock Grid.Column="1" Classes="th" Text="类型" />
+                    <TextBlock Grid.Column="2" Classes="th" Text="内容" />
+                  </Grid>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Notices}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:NoticeRow">
+                          <Border Classes="row note">
+                            <Grid ColumnDefinitions="76,60,*">
+                              <TextBlock Grid.Column="0" Classes="cell mono dim"
+                                         VerticalAlignment="Top" Text="{Binding At}" />
+
+                              <Panel Grid.Column="1" VerticalAlignment="Top">
+                                <Border Classes="badge"
+                                        Classes.ok="{Binding Kind.IsOk}"
+                                        Classes.warn="{Binding Kind.IsWarn}"
+                                        Classes.bad="{Binding Kind.IsBad}"
+                                        Classes.info="{Binding Kind.IsInfo}">
+                                  <TextBlock Text="{Binding Kind.Text}" />
+                                </Border>
+                              </Panel>
+
+                              <!-- 补充信息换行显示、不截断：拒绝理由和异常消息恰恰是最要看清的那截 -->
+                              <StackPanel Grid.Column="2" Margin="12,0,0,0" Spacing="3">
+                                <TextBlock Classes="cell" TextWrapping="Wrap"
+                                           Text="{Binding Title}" />
+                                <TextBlock Classes="cell muted mono" FontSize="10"
+                                           TextWrapping="Wrap"
+                                           IsVisible="{Binding HasDetail}"
+                                           Text="{Binding Detail}" />
+                              </StackPanel>
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding NoticesEmpty}"
+                             Text="还没有通知&#10;有人请你评审、对方接受或拒绝、评审出结论、额度过线，都会落到这里" />
+                </Panel>
+              </Grid>
+            </Panel>
+          </Grid>
+        </Border>
+
+        <!--
+          ── 评审日志 ─────────────────────────────────────────────────
+          开在表格下面，不另开窗口：日志是「对着队列里那一行看」的东西，
+          单独一个窗口会挡住它自己要解释的那张表。
+          拖分隔条能调两块的比例；「收起表格」把这块放到满屏。
+        -->
+        <GridSplitter Grid.Row="4" Classes="splitter" ResizeDirection="Rows"
+                      IsVisible="{Binding HasLog}" />
+
+        <Border Grid.Row="5" Classes="card" IsVisible="{Binding HasLog}">
+          <Grid RowDefinitions="Auto,*">
+
+            <Border Grid.Row="0" Classes="cardhead" Padding="12,8">
+              <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                <TextBlock Grid.Column="0" Classes="card-title" Text="评审日志" />
+
+                <StackPanel Grid.Column="1" Margin="12,0" Spacing="1" VerticalAlignment="Center">
+                  <TextBlock Classes="cell" TextTrimming="CharacterEllipsis"
+                             Text="{Binding Log.Subject}" />
+                  <TextBlock Classes="card-note" Text="{Binding Log.Status}" />
+                </StackPanel>
+
+                <Border Grid.Column="2" Classes="chip gold" Margin="0,0,8,0">
+                  <TextBlock Text="{Binding Log.Reviewer}" />
+                </Border>
+
+                <!--
+                  两个按钮各自显隐，而不是一个按钮换文案：换文案要么写个转换器类，
+                  要么在 VM 上多挂一个只为显示存在的字符串属性，两者都不如这样直白。
+                -->
+                <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6">
+                  <Button Theme="{StaticResource GhostButton}" Content="收起表格"
+                          IsVisible="{Binding !TablesCollapsed}"
+                          Command="{Binding ToggleTablesCommand}"
+                          ToolTip.Tip="把上面那张表收起来，让日志占满 —— 看日志的那几分钟不用同时盯队列" />
+                  <Button Theme="{StaticResource GhostButton}" Content="展开表格"
+                          IsVisible="{Binding TablesCollapsed}"
+                          Command="{Binding ToggleTablesCommand}" />
+                  <Button Theme="{StaticResource GhostButton}" Content="关闭"
+                          Command="{Binding CloseLogCommand}" />
+                </StackPanel>
+              </Grid>
+            </Border>
+
+            <Panel Grid.Row="1">
+              <ScrollViewer Name="LogScroll" Padding="12,8">
+                <ItemsControl ItemsSource="{Binding Log.Lines}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <TextBlock Classes="cell mono dim" TextWrapping="Wrap" Margin="0,0,0,2"
+                                 Text="{Binding}" />
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+
+              <TextBlock Classes="empty" IsVisible="{Binding Log.IsEmpty}"
+                         Text="还没有日志&#10;评审开头要先拉一份代码进临时工作区，那一步本身没有输出" />
+            </Panel>
+          </Grid>
+        </Border>
+
+        <!-- ── 状态栏 ───────────────────────────────────────────────── -->
+        <Grid Grid.Row="6" Margin="4,10,4,0" ColumnDefinitions="Auto,*,Auto">
+          <Ellipse Grid.Column="0" Classes="dot" Margin="0,0,9,0"
+                   Classes.ok="{Binding !HasWarning}"
+                   Classes.gold="{Binding IsPolling}"
+                   Classes.bad="{Binding HasWarning}" />
+          <TextBlock Grid.Column="1" Classes="cell dim" TextTrimming="CharacterEllipsis"
+                     Text="{Binding Status}" />
+          <TextBlock Grid.Column="2" Classes="cell muted mono" Margin="16,0,0,0"
+                     Text="{Binding ActaSummary}"
+                     ToolTip.Tip="链长与冲突计数。两个节点同时抢同一个链索引时哈希小者胜出，本地那一段重挂到链尾" />
+        </Grid>
+      </Grid>
+
+      <!--
+        操作提示：叠在内容区上方（同一个 Grid.Row，靠书写顺序压在上面），所以不占布局、
+        出现和消失都不会让下面的表格跳动。IsHitTestVisible=False 保证它永远不会挡住点击。
+
+        为什么不用状态栏：状态栏在窗口最底部，而按钮在顶栏和行内 —— 反馈离手太远，
+        人根本不会往那儿看，于是会重复点。这条出现在离按钮最近的地方，3 秒后自己消失。
+      -->
+      <Border Grid.Row="1" Classes="toast" Classes.on="{Binding HasToast}"
+              IsHitTestVisible="False">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <Ellipse Classes="dot"
+                   Classes.ok="{Binding ToastIsOk}"
+                   Classes.bad="{Binding ToastIsBad}"
+                   Classes.gold="{Binding ToastIsBusy}" />
+          <TextBlock Text="{Binding ToastText}" />
         </StackPanel>
-      </Grid>
-    </Border>
-
-    <!-- az 身份缺失警告 -->
-    <Border Grid.Row="1" Margin="0,8,0,0" Padding="10,8" CornerRadius="4"
-            Background="#33FF7A45" BorderBrush="#FF7A45" BorderThickness="1"
-            IsVisible="{Binding IdentityWarning, Converter={x:Static ObjectConverters.IsNotNull}}">
-      <TextBlock Text="{Binding IdentityWarning}" TextWrapping="Wrap" />
-    </Border>
-
-    <!-- PR 队列 -->
-    <Border Grid.Row="2" Margin="0,8,0,0" CornerRadius="6" BorderThickness="1"
-            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
-      <Grid RowDefinitions="Auto,Auto,*">
-        <TextBlock Grid.Row="0" Margin="12,10,12,6" FontWeight="SemiBold"
-                   Text="PR 队列（幂等键 = PR 号 @ 源 commit 前 8 位）" />
-
-        <Grid Grid.Row="1" Margin="12,0,12,6"
-              ColumnDefinitions="150,150,*,120,110,80,90,150,80">
-          <TextBlock Grid.Column="0" Classes="h" Text="REVISION" />
-          <TextBlock Grid.Column="1" Classes="h" Text="REPO" />
-          <TextBlock Grid.Column="2" Classes="h" Text="标题" />
-          <TextBlock Grid.Column="3" Classes="h" Text="作者" />
-          <TextBlock Grid.Column="4" Classes="h" Text="阶段" />
-          <TextBlock Grid.Column="5" Classes="h" Text="QUORUM" />
-          <TextBlock Grid.Column="6" Classes="h" Text="本节点" />
-          <TextBlock Grid.Column="7" Classes="h" Text="结论" />
-          <TextBlock Grid.Column="8" Classes="h" Text="" />
-        </Grid>
-
-        <ListBox Grid.Row="2" ItemsSource="{Binding Pipeline}" Background="Transparent"
-                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-          <ListBox.ItemTemplate>
-            <DataTemplate x:DataType="vm:PrRow">
-              <Grid ColumnDefinitions="150,150,*,120,110,80,90,150,80" Height="30">
-                <TextBlock Grid.Column="0" Classes="cell mono" Text="{Binding RevisionId}" />
-                <TextBlock Grid.Column="1" Classes="cell" Text="{Binding Repo}"
-                           ToolTip.Tip="{Binding Project}" />
-                <TextBlock Grid.Column="2" Classes="cell" Text="{Binding Title}"
-                           ToolTip.Tip="{Binding Branches}" />
-                <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Author}" />
-                <TextBlock Grid.Column="4" Classes="cell" Text="{Binding Stage}" />
-                <TextBlock Grid.Column="5" Classes="cell" Text="{Binding Quorum}"
-                           ToolTip.Tip="{Binding Diff}" />
-                <TextBlock Grid.Column="6" Classes="cell" Text="{Binding Seat}" />
-                <TextBlock Grid.Column="7" Classes="cell" Text="{Binding Outcome}" />
-                <Button Grid.Column="8" Content="评审" Padding="8,2" FontSize="11"
-                        Command="{Binding ReviewCommand}" CommandParameter="{Binding}"
-                        IsEnabled="{Binding CanReview}" />
-              </Grid>
-            </DataTemplate>
-          </ListBox.ItemTemplate>
-        </ListBox>
-      </Grid>
-    </Border>
-
-    <GridSplitter Grid.Row="3" ResizeDirection="Rows" Background="Transparent" />
-
-    <!-- Acta 账本 -->
-    <Border Grid.Row="4" CornerRadius="6" BorderThickness="1"
-            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
-      <Grid RowDefinitions="Auto,Auto,*">
-        <TextBlock Grid.Row="0" Margin="12,10,12,6" FontWeight="SemiBold"
-                   Text="Acta 会议录（append-only，每块含前块哈希与本节点签名）" />
-
-        <Grid Grid.Row="1" Margin="12,0,12,6" ColumnDefinitions="110,220,50,110,120,*">
-          <TextBlock Grid.Column="0" Classes="h" Text="时间" />
-          <TextBlock Grid.Column="1" Classes="h" Text="链" />
-          <TextBlock Grid.Column="2" Classes="h" Text="#" />
-          <TextBlock Grid.Column="3" Classes="h" Text="类型" />
-          <TextBlock Grid.Column="4" Classes="h" Text="HASH" />
-          <TextBlock Grid.Column="5" Classes="h" Text="摘要" />
-        </Grid>
-
-        <ListBox Grid.Row="2" ItemsSource="{Binding Blocks}" Background="Transparent"
-                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-          <ListBox.ItemTemplate>
-            <DataTemplate x:DataType="vm:BlockRow">
-              <Grid ColumnDefinitions="110,220,50,110,120,*" Height="24">
-                <TextBlock Grid.Column="0" Classes="cell mono" Text="{Binding At}" />
-                <TextBlock Grid.Column="1" Classes="cell mono" Text="{Binding Chain}" />
-                <TextBlock Grid.Column="2" Classes="cell mono" Text="{Binding Index}" />
-                <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Kind}" />
-                <TextBlock Grid.Column="4" Classes="cell mono" Text="{Binding Hash}"
-                           ToolTip.Tip="{Binding Elector, StringFormat='签名节点 {0}'}" />
-                <TextBlock Grid.Column="5" Classes="cell mono" Text="{Binding Summary}" />
-              </Grid>
-            </DataTemplate>
-          </ListBox.ItemTemplate>
-        </ListBox>
-      </Grid>
-    </Border>
-
-    <!-- 状态栏 -->
-    <TextBlock Grid.Row="5" Margin="4,10,4,0" Opacity="0.75" TextWrapping="Wrap"
-               Text="{Binding Status}" />
-  </Grid>
+      </Border>
+    </Grid>
+  </Border>
 </Window>

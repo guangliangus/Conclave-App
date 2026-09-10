@@ -25,14 +25,14 @@ public class BlockTests
     [Fact]
     public void Signed_block_verifies()
     {
-        using var id = ElectorIdentity.CreateEphemeral();
+        using var id = ElectorIdentity.Create();
         Assert.True(Sign(id, """{"a":1}""").VerifySignature());
     }
 
     [Fact]
     public void Tampering_with_the_payload_breaks_verification()
     {
-        using var id = ElectorIdentity.CreateEphemeral();
+        using var id = ElectorIdentity.Create();
         var block = Sign(id, """{"a":1}""");
 
         var tampered = block with { PayloadJson = """{"a":2}""" };
@@ -44,8 +44,8 @@ public class BlockTests
     [Fact]
     public void Swapping_in_another_public_key_breaks_the_elector_fingerprint()
     {
-        using var mine = ElectorIdentity.CreateEphemeral();
-        using var theirs = ElectorIdentity.CreateEphemeral();
+        using var mine = ElectorIdentity.Create();
+        using var theirs = ElectorIdentity.Create();
 
         var block = Sign(mine, """{"a":1}""");
         var forged = block with { PublicKey = theirs.PublicKey };
@@ -57,7 +57,7 @@ public class BlockTests
     [Fact]
     public void Hash_excludes_the_signature_so_it_is_a_function_of_content_only()
     {
-        using var id = ElectorIdentity.CreateEphemeral();
+        using var id = ElectorIdentity.Create();
         var a = Sign(id, """{"a":1}""");
         var b = Sign(id, """{"a":1}""");
 
@@ -71,7 +71,7 @@ public class BlockTests
     [Fact]
     public void Prev_hash_links_blocks_into_a_chain()
     {
-        using var id = ElectorIdentity.CreateEphemeral();
+        using var id = ElectorIdentity.Create();
         var first = Sign(id, """{"n":1}""");
         var second = Sign(id, """{"n":2}""", index: 1, prev: first.Hash());
 
