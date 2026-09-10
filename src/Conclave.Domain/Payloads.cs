@@ -1,12 +1,25 @@
 namespace Conclave.Domain;
 
-/// <summary>Summons 块的载荷：发现了一个待评审的 PR 版本。</summary>
+/// <summary>
+/// Summons 块的载荷：发现了一个待评审的 PR 版本。
+/// </summary>
+/// <remarks>
+/// ⚠️ <b>已不再写入链上</b>（2026-09-09）。「队列里有什么」改由实时状态
+/// <see cref="QueuedRevision"/> 承载 —— 写进不可变的链只会留下一地永远清不掉的僵尸
+/// （实测积到 41 个 revision 里 36 个已经在 ADO 上关闭了）。类型保留是为了能读懂旧区块。
+/// </remarks>
 /// <param name="Revision">幂等键，见 <see cref="Conclave.Domain.Revision"/>。</param>
 /// <param name="Pr">当时读到的 PR 元数据快照。</param>
 /// <param name="Quorum">按 <see cref="SeatAssignment.QuorumSize"/> 算出的应有席位数。</param>
 /// <param name="RulesFingerprint">
-/// 当时生效的 <see cref="ReservedMatters"/> 指纹。链上留痕，日后回看
-/// 「为什么这个 PR 只跑了 1 个节点」时不必猜配置。
+/// 当时生效的规则指纹，形如 <c>&lt;reserved&gt;+&lt;quorum&gt;</c> —— 是
+/// <see cref="ReservedMatters.Fingerprint"/> 与 <see cref="QuorumPolicy.Fingerprint"/>
+/// 两者拼起来的，拼法见 <c>DiscoveryService.RulesFingerprint</c>。
+/// <para>
+/// 两个都要留：<see cref="Quorum"/> 只说了「跑几遍」，说不出「为什么是这个数」——
+/// 是碰了敏感路径，还是改动大，取决于当时两份配置各是什么。链上留痕，半年后回看
+/// 「这个 PR 为什么只跑了 1 个节点」时不必猜。
+/// </para>
 /// </param>
 public sealed record SummonsPayload(
     Revision Revision,
@@ -14,7 +27,13 @@ public sealed record SummonsPayload(
     int Quorum,
     string RulesFingerprint);
 
-/// <summary>Seating 块的载荷：某节点认领了某一轮的席位。</summary>
+/// <summary>
+/// Seating 块的载荷：某节点认领了某一轮的席位。
+/// </summary>
+/// <remarks>
+/// ⚠️ <b>已不再写入链上</b>（2026-09-09）。「谁正在评」改由实时状态
+/// <see cref="ActiveReview"/> 承载，掉线自动释放。类型保留是为了能读懂旧区块。
+/// </remarks>
 /// <param name="RevisionId">对应 <see cref="Revision.Id"/>。</param>
 /// <param name="Round">席位轮次，0 起。round=0 的节点负责最终投递。</param>
 /// <param name="ElectorId">认领者的公钥指纹。</param>
@@ -58,6 +77,26 @@ public sealed record BallotPayload(
     string? ReviewerAz = null,
     string? Error = null)
 {
+    /// <summary>
+    /// 评审时的 PR 快照。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 以前这份快照在 <c>Summons</c> 块上，投影表回查那里取 project/repo/标题/作者。
+    /// 现在链上只留完成的评审，<c>Summons</c> 不再上链，所以快照必须跟着票走 ——
+    /// 否则账单里连「这一票评的是哪个仓库的哪个 PR」都答不上来。
+    /// </para>
+    /// <para>
+    /// quorum=1 时每个 revision 只有一票，所以并不会像原先担心的那样「同一份快照在链上
+    /// 存两遍」；quorum≥2 时会有几份副本，那是为了让每一票都自洽可读，值得。
+    /// </para>
+    /// <para>
+    /// 是 init 属性而不是构造参数：既有的构造点和 <c>with</c> 拷贝都不用改，
+    /// 而改造之前落链的老 Ballot 没有这个字段，反序列化时留 null 就是正确的表达。
+    /// </para>
+    /// </remarks>
+    public PrMeta? Pr { get; init; }
+
     /// <summary>拿不到计量时退成全 0，免得每个读取点都判空。</summary>
     public ReviewUsage Metering => Usage ?? ReviewUsage.None;
 }
@@ -79,7 +118,14 @@ public sealed record PromulgationPayload(
     int ExpectedQuorum,
     int? ThreadId = null);
 
-/// <summary>Recess 块的载荷：某一轮超时弃权，席位让给下一轮。</summary>
+/// <summary>
+/// Recess 块的载荷：某一轮超时弃权，席位让给下一轮。
+/// </summary>
+/// <remarks>
+/// ⚠️ <b>已不再写入链上</b>（2026-09-09）。节点掉线后它的 <see cref="ActiveReview"/> 会随
+/// 心跳窗口过期而消失，PR 自动回队列 —— 不再需要显式的弃权块与 10 分钟席位超时。
+/// 类型保留是为了能读懂旧区块。
+/// </remarks>
 /// <param name="RevisionId">对应 <see cref="Revision.Id"/>。</param>
 /// <param name="Round">被弃权的轮次。下一轮从 <c>Round + 1</c> 重新 HRW。</param>
 /// <param name="Reason">弃权原因，例如 <c>seating timeout</c>。</param>

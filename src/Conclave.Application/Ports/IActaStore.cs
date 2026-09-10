@@ -47,6 +47,45 @@ public sealed record ApplyResult(ApplyOutcome Outcome, IReadOnlyList<Block> Reba
     public bool Novel => Outcome == ApplyOutcome.Applied;
 }
 
+/// <summary>一个 revision 的最终结论，摘要里带的那一份。</summary>
+/// <param name="Decision">多数决结果。</param>
+/// <param name="Findings">合并后的问题数。</param>
+public sealed record Verdict(ReviewDecision Decision, int Findings);
+
+/// <summary>
+/// 链上已完成评审的摘要。
+/// </summary>
+/// <param name="ValidBallots">revisionId → 有效票数（Error 票不计）。</param>
+/// <param name="Verdicts">revisionId → 最终结论。键集就是「已完成」的那些。</param>
+/// <remarks>
+/// <para>
+/// 票只带计数、不带正文 —— 合并结论时才按 revision 去读完整的票
+/// （<see cref="IActaStore.ReadRevisionAsync"/>）。这份摘要每轮编排都要拿一次，
+/// 把所有票的正文都捞出来太浪费。
+/// </para>
+/// <para>
+/// 结论则要带上<b>内容</b>而不只是「完成了」这个事实：队列里那一行的「结论」列读的就是它。
+/// 早先这里只有一个 <c>Finished</c> 集合，于是评完的行显示「已公布」但结论是「—」，
+/// 还挂着一条收票进度条 —— 自相矛盾，而且那一行看起来仍然可操作。
+/// </para>
+/// </remarks>
+public sealed record ChainSummary(
+    IReadOnlyDictionary<string, int> ValidBallots,
+    IReadOnlyDictionary<string, Verdict> Verdicts)
+{
+    public static ChainSummary Empty { get; } = new(
+        new Dictionary<string, int>(StringComparer.Ordinal),
+        new Dictionary<string, Verdict>(StringComparer.Ordinal));
+
+    /// <summary>已有最终结论的 revisionId。</summary>
+    /// <remarks>
+    /// 从 <see cref="Verdicts"/> 现算，所以两者不可能对不上。<c>with</c> 拷贝出来的实例
+    /// 会带着旧的这一份 —— 这份摘要是每轮重新读的，没有人对它做 <c>with</c>。
+    /// </remarks>
+    public IReadOnlySet<string> Finished { get; } =
+        Verdicts.Keys.ToHashSet(StringComparer.Ordinal);
+}
+
 /// <summary>账本的健康计数，供 UI 与报表展示。</summary>
 /// <param name="Blocks">区块总数。</param>
 /// <param name="Revisions">出现过的 revision 数。</param>
@@ -76,13 +115,20 @@ public interface IActaStore
     Task<IReadOnlyList<Block>> ReadRevisionAsync(string revisionId, CancellationToken ct);
 
     /// <summary>
-    /// 出现过 Summons 但尚无 Promulgation 的 revision，按链序（即时间序）升序。
+    /// 链上「已完成」部分的摘要：每个 revision 有几张有效票、哪些已有最终结论。
     /// </summary>
     /// <remarks>
-    /// 同一个 PR 可能有多个未结论的版本（作者连着 push 两次）。按链序返回，
-    /// 调用方按 PR 分组取最后一个 —— 旧版本已经被取代，评它没意义。
+    /// <para>
+    /// 替换掉原先的 <c>ReadOpenRevisionsAsync</c>（「有 Summons 无 Promulgation」）。
+    /// 那个查询把队列建在链上历史之上，于是 PR 在 Azure DevOps 上被 merge 之后没人清，
+    /// 永远留在队列里 —— 实测积到 41 个 revision 里 36 个是僵尸。
+    /// </para>
+    /// <para>
+    /// 现在队列来自实时状态（<see cref="Domain.QueuedRevision"/>），链只回答「哪些已经评过了」。
+    /// 这份摘要喂给 <see cref="Domain.QueueProjection.Build"/>。
+    /// </para>
     /// </remarks>
-    Task<IReadOnlyList<string>> ReadOpenRevisionsAsync(CancellationToken ct);
+    Task<ChainSummary> ReadSummaryAsync(CancellationToken ct);
 
     /// <summary>
     /// 读全局链，可从某个索引之后开始。供 mesh 补链与完整性校验。

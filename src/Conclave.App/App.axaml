@@ -3,7 +3,17 @@
              x:Class="Conclave.App.App"
              RequestedThemeVariant="Default">
 
+    <!-- Default：跟随系统深浅色。两套令牌都在 Styles/Theme.axaml 里成对定义。 -->
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceInclude Source="/Styles/Theme.axaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+
     <Application.Styles>
         <FluentTheme />
+        <StyleInclude Source="/Styles/Controls.axaml" />
     </Application.Styles>
 </Application>

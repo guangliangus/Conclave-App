@@ -115,4 +115,36 @@ public interface IReviewLog
 
     /// <summary>总计一行。</summary>
     Task<UsageSummary> ReadTotalAsync(DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct);
+
+    /// <summary>
+    /// 某个 PR 最近一次有效评审的评审节点（公钥指纹）；没有则 null。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 用于「作者 fix 之后仍由同一个节点复审」。按 <c>(project, pr_id)</c> 查而不是按
+    /// revision —— 要找的正是<b>上一个</b> revision 的评审者。
+    /// </para>
+    /// <para>
+    /// 只认有效票：上一版是 Error 票说明那个节点当时没跑成，没有「读过这份代码」的优势，
+    /// 硬把它请回来只会重复同一个失败。
+    /// </para>
+    /// <para>
+    /// <b>这是投影表第一次参与行为决策而不只是报表。</b> 之所以成立：投影完全由链推导
+    /// （每行带 <c>block_hash</c>，让位重挂后整体重建），所以它不是第二个真相来源。
+    /// 各节点在 gossip 收敛前可能算出不同的归属，跟 <c>extraRounds</c> 同一类瞬时不一致，
+    /// 收敛后自愈。
+    /// </para>
+    /// </remarks>
+    Task<string?> ReadLastReviewerAsync(string project, int prId, CancellationToken ct);
+
+    /// <summary>
+    /// 某个节点自己在时间窗内烧掉的 token 与折算金额。
+    /// </summary>
+    /// <remarks>
+    /// 用来算 <see cref="Domain.Elector.Utilization"/>。按 <c>reviewer_id</c>（公钥指纹）过滤
+    /// 而不是 <c>reviewer_az</c>：投影表里混着 gossip 进来的别人的票，而额度是按机器算的，
+    /// 同一个人在两台机器上是两份额度。
+    /// </remarks>
+    Task<UsageSummary> ReadElectorUsageAsync(
+        string electorId, DateTimeOffset from, CancellationToken ct);
 }

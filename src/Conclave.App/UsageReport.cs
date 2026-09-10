@@ -55,7 +55,7 @@ internal static class UsageReport
                 r.ReviewerAz.Length > 0 ? r.ReviewerAz : r.ReviewerId[..8],
                 r.PrId.ToString(CultureInfo.InvariantCulture),
                 r.Repo,
-                r.Status.ToString(),
+                Labels.Decision(r.Status),
                 r.Findings.ToString(CultureInfo.InvariantCulture),
                 Tokens(r.Usage.TotalTokens),
                 Money(r.Usage.CostUsd),
@@ -168,6 +168,5 @@ internal static class UsageReport
 
     private static string Money(decimal value) => Format.Money(value);
 
-    private static string Percent(double ratio)
-        => (ratio * 100).ToString("F0", CultureInfo.InvariantCulture) + "%";
+    private static string Percent(double ratio) => Format.Percent(ratio);
 }

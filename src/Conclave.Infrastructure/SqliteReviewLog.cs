@@ -88,6 +88,87 @@ public sealed class SqliteReviewLog : IReviewLog
     }
 
     /// <summary>
+    /// 某个 PR 最近一次有效评审的评审节点（公钥指纹）；没有则 null。
+    /// </summary>
+    /// <remarks>
+    /// 排除 Error 票：上一版是 Error 说明那个节点当时根本没跑成，没有「读过这份代码」的
+    /// 优势，把它请回来只会重复同一个失败。
+    /// <para>
+    /// 按 <c>reviewed_at</c> 倒序而不是 <c>id</c>：让位重挂会重建整张投影表，
+    /// 自增 id 的顺序不再对应链序，而出票时刻是写在票里的、重建后不变。
+    /// </para>
+    /// </remarks>
+    public async Task<string?> ReadLastReviewerAsync(string project, int prId, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(project);
+
+        await using var conn = Open();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+                SELECT reviewer_id
+                FROM reviews
+                WHERE project = $project AND pr_id = $pr AND status <> $error
+                ORDER BY reviewed_at DESC
+                LIMIT 1
+            """;
+        _ = cmd.Parameters.AddWithValue("$project", project);
+        _ = cmd.Parameters.AddWithValue("$pr", prId);
+        _ = cmd.Parameters.AddWithValue("$error", ReviewDecision.Error.ToString());
+
+        var value = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        return value as string;
+    }
+
+    /// <summary>
+    /// 某个节点自己在时间窗内烧掉的 token 与折算金额。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 按 <c>reviewer_id</c>（公钥指纹）过滤而不是 <c>reviewer_az</c>：投影表里混着 gossip
+    /// 进来的别人的票，而 Claude 额度是按机器算的 —— 同一个人在两台机器上是两份额度。
+    /// </para>
+    /// <para>
+    /// Error 票也算进来。子进程失败前烧掉的 token 不会因为失败而退回，
+    /// 不计入会让额度用量系统性低报。
+    /// </para>
+    /// </remarks>
+    public async Task<UsageSummary> ReadElectorUsageAsync(
+        string electorId, DateTimeOffset from, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(electorId);
+
+        await using var conn = Open();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+                SELECT COUNT(*),
+                       COALESCE(SUM(input_tokens), 0),
+                       COALESCE(SUM(output_tokens), 0),
+                       COALESCE(SUM(cache_read_tokens), 0),
+                       COALESCE(SUM(cache_write_tokens), 0),
+                       COALESCE(SUM(cost_usd), 0)
+                FROM reviews
+                WHERE reviewer_id = $elector AND reviewed_at >= $from
+            """;
+        _ = cmd.Parameters.AddWithValue("$elector", electorId);
+        _ = cmd.Parameters.AddWithValue("$from", from.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            return new UsageSummary(electorId, 0, 0, 0, 0, 0, 0m);
+        }
+
+        return new UsageSummary(
+            electorId,
+            reader.GetInt32(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.GetInt64(4),
+            (decimal)reader.GetDouble(5));
+    }
+
+    /// <summary>
     /// 一个通用的分组汇总。
     /// </summary>
     /// <remarks>

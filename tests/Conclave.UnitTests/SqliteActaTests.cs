@@ -94,36 +94,47 @@ public sealed class SqliteActaTests : IDisposable
     }
 
     [Fact]
-    public async Task Open_chains_exclude_promulgated_revisions()
+    public async Task The_summary_counts_valid_ballots_and_marks_finished_revisions()
     {
         var ct = CancellationToken.None;
-        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
-        Assert.Contains(Rev.Id, await _acta.ReadOpenRevisionsAsync(ct));
+
+        // 链上只记完成的评审了。「队列里有什么」是实时状态的事，链只回答「哪些评过了」——
+        // 原先那个「Summons 数 > Promulgation 数」的查询把队列建在历史上，
+        // PR 在 ADO 上关掉之后没人清，永远留在队列里（实测 41 个里 36 个是僵尸）。
+        Assert.Empty((await _acta.ReadSummaryAsync(ct)).ValidBallots);
+        Assert.Empty((await _acta.ReadSummaryAsync(ct)).Finished);
+
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Ballot, Ballot(0, ReviewDecision.Reject), ct);
+
+        var afterBallot = await _acta.ReadSummaryAsync(ct);
+        Assert.Equal(1, afterBallot.ValidBallots[Rev.Id]);
+        Assert.Empty(afterBallot.Finished);
 
         _ = await _acta.AppendAsync(
             Rev.Id, BlockKind.Promulgation,
-            new PromulgationPayload(Rev.Id, ReviewDecision.Approve, [], false, 1, 1), ct);
+            new PromulgationPayload(Rev.Id, ReviewDecision.Reject, [], false, 1, 1), ct);
 
-        Assert.DoesNotContain(Rev.Id, await _acta.ReadOpenRevisionsAsync(ct));
+        Assert.Contains(Rev.Id, (await _acta.ReadSummaryAsync(ct)).Finished);
     }
 
     [Fact]
-    public async Task A_new_revision_reopens_the_chain()
+    public async Task The_summary_does_not_count_error_ballots()
     {
         var ct = CancellationToken.None;
-        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
-        _ = await _acta.AppendAsync(
-            Rev.Id, BlockKind.Promulgation,
-            new PromulgationPayload(Rev.Id, ReviewDecision.Approve, [], false, 1, 1), ct);
+        _ = await _acta.AppendAsync(Rev.Id, BlockKind.Ballot, Ballot(0, ReviewDecision.Error), ct);
 
-        var next = new Revision(Rev.Project, Rev.PrId, "bbbbbbbb22222222");
-        _ = await _acta.AppendAsync(
-            Rev.Id, BlockKind.Summons,
-            new SummonsPayload(next, TestElectors.Pr(), 1, "rules1"), ct);
-
-        // 作者 push 了新 commit → Summons 数 > Promulgation 数 → 这条链重新变成待办。
-        Assert.Contains(Rev.Id, await _acta.ReadOpenRevisionsAsync(ct));
+        // Error 票只说明那一轮跑失败了，要换个节点重试 —— 计入的话 quorum=1 时
+        // 一次偶发的子进程失败就会被当成「已经评过了」，这个 PR 再也不会被评。
+        var summary = await _acta.ReadSummaryAsync(ct);
+        Assert.False(summary.ValidBallots.ContainsKey(Rev.Id));
+        Assert.Empty(summary.Finished);
     }
+
+    private static BallotPayload Ballot(int round, ReviewDecision decision) => new(
+        Rev.Id, round, decision, [], "claude-opus-5", 1234, ReviewUsage.None, "alan")
+    {
+        Pr = TestElectors.Pr(),
+    };
 
     [Fact]
     public async Task Ballot_count_only_counts_this_elector_s_ballots()

@@ -72,6 +72,53 @@ public sealed class ReviewLogTests : IDisposable
     }
 
     [Fact]
+    public async Task Elector_usage_sums_only_this_nodes_own_reviews_inside_the_window()
+    {
+        var ct = CancellationToken.None;
+        await SeedAsync(cost: 0.42m);
+        await SeedAsync(cost: 0.30m, revision: new Revision("edison-test", 2879, "bbbbbbbb11111111"));
+
+        var used = await _log.ReadElectorUsageAsync(_identity.Id, DateTimeOffset.UtcNow.AddDays(-7), ct);
+
+        Assert.Equal(2, used.Reviews);
+        Assert.Equal(2 * (1_200 + 3_400 + 120_000 + 8_000), used.TotalTokens);
+        Assert.Equal(0.72m, used.CostUsd);
+
+        // 别人的票也在同一张投影表里（gossip 进来的），但额度是按机器算的 ——
+        // 同一个人在两台机器上是两份额度，所以必须按 electorId 过滤。
+        var other = await _log.ReadElectorUsageAsync("ffffffffffffffff", DateTimeOffset.UtcNow.AddDays(-7), ct);
+        Assert.Equal(0, other.Reviews);
+        Assert.Equal(0, other.TotalTokens);
+    }
+
+    [Fact]
+    public async Task Elector_usage_ignores_reviews_older_than_the_window()
+    {
+        await SeedAsync();
+
+        // 窗口起点在未来 —— 所有已有记录都应落在窗口外。滚动窗口要是没生效，
+        // 用量只会单调上涨，节点跑几天就永久出局。
+        var used = await _log.ReadElectorUsageAsync(
+            _identity.Id, DateTimeOffset.UtcNow.AddMinutes(5), CancellationToken.None);
+
+        Assert.Equal(0, used.Reviews);
+    }
+
+    [Fact]
+    public async Task Elector_usage_counts_error_ballots_too()
+    {
+        await SeedAsync(decision: ReviewDecision.Error);
+
+        // 子进程失败前烧掉的 token 不会因为失败而退回。不计入会让额度用量系统性低报，
+        // 而低报的方向恰恰是「继续给这台机器派活」。
+        var used = await _log.ReadElectorUsageAsync(
+            _identity.Id, DateTimeOffset.UtcNow.AddDays(-7), CancellationToken.None);
+
+        Assert.Equal(1, used.Reviews);
+        Assert.True(used.TotalTokens > 0);
+    }
+
+    [Fact]
     public async Task A_ballot_lands_in_the_review_log_with_who_when_and_what()
     {
         await SeedAsync();

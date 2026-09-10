@@ -1,21 +1,28 @@
 using System.Globalization;
 using Conclave.Application.Ports;
+using Conclave.Domain;
 
 namespace Conclave.App.ViewModels;
 
 /// <summary>评审记录面板里的一行。</summary>
 public sealed class ReviewRow
 {
-    public ReviewRow(ReviewRecord record)
+    public ReviewRow(
+        ReviewRecord record, string? azureDevOpsOrgUrl = null, TableLayout? layout = null)
     {
         ArgumentNullException.ThrowIfNull(record);
 
+        Layout = layout ?? new TableLayout();
+
         At = record.ReviewedAt.ToLocalTime().ToString("MM-dd HH:mm", CultureInfo.InvariantCulture);
-        Reviewer = record.ReviewerAz.Length > 0 ? record.ReviewerAz : record.ReviewerId[..8];
+        Reviewer = record.ReviewerAz.Length > 0
+            ? Labels.ShortAccount(record.ReviewerAz)
+            : record.ReviewerId[..8];
+        ReviewerFull = record.ReviewerAz.Length > 0 ? record.ReviewerAz : record.ReviewerId;
         Pr = record.PrId.ToString(CultureInfo.InvariantCulture);
         Repo = record.Repo;
         Title = record.PrTitle;
-        Status = record.Status.ToString();
+        Status = Badge.Status(record.Status);
         Findings = record.Findings.ToString(CultureInfo.InvariantCulture);
         Tokens = Format.Tokens(record.Usage.TotalTokens);
         Cost = Format.Money(record.Usage.CostUsd);
@@ -24,7 +31,10 @@ public sealed class ReviewRow
         // 悬浮时给出拆解：缓存读写与新输入的计价差一个量级，混着看判断不了优化方向。
         Breakdown = string.Format(
             CultureInfo.InvariantCulture,
-            "输入 {0} · 输出 {1} · 缓存读 {2} · 缓存写 {3} · 思考 {4}\n缓存命中 {5:P0} · {6} 轮 · {7}\n{8}",
+            "{0}#{1} · {2}\n输入 {3} · 输出 {4} · 缓存读 {5} · 缓存写 {6} · 思考 {7}\n缓存命中 {8:P0} · {9} 轮 · {10}\n{11}",
+            record.Repo,
+            record.PrId,
+            record.RevisionId,
             Format.Tokens(record.Usage.InputTokens),
             Format.Tokens(record.Usage.OutputTokens),
             Format.Tokens(record.Usage.CacheReadTokens),
@@ -37,11 +47,24 @@ public sealed class ReviewRow
                 ? string.Join('\n', record.Usage.Models.Select(m =>
                     $"  {m.CanonicalModel}: {Format.Money(m.CostUsd)}"))
                 : "  (无分模型明细)");
+
+        // 账本里只有 project / repo / PR 号，没有 remoteUrl —— 所以这里只能按组织地址拼。
+        Url = PrLink.For(azureDevOpsOrgUrl, record.Project, record.Repo, record.PrId);
+        UrlTip = Url ?? "拿不到 PR 网页地址：没配 Conclave:AzureDevOpsOrgUrl";
+
+        PrLabel = "PR " + Pr;
+        Subtitle = string.Join("  ·  ", new[] { Repo, Reviewer }.Where(x => x.Length > 0));
     }
+
+    /// <summary>三张表共用的「该显示几列」。</summary>
+    public TableLayout Layout { get; }
 
     public string At { get; }
 
+    /// <summary>去掉域前缀的评审者名；没有 az 身份时退回公钥指纹前 8 位。</summary>
     public string Reviewer { get; }
+
+    public string ReviewerFull { get; }
 
     public string Pr { get; }
 
@@ -49,7 +72,7 @@ public sealed class ReviewRow
 
     public string Title { get; }
 
-    public string Status { get; }
+    public Badge Status { get; }
 
     public string Findings { get; }
 
@@ -60,5 +83,22 @@ public sealed class ReviewRow
     public string Duration { get; }
 
     public string Breakdown { get; }
-}
 
+    /// <summary>PR 页面地址；没配组织地址时为 <c>null</c>。</summary>
+    public string? Url { get; }
+
+    public bool HasUrl => Url is not null;
+
+    public string UrlTip { get; }
+
+    /// <summary>「PR 123」—— 标题下面那行里可点的那一截。</summary>
+    public string PrLabel { get; }
+
+    /// <summary>标题下面那行小字里不可点的部分：仓库 · 谁评的。</summary>
+    /// <remarks>
+    /// 跟 <see cref="PrRow.Subtitle"/> 同一个理由：这几样各占一列时吃掉 300px，
+    /// 把标题挤成一条缝，而它们只是定位信息、不是人扫账单时在读的东西。
+    /// PR 号单独拆出来（<see cref="PrLabel"/>）是因为它现在是个链接。
+    /// </remarks>
+    public string Subtitle { get; }
+}

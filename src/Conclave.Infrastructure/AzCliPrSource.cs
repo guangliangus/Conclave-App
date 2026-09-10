@@ -22,13 +22,29 @@ namespace Conclave.Infrastructure;
 /// <c>WARNING: ... does not support Azure DevOps Server</c>，但功能正常 ——
 /// 所以退出码为 0 时一律忽略 stderr。
 /// </para>
+/// <para>
+/// 改动统计走 <c>pullRequestIterationChanges</c> 而不是本机 <c>git diff</c>：
+/// 「本机有 clone」这条硬规则已经删掉，评审用的代码是评审时才临时拉的。代价是
+/// ADO 不提供行数（实测确认），所以 quorum 的档位按文件数分。
+/// </para>
 /// </remarks>
 public sealed class AzCliPrSource(
     ConclaveOptions options,
-    IRepoLocator repos,
     ExecutableResolver executables,
     ILogger<AzCliPrSource> logger) : IPrSource
 {
+    /// <summary>组织地址只探一次 —— 它来自本机的 az 配置，一个进程生命周期内不会变。</summary>
+    private string? _orgUrl;
+
+    /// <summary>collection 级列举一次最多要多少条。</summary>
+    private const int MaxPullRequests = 500;
+
+    /// <summary>project 清单的缓存时长。</summary>
+    private static readonly TimeSpan ProjectListTtl = TimeSpan.FromMinutes(10);
+
+    private IReadOnlyList<string>? _projects;
+    private DateTimeOffset _projectsAt;
+
     public async Task<string> GetAuthenticatedIdentityAsync(CancellationToken ct)
     {
         // ADO Server 上没有 az ad signed-in-user，connectionData 是唯一可靠的取法。
@@ -63,16 +79,69 @@ public sealed class AzCliPrSource(
         throw new InvalidOperationException("connectionData 没有返回 authenticatedUser，请先跑 az devops login");
     }
 
+    /// <summary>
+    /// 列出有权限的 project。缓存 <see cref="ProjectListTtl"/>。
+    /// </summary>
+    /// <remarks>
+    /// 缓存的理由跟别处一样是「一次 az 调用 = 一个 Python 进程 ≈ 1.25 秒」，而 project
+    /// 清单几个月才变一次。它只有两个用途：给 mesh 分片（<c>DiscoveryShare</c>），
+    /// 以及进心跳供 <see cref="Domain.Elector.HasProject"/> 判权限 —— 两者都容得下
+    /// 十分钟的滞后。
+    /// </remarks>
     public async Task<IReadOnlyList<string>> ListProjectsAsync(CancellationToken ct)
     {
+        if (_projects is not null && DateTimeOffset.UtcNow - _projectsAt < ProjectListTtl)
+        {
+            return _projects;
+        }
+
         var json = await AzAsync(["devops", "project", "list", "--query", "value[].name", "-o", "json"], ct)
             .ConfigureAwait(false);
 
         using var doc = JsonDocument.Parse(json);
-        return [.. doc.RootElement.EnumerateArray()
+        _projects = [.. doc.RootElement.EnumerateArray()
             .Select(e => e.GetString())
             .Where(s => !string.IsNullOrEmpty(s))
             .Select(s => s!)];
+        _projectsAt = DateTimeOffset.UtcNow;
+        return _projects;
+    }
+
+    /// <summary>
+    /// 整个 collection 的活跃 PR，一次调用。
+    /// </summary>
+    /// <remarks>
+    /// 走 <c>az devops invoke</c> 打 collection 级的 <c>_apis/git/pullrequests</c>：
+    /// <c>az repos pr list</c> 必须带 <c>--project</c>，而这个路由不用 —— 实测这台
+    /// ADO Server 上 1.5 秒返回全部 29 个，字段跟逐 project 列举完全一致。
+    /// <para>
+    /// 不分页：一次要 <see cref="MaxPullRequests"/> 条，取满了就警告而不是静默截断。
+    /// 活跃 PR 上千的 collection 已经不是这个工具的场景（那时候队列本身就没法看）。
+    /// </para>
+    /// </remarks>
+    public async Task<IReadOnlyList<PrMeta>> ListAllActivePullRequestsAsync(CancellationToken ct)
+    {
+        var json = await AzAsync(
+            [
+                "devops", "invoke",
+                "--area", "git", "--resource", "pullrequests",
+                "--api-version", "5.0",
+                "--query-parameters",
+                "searchCriteria.status=active",
+                "$top=" + MaxPullRequests.ToString(CultureInfo.InvariantCulture),
+                "-o", "json",
+            ], ct).ConfigureAwait(false);
+
+        var prs = ParsePrList(json);
+
+        if (prs.Count >= MaxPullRequests)
+        {
+            logger.LogWarning(
+                "collection 级列举取到 {Count} 条，已达上限 —— 可能被截断，超出的 PR 这一轮不会被发现",
+                prs.Count);
+        }
+
+        return prs;
     }
 
     public async Task<IReadOnlyList<PrMeta>> ListActivePullRequestsAsync(string project, CancellationToken ct)
@@ -83,6 +152,12 @@ public sealed class AzCliPrSource(
             ["repos", "pr", "list", "--project", project, "--status", "active", "-o", "json"], ct)
             .ConfigureAwait(false);
 
+        return ParsePrList(json);
+    }
+
+    /// <summary>PR 列表的 JSON → <see cref="PrMeta"/>。两条列举路径共用。</summary>
+    private static IReadOnlyList<PrMeta> ParsePrList(string json)
+    {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
@@ -108,7 +183,7 @@ public sealed class AzCliPrSource(
                 prId.ToString(CultureInfo.InvariantCulture), "-o", "json"], ct).ConfigureAwait(false);
             using var doc = JsonDocument.Parse(json);
             var pr = ParsePr(doc.RootElement);
-            return pr is null ? null : await EnrichWithDiffStatsAsync(pr, ct).ConfigureAwait(false);
+            return pr is null ? null : await EnrichWithChangeStatsAsync(pr, ct).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex)
         {
@@ -144,6 +219,9 @@ public sealed class AzCliPrSource(
                 && draft.GetBoolean(),
             SourceBranch = ShortBranch(Str(e, "sourceRefName")),
             TargetBranch = ShortBranch(Str(e, "targetRefName")),
+            // 实测 az repos pr list 把它返回成 null，只有 az repos pr show 才给真值。
+            // 为空时由 GetCloneUrlAsync 按组织地址拼出来。
+            RemoteUrl = Str(repository, "remoteUrl"),
         };
     }
 
@@ -155,71 +233,187 @@ public sealed class AzCliPrSource(
     private static string ShortBranch(string refName)
         => refName.StartsWith("refs/heads/", StringComparison.Ordinal) ? refName["refs/heads/".Length..] : refName;
 
-    public async Task<PrMeta> EnrichWithDiffStatsAsync(PrMeta pr, CancellationToken ct)
+    /// <summary>
+    /// 结论转成 <c>az repos pr set-vote --vote</c> 接受的字符串。
+    /// </summary>
+    /// <remarks>
+    /// 这个映射刻意放在这里而不是领域层：取值是 <c>az</c> 的命令行词汇，
+    /// 换个 ADO 客户端就得跟着换，而 <see cref="ReviewDecision"/> 不该跟着动。
+    /// <c>none</c> 表示不投票 —— <see cref="ReviewDecision.Error"/> 是本机跑挂了，
+    /// 不是一个评审意见，不该在 PR 上留下任何一票。
+    /// </remarks>
+    private static string AzVote(ReviewDecision decision) => decision switch
+    {
+        ReviewDecision.Approve => "approve",
+        ReviewDecision.ApproveWithSuggestions => "approve-with-suggestions",
+        ReviewDecision.WaitForAuthor => "wait-for-author",
+        ReviewDecision.Reject => "reject",
+        _ => "none",
+    };
+
+    public async Task<PrMeta> EnrichWithChangeStatsAsync(PrMeta pr, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pr);
 
-        if (!repos.Locate().TryGetValue(pr.Repo, out var repoPath))
-        {
-            // 本机没有这个 repo 的 clone。统计留 0 → quorum 退到 1，是安全的降级方向；
-            // 而且本节点根本没有入席资格（见 SeatAssignment.Eligible），拿不到统计无妨。
-            logger.LogDebug("本机没有 {Repo} 的 clone，跳过 diff 统计", pr.Repo);
-            return pr;
-        }
-
         try
         {
-            var git = executables.Resolve(options.GitExecutable);
-
-            _ = await ProcessRunner.RunAsync(
-                git, ["-C", repoPath, "fetch", "--quiet", "origin", pr.SourceBranch, pr.TargetBranch],
-                workingDirectory: repoPath, ct: ct).ConfigureAwait(false);
-
-            // 三点语义：跟 PR 页面显示的一致（相对 merge-base 比较），而不是两个分支尖端直接 diff。
-            var numstat = await ProcessRunner.RunAsync(
-                git, ["-C", repoPath, "diff", "--numstat", $"origin/{pr.TargetBranch}...origin/{pr.SourceBranch}"],
-                workingDirectory: repoPath, ct: ct).ConfigureAwait(false);
-
-            if (!numstat.Success)
+            // 先问最后一个 iteration：作者每 push 一次就多一个 iteration，
+            // 拿第一个（iterationId=1）只会看到首版的改动。
+            var iteration = await LatestIterationAsync(pr, ct).ConfigureAwait(false);
+            if (iteration is null)
             {
-                logger.LogDebug("git diff 失败（{Repo}）：{Err}", pr.Repo, numstat.StdErr.Trim());
+                logger.LogDebug("PR {PrId} 读不到 iteration，改动统计留 0", pr.PrId);
+                return pr;
+            }
+
+            var json = await AzAsync([
+                "devops", "invoke",
+                "--area", "git", "--resource", "pullRequestIterationChanges",
+                "--route-parameters",
+                    $"project={pr.Project}",
+                    $"repositoryId={pr.Repo}",
+                    $"pullRequestId={pr.PrId.ToString(CultureInfo.InvariantCulture)}",
+                    $"iterationId={iteration.Value.ToString(CultureInfo.InvariantCulture)}",
+                "--api-version", "7.1", "-o", "json",
+            ], ct).ConfigureAwait(false);
+
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("changeEntries", out var entries)
+                || entries.ValueKind != JsonValueKind.Array)
+            {
                 return pr;
             }
 
             var paths = new List<string>();
-            var lines = 0;
-            var files = 0;
-
-            foreach (var row in numstat.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            foreach (var entry in entries.EnumerateArray())
             {
-                var parts = row.Split('\t');
-                if (parts.Length < 3)
+                if (!entry.TryGetProperty("item", out var item))
                 {
                     continue;
                 }
 
-                files++;
-                paths.Add(parts[2].Trim());
-
-                // 二进制文件的 numstat 是 "-"，跳过计数即可。
-                if (int.TryParse(parts[0], CultureInfo.InvariantCulture, out var added))
+                // 目录项也会出现在 changeEntries 里（isFolder=true），它们不算改动文件，
+                // 也不该拿去撞 ReservedMatters 的路径模式。
+                if (item.TryGetProperty("isFolder", out var isFolder)
+                    && isFolder.ValueKind == JsonValueKind.True)
                 {
-                    lines += added;
+                    continue;
                 }
 
-                if (int.TryParse(parts[1], CultureInfo.InvariantCulture, out var removed))
+                var path = Str(item, "path").TrimStart('/');
+                if (path.Length > 0)
                 {
-                    lines += removed;
+                    paths.Add(path);
                 }
             }
 
-            return pr with { FilesChanged = files, LinesChanged = lines, ChangedPaths = paths };
+            return pr with { FilesChanged = paths.Count, ChangedPaths = paths };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "算 {Repo} 的 diff 统计失败", pr.Repo);
+            // 统计留 0 → quorum 退到 1，是安全的降级方向：宁可少跑几遍，不要因为读不到
+            // 统计就把 PR 整个漏掉。
+            logger.LogWarning(ex, "读 PR {PrId} 的改动统计失败，quorum 将退到 1", pr.PrId);
             return pr;
         }
+    }
+
+    /// <summary>最后一个 iteration 的 id。</summary>
+    private async Task<int?> LatestIterationAsync(PrMeta pr, CancellationToken ct)
+    {
+        var json = await AzAsync([
+            "devops", "invoke",
+            "--area", "git", "--resource", "pullRequestIterations",
+            "--route-parameters",
+                $"project={pr.Project}",
+                $"repositoryId={pr.Repo}",
+                $"pullRequestId={pr.PrId.ToString(CultureInfo.InvariantCulture)}",
+            "--api-version", "7.1", "-o", "json",
+        ], ct).ConfigureAwait(false);
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var items = root.ValueKind == JsonValueKind.Array
+            ? root
+            : root.TryGetProperty("value", out var v) ? v : default;
+
+        if (items.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        int? latest = null;
+        foreach (var it in items.EnumerateArray())
+        {
+            if (it.TryGetProperty("id", out var id) && id.TryGetInt32(out var value))
+            {
+                latest = latest is null ? value : Math.Max(latest.Value, value);
+            }
+        }
+
+        return latest;
+    }
+
+    public async Task<string> GetCloneUrlAsync(PrMeta pr, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+
+        if (!string.IsNullOrWhiteSpace(pr.RemoteUrl))
+        {
+            return pr.RemoteUrl;
+        }
+
+        var org = await GetOrgUrlAsync(ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(org))
+        {
+            throw new InvalidOperationException(
+                $"PR {pr.PrId} 的快照里没有 remoteUrl，也读不到 az 的组织地址 —— "
+                + "请配 Conclave:AzureDevOpsOrgUrl 或跑 az devops configure --defaults organization=<url>");
+        }
+
+        // 实测形态：https://host/Collection/<project>/_git/<repo>
+        return $"{org.TrimEnd('/')}/{Uri.EscapeDataString(pr.Project)}/_git/{Uri.EscapeDataString(pr.Repo)}";
+    }
+
+    /// <summary>组织（collection）地址：配置优先，其次读 az 的默认值。</summary>
+    public async Task<string> GetOrgUrlAsync(CancellationToken ct)
+    {
+        if (_orgUrl is not null)
+        {
+            return _orgUrl;
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.AzureDevOpsOrgUrl))
+        {
+            _orgUrl = options.AzureDevOpsOrgUrl.Trim();
+            return _orgUrl;
+        }
+
+        try
+        {
+            // configure --list 输出的是 INI 风格的纯文本，不是 JSON，所以不能走 AzAsync。
+            var result = await ProcessRunner.RunAsync(
+                executables.Resolve(options.AzExecutable), ["devops", "configure", "--list"], ct: ct)
+                .ConfigureAwait(false);
+
+            foreach (var line in result.StdOut.Split('\n'))
+            {
+                var idx = line.IndexOf('=', StringComparison.Ordinal);
+                if (idx > 0 && line[..idx].Trim().Equals("organization", StringComparison.OrdinalIgnoreCase))
+                {
+                    _orgUrl = line[(idx + 1)..].Trim();
+                    logger.LogInformation("Azure DevOps 组织地址 {Org}（来自 az 默认配置）", _orgUrl);
+                    return _orgUrl;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "读不到 az 的组织地址");
+        }
+
+        _orgUrl = string.Empty;
+        return _orgUrl;
     }
 
     public async Task<int?> PostResultAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct)
@@ -264,7 +458,7 @@ public sealed class AzCliPrSource(
                 }
             }
 
-            var vote = result.Decision.ToAzVote();
+            var vote = AzVote(result.Decision);
             if (vote != "none")
             {
                 _ = await AzAsync([

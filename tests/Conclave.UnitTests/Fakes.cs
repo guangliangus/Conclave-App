@@ -1,3 +1,4 @@
+using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
 
@@ -15,16 +16,32 @@ internal sealed class FakePrSource : IPrSource
 
     internal int ListCalls { get; private set; }
 
+    /// <summary>被真正列举过的 project。用来验证「被排除的 project 连 API 都不调」。</summary>
+    internal List<string> ListedProjects { get; } = [];
+
+    /// <summary>取改动统计的次数。每次要两个 az 调用（约 3 秒），稳态下不该重复付。</summary>
+    internal int EnrichCalls { get; private set; }
+
+    /// <summary>问过几次「有哪些 project」。白名单非空时应当为 0。</summary>
+    internal int ProjectListCalls { get; private set; }
+
     internal int? NextThreadId { get; set; } = 8821;
+
+    /// <summary>非 null 时投递会抛，用来验证投递失败不阻止结论落链。</summary>
+    internal Exception? PostThrows { get; set; }
 
     public Task<string> GetAuthenticatedIdentityAsync(CancellationToken ct) => Task.FromResult("alan");
 
     public Task<IReadOnlyList<string>> ListProjectsAsync(CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<string>>([.. Active.Keys, .. Failing]);
+    {
+        ProjectListCalls++;
+        return Task.FromResult<IReadOnlyList<string>>([.. Active.Keys, .. Failing]);
+    }
 
     public Task<IReadOnlyList<PrMeta>> ListActivePullRequestsAsync(string project, CancellationToken ct)
     {
         ListCalls++;
+        ListedProjects.Add(project);
         if (Failing.Contains(project))
         {
             throw new InvalidOperationException($"az 炸了：{project}");
@@ -34,16 +51,74 @@ internal sealed class FakePrSource : IPrSource
             Active.TryGetValue(project, out var prs) ? prs : []);
     }
 
-    /// <summary>fake 不算 git diff，原样返回 —— PrMeta 里的统计由测试直接给定。</summary>
-    public Task<PrMeta> EnrichWithDiffStatsAsync(PrMeta pr, CancellationToken ct) => Task.FromResult(pr);
+    /// <summary>fake 不查 ADO，原样返回 —— PrMeta 里的统计由测试直接给定。</summary>
+    public Task<PrMeta> EnrichWithChangeStatsAsync(PrMeta pr, CancellationToken ct)
+    {
+        EnrichCalls++;
+        return Task.FromResult(pr);
+    }
+
+    /// <summary>collection 级列举：把所有 project 的都摊平给出去。</summary>
+    /// <remarks>
+    /// 置 <see cref="CollectionListingFails"/> 可以模拟「这个路由没开」，
+    /// 验证发现循环会退回逐 project 列举。
+    /// </remarks>
+    internal bool CollectionListingFails { get; set; }
+
+    internal int CollectionListCalls { get; private set; }
+
+    public Task<IReadOnlyList<PrMeta>> ListAllActivePullRequestsAsync(CancellationToken ct)
+    {
+        CollectionListCalls++;
+
+        if (CollectionListingFails)
+        {
+            throw new InvalidOperationException("collection 级列举没开");
+        }
+
+        return Task.FromResult<IReadOnlyList<PrMeta>>(
+            [.. Active.Values.SelectMany(x => x)]);
+    }
+
+    public Task<string> GetCloneUrlAsync(PrMeta pr, CancellationToken ct)
+        => Task.FromResult(pr.RemoteUrl.Length > 0 ? pr.RemoteUrl : $"https://az.invalid/_git/{pr.Repo}");
+
+    /// <summary>组织地址。置空可以模拟「读不到，PR 链接不可点」。</summary>
+    public string OrgUrl { get; set; } = "https://az.invalid/Collection";
+
+    public Task<string> GetOrgUrlAsync(CancellationToken ct) => Task.FromResult(OrgUrl);
 
     public Task<PrMeta?> FindPullRequestAsync(int prId, CancellationToken ct)
         => Task.FromResult(Active.Values.SelectMany(x => x).FirstOrDefault(p => p.PrId == prId));
 
     public Task<int?> PostResultAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct)
     {
+        if (PostThrows is not null)
+        {
+            throw PostThrows;
+        }
+
         Posted.Add((pr, result));
         return Task.FromResult(NextThreadId);
+    }
+}
+
+internal sealed class FakeNotifier : INotifier
+{
+    internal List<(PrMeta Pr, PromulgationPayload Result)> Sent { get; } = [];
+
+    /// <summary>非 null 时直接抛出，用来验证通知失败不能把公布带崩。</summary>
+    internal Exception? Throw { get; set; }
+
+    public Task NotifyPromulgationAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct)
+    {
+        if (Throw is not null)
+        {
+            throw Throw;
+        }
+
+        Sent.Add((pr, result));
+        return Task.CompletedTask;
     }
 }
 
@@ -92,6 +167,7 @@ internal sealed class FakeMesh : IMesh
 {
     private readonly Lock _gate = new();
     private Elector _self;
+    private LiveState _state = LiveState.Empty;
 
     internal FakeMesh(Elector self, IEnumerable<Elector>? peers = null)
     {
@@ -110,6 +186,84 @@ internal sealed class FakeMesh : IMesh
 
     public IReadOnlyList<Elector> Members => [Self, .. Peers];
 
+    /// <summary>本节点的实时状态。</summary>
+    public LiveState State
+    {
+        get { lock (_gate) { return _state; } }
+    }
+
+    /// <summary>
+    /// peer 的实时状态。测试直接往这里塞，模拟「别的节点上报了什么」。
+    /// </summary>
+    /// <remarks>
+    /// 真实实现里这些是从 <c>GET /state</c> 拉回来的；测试不需要跑 HTTP，
+    /// 直接给状态就能验队列合并与席位分配。
+    /// </remarks>
+    internal Dictionary<string, LiveState> Remote { get; } = new(StringComparer.Ordinal);
+
+    public IReadOnlyDictionary<string, LiveState> PeerStates
+    {
+        get
+        {
+            var all = new Dictionary<string, LiveState>(Remote, StringComparer.Ordinal);
+            all[Self.Id] = State;
+            return all;
+        }
+    }
+
+    /// <summary>发出去的指派请求与答复，测试拿它断言「送到了什么」。</summary>
+    internal List<AssignmentRequest> SentAssignments { get; } = [];
+
+    internal List<AssignmentReply> SentReplies { get; } = [];
+
+    /// <summary>false 表示对端不可达，用来验证送不到时的处理。</summary>
+    internal bool AssignmentDelivers { get; set; } = true;
+
+    public Task<bool> SendAssignmentAsync(Elector peer, AssignmentRequest request, CancellationToken ct)
+    {
+        if (AssignmentDelivers)
+        {
+            SentAssignments.Add(request);
+        }
+
+        return Task.FromResult(AssignmentDelivers);
+    }
+
+    /// <summary>假的对端日志。键是 revisionId，测试直接往里塞。</summary>
+    internal Dictionary<string, LogChunk> PeerLogs { get; } = new(StringComparer.Ordinal);
+
+    public Task<LogChunk?> FetchLogAsync(
+        Elector peer, string revisionId, long from, CancellationToken ct)
+        => Task.FromResult(PeerLogs.TryGetValue(revisionId, out var chunk) ? chunk : null);
+
+    public Task<bool> SendAssignmentReplyAsync(Elector peer, AssignmentReply reply, CancellationToken ct)
+    {
+        if (AssignmentDelivers)
+        {
+            SentReplies.Add(reply);
+        }
+
+        return Task.FromResult(AssignmentDelivers);
+    }
+
+    public void UpdateState(Func<LiveState, LiveState> mutate)
+    {
+        ArgumentNullException.ThrowIfNull(mutate);
+        lock (_gate)
+        {
+            var next = mutate(_state);
+
+            // 跟 HttpMesh / LocalMesh 同语义：空操作不递增。假货在这一点上偷懒的话，
+            // 「守卫没生效」这类 bug 在单测里永远看不见。
+            if (ReferenceEquals(next, _state))
+            {
+                return;
+            }
+
+            _state = next with { Version = _state.Version + 1 };
+        }
+    }
+
     public Task BroadcastAsync(Block block, CancellationToken ct)
     {
         Broadcast.Add(block);
@@ -125,10 +279,23 @@ internal sealed class FakeMesh : IMesh
     }
 }
 
-internal sealed class FakeRepoLocator(params string[] repos) : IRepoLocator
+/// <summary>用量读数由测试直接给定，不去碰投影表也不读覆盖文件。</summary>
+internal sealed class FakeUsageMeter(double utilization = 0) : IUsageMeter
 {
-    public IReadOnlyDictionary<string, string> Locate()
-        => repos.ToDictionary(r => r, r => "/tmp/" + r, StringComparer.OrdinalIgnoreCase);
+    internal double Utilization { get; set; } = utilization;
+
+    /// <summary>非 null 时直接抛，用来验证读不到用量必须保留上一轮的值而不是清零。</summary>
+    internal Exception? Throw { get; set; }
+
+    internal int Calls { get; private set; }
+
+    public Task<UsageReading> ReadAsync(string electorId, CancellationToken ct)
+    {
+        Calls++;
+        return Throw is not null
+            ? throw Throw
+            : Task.FromResult(new UsageReading(Utilization, "fake", "测试给定"));
+    }
 }
 
 /// <summary>测试用的可变白名单。</summary>
@@ -141,4 +308,20 @@ internal sealed class MutableAllowList(string selfId) : IElectorAllowList
     public bool IsAllowed(string electorId) => _ids.Contains(electorId);
 
     internal void Allow(string electorId) => _ids.Add(electorId);
+}
+
+/// <summary>假的更新源：测试直接塞「最新版是哪个」，或者让它抛。</summary>
+internal sealed class FakeUpdateSource : IUpdateSource
+{
+    internal ReleaseInfo? Latest { get; set; }
+
+    internal Exception? Throw { get; set; }
+
+    internal int Calls { get; private set; }
+
+    public Task<ReleaseInfo?> GetLatestAsync(CancellationToken ct)
+    {
+        Calls++;
+        return Throw is null ? Task.FromResult(Latest) : Task.FromException<ReleaseInfo?>(Throw);
+    }
 }

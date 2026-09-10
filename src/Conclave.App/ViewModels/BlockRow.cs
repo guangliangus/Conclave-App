@@ -14,8 +14,9 @@ public sealed class BlockRow
         // 全局单链之后链名恒为 "acta"，没有信息量；改显示这块属于哪个 PR 版本。
         Revision = Conclave.Domain.Acta.RevisionIdOf(block) ?? "—";
         Index = block.Index.ToString(CultureInfo.InvariantCulture);
-        Kind = block.Kind.ToString();
-        Elector = block.ElectorId;
+        Kind = Badge.Of(block.Kind);
+        Elector = block.ElectorId[..8];
+        ElectorFull = block.ElectorId;
         Hash = block.Hash()[..12];
         Summary = Describe(block);
     }
@@ -26,14 +27,24 @@ public sealed class BlockRow
 
     public string Index { get; }
 
-    public string Kind { get; }
+    public Badge Kind { get; }
 
+    /// <summary>签名节点公钥指纹前 8 位。</summary>
     public string Elector { get; }
+
+    public string ElectorFull { get; }
 
     public string Hash { get; }
 
     public string Summary { get; }
 
+    /// <summary>
+    /// payload 里真正有信息量的那几个字段。
+    /// </summary>
+    /// <remarks>
+    /// 刻意不再重复 revision id 和签名节点 —— 两者都已经是独立的列，
+    /// 摘要里再抄一遍会把这一列挤成一串重复的十六进制。
+    /// </remarks>
     private static string Describe(Block block)
     {
         try
@@ -41,20 +52,22 @@ public sealed class BlockRow
             return block.Kind switch
             {
                 BlockKind.Summons => block.Payload<SummonsPayload>() is { } s
-                    ? $"{s.Revision.Id} {s.Pr.Repo} quorum={s.Quorum} rules={s.RulesFingerprint}"
+                    ? $"{s.Pr.Repo} · quorum {s.Quorum} · rules {s.RulesFingerprint}"
                     : string.Empty,
                 BlockKind.Seating => block.Payload<SeatingPayload>() is { } t
-                    ? $"{t.RevisionId} round={t.Round} → {t.ElectorId}"
+                    ? $"round {t.Round} → {Short(t.ElectorId)}"
                     : string.Empty,
                 BlockKind.Ballot => block.Payload<BallotPayload>() is { } b
-                    ? $"{b.RevisionId} round={b.Round} {b.Decision} {b.Findings.Count} 条 {b.DurationMs}ms {b.Model}"
+                    ? $"round {b.Round} · {Labels.Decision(b.Decision)} · {b.Findings.Count} 条 · "
+                        + $"{b.DurationMs / 1000} 秒 · {b.Model}"
                     : string.Empty,
                 BlockKind.Promulgation => block.Payload<PromulgationPayload>() is { } p
-                    ? $"{p.RevisionId} {p.Decision} {p.Findings.Count} 条 {p.ActualQuorum}/{p.ExpectedQuorum}"
-                        + (p.Degraded ? " 降级" : string.Empty)
+                    ? $"{Labels.Decision(p.Decision)} · {p.Findings.Count} 条 · "
+                        + $"{p.ActualQuorum}/{p.ExpectedQuorum} 票"
+                        + (p.Degraded ? " · 降级" : string.Empty)
                     : string.Empty,
                 BlockKind.Recess => block.Payload<RecessPayload>() is { } r
-                    ? $"{r.RevisionId} round={r.Round} {r.Reason}"
+                    ? $"round {r.Round} · {r.Reason}"
                     : string.Empty,
                 _ => string.Empty,
             };
@@ -65,4 +78,7 @@ public sealed class BlockRow
             return "(payload 解析失败)";
         }
     }
+
+    private static string Short(string electorId)
+        => electorId.Length > 8 ? electorId[..8] : electorId;
 }

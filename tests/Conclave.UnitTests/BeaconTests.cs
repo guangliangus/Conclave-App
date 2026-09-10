@@ -8,7 +8,7 @@ public class BeaconTests
         DateTimeOffset.Parse("2026-09-08T10:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
 
     private static (Beacon Beacon, ElectorIdentity Identity) Sign(
-        DateTimeOffset? heartbeat = null, string[]? repos = null)
+        DateTimeOffset? heartbeat = null, double utilization = 0)
     {
         var identity = ElectorIdentity.Create();
         var elector = new Elector
@@ -17,12 +17,12 @@ public class BeaconTests
             PublicKey = identity.PublicKey,
             Endpoint = "http://10.0.0.5:47708",
             AzIdentity = "edisonwei",
-            Repos = repos ?? ["edison-test"],
             Projects = ["edison-test"],
+            Utilization = utilization,
             LastHeartbeat = heartbeat ?? Now,
         };
 
-        return (new Beacon(elector, identity.Sign(Beacon.SigningPayload(elector))), identity);
+        return (new Beacon(elector, 0, identity.Sign(Beacon.SigningPayload(elector, 0))), identity);
     }
 
     [Fact]
@@ -37,18 +37,33 @@ public class BeaconTests
     }
 
     [Fact]
-    public void Claiming_extra_repos_breaks_the_signature()
+    public void Claiming_extra_projects_breaks_the_signature()
     {
         var (beacon, identity) = Sign();
         using (identity)
         {
-            // 伪造「什么 repo 都有」的心跳就能把席位全吸走然后永不出票，
+            // 伪造「什么 project 都有权限」的心跳就能把席位全吸走然后永不出票，
             // 让所有 PR 卡在弃权重试的循环里。这条必须拦住。
             var forged = beacon with
             {
-                Elector = beacon.Elector with { Repos = ["edison-test", "payment-center"] },
+                Elector = beacon.Elector with { Projects = ["edison-test", "liontrip-cms"] },
             };
 
+            Assert.False(forged.VerifySignature());
+        }
+    }
+
+    [Fact]
+    public void Understating_claude_usage_breaks_the_signature()
+    {
+        var (beacon, identity) = Sign(utilization: 0.95);
+        using (identity)
+        {
+            // 额度用量既是硬规则（超 MaxUtilization 不入席）又是权重因子，
+            // 所以谎报「我还很空」是最有收益的伪造方向 —— 必须落在签名范围内。
+            Assert.True(beacon.VerifySignature());
+
+            var forged = beacon with { Elector = beacon.Elector with { Utilization = 0.0 } };
             Assert.False(forged.VerifySignature());
         }
     }
@@ -62,14 +77,13 @@ public class BeaconTests
             Id = identity.Id,
             PublicKey = identity.PublicKey,
             AzIdentity = "edisonwei",
-            Repos = ["edison-test"],
             Projects = ["edison-test"],
             RunningJobs = 3,
             Reviews24h = 40,
             LastHeartbeat = Now,
         };
 
-        var beacon = new Beacon(busy, identity.Sign(Beacon.SigningPayload(busy)));
+        var beacon = new Beacon(busy, 0, identity.Sign(Beacon.SigningPayload(busy, 0)));
         Assert.True(beacon.VerifySignature());
 
         // 负载和近期票数都进了加权 HRW —— 谎报空闲就能把席位吸过来。

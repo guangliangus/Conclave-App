@@ -28,21 +28,30 @@ public sealed class MeshHttpServer : IDisposable
     private readonly HttpListener _listener = new();
     private readonly IActaStore _acta;
     private readonly Func<Elector> _self;
+    private readonly Func<SignedLiveState> _signedState;
+    private readonly Func<SignedAssignment, bool, CancellationToken, Task<bool>> _onAssignment;
     private readonly Func<Block, CancellationToken, Task> _onBlock;
+    private readonly Func<string, long, LogChunk> _readLog;
     private readonly ILogger<MeshHttpServer> _logger;
 
     public MeshHttpServer(
         MeshOptions options,
         IActaStore acta,
         Func<Elector> self,
+        Func<SignedLiveState> signedState,
+        Func<SignedAssignment, bool, CancellationToken, Task<bool>> onAssignment,
         Func<Block, CancellationToken, Task> onBlock,
+        Func<string, long, LogChunk> readLog,
         ILogger<MeshHttpServer> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         _acta = acta;
         _self = self;
+        _signedState = signedState;
+        _onAssignment = onAssignment;
         _onBlock = onBlock;
+        _readLog = readLog;
         _logger = logger;
 
         Port = options.HttpPort;
@@ -143,6 +152,77 @@ public sealed class MeshHttpServer : IDisposable
 
             var chain = await _acta.ReadChainAsync(from, ct).ConfigureAwait(false);
             await WriteJsonAsync(context, chain, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // 指派：A→B 请求评审，B→A 答复同意/拒绝。两条都要签名 + 白名单校验。
+        if (method == "POST" && (path == "/assignments" || path == "/assignments/reply"))
+        {
+            using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
+            var body = await reader.ReadToEndAsync(ct).ConfigureAwait(false);
+
+            SignedAssignment? signed;
+            try
+            {
+                signed = ActaJson.Deserialize<SignedAssignment>(body);
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                _logger.LogWarning(ex, "指派消息不是合法 JSON");
+                signed = null;
+            }
+
+            if (signed is null)
+            {
+                TrySetStatus(context, HttpStatusCode.BadRequest);
+                return;
+            }
+
+            // 收下才回 202。丢掉（不在白名单 / 验签不过 / 收件人不是本节点）要回 403 ——
+            // 原先无论如何都回 202，于是发起方显示「已请求，等对方确认」然后永远等下去，
+            // 而接收方那边一条痕迹都没有。「送到了」和「收下了」必须分开说。
+            var taken = await _onAssignment(
+                signed, path.EndsWith("/reply", StringComparison.Ordinal), ct).ConfigureAwait(false);
+
+            TrySetStatus(context, taken ? HttpStatusCode.Accepted : HttpStatusCode.Forbidden);
+            return;
+        }
+
+        if (method == "GET" && path == "/state")
+        {
+            // 实时状态：队列、谁在评什么、认领、待确认的指派。
+            // 心跳只带版本号（状态本体远超 UDP 的 MTU），对端看到版本变了才来拉这里。
+            // 响应体自带签名，收方逐项校验，见 HttpMesh.PullStateAsync。
+            await WriteJsonAsync(context, _signedState(), ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (method == "GET" && path == "/log")
+        {
+            // 本节点正在跑（或刚跑完）的那次评审的实时日志。作者想知道自己的 PR
+            // 评到哪一步了，而评审是十几分钟的黑盒 —— 见 ReviewProgressLog。
+            //
+            // ⚠️ 跟 /chain、/state 一样<b>不校验请求方身份</b>：同网段能连上这个端口的
+            // 都读得到。日志里有源码路径、命令行和模型的分析文字，敏感度高于 /state，
+            // 但低于 /chain（链上已经有完整的 finding 正文）。真要收紧的话，
+            // 三个 GET 接口应该一起加签名校验，只给 electors.allow 里的节点，
+            // 而不是单独给这一个 —— 那样只会造成「以为收紧了」的错觉。
+            var revision = context.Request.QueryString["revision"];
+            if (string.IsNullOrWhiteSpace(revision))
+            {
+                TrySetStatus(context, HttpStatusCode.BadRequest);
+                return;
+            }
+
+            var from = 0L;
+            var rawFrom = context.Request.QueryString["from"];
+            if (!string.IsNullOrEmpty(rawFrom)
+                && long.TryParse(rawFrom, System.Globalization.CultureInfo.InvariantCulture, out var parsedFrom))
+            {
+                from = Math.Max(0, parsedFrom);
+            }
+
+            await WriteJsonAsync(context, _readLog(revision, from), ct).ConfigureAwait(false);
             return;
         }
 

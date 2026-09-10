@@ -268,31 +268,79 @@ public sealed class SqliteActa : IActaStore
         return await ReadAllAsync(cmd, ct).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<string>> ReadOpenRevisionsAsync(CancellationToken ct)
+    /// <summary>
+    /// 链上「已完成」部分的摘要：每个 revision 有几张有效票、哪些已有最终结论。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 替换掉原先的 <c>ReadOpenRevisionsAsync</c>。那个查询是「Summons 数 &gt; Promulgation 数」，
+    /// 把队列建在链上历史之上 —— PR 在 Azure DevOps 上被 merge 之后没人清，永远留在队列里。
+    /// 现在队列来自实时状态，链只回答「哪些已经评过了」。
+    /// </para>
+    /// <para>
+    /// 有效票数刻意<b>不在 SQL 里判</b>：Error 与否写在 payload JSON 里，用
+    /// <c>payload NOT LIKE '%"Decision":"Error"%'</c> 那种写法一旦 finding 的正文里出现同样的
+    /// 字面量就会误判。改为把票的 payload 捞出来正经反序列化 —— 链上只有已完成的评审，
+    /// 量级远小于原先（原先每个活跃 PR 都要写 Summons + Seating）。
+    /// </para>
+    /// </remarks>
+    public async Task<ChainSummary> ReadSummaryAsync(CancellationToken ct)
     {
         await using var conn = Open();
         await using var cmd = conn.CreateCommand();
-
-        // 每个 revision 恰好一个 Summons、最多一个 Promulgation，
-        // 所以 Summons 数 > Promulgation 数 就说明它还没结论。
-        // 按最早那块的链序排，让调用方能按 PR 取最新的那个版本。
         cmd.CommandText = """
-            SELECT revision_id
+            SELECT revision_id, kind, payload
             FROM blocks
-            GROUP BY revision_id
-            HAVING SUM(CASE WHEN kind = 'Summons' THEN 1 ELSE 0 END)
-                 > SUM(CASE WHEN kind = 'Promulgation' THEN 1 ELSE 0 END)
-            ORDER BY MIN(block_index)
+            WHERE kind IN ('Ballot', 'Promulgation')
+            ORDER BY block_index
             """;
 
-        var open = new List<string>();
+        var ballots = new Dictionary<string, int>(StringComparer.Ordinal);
+        var verdicts = new Dictionary<string, Verdict>(StringComparer.Ordinal);
+
         await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
-            open.Add(reader.GetString(0));
+            var revisionId = reader.GetString(0);
+            var kind = reader.GetString(1);
+
+            if (kind == nameof(BlockKind.Promulgation))
+            {
+                // 结论的内容也要带出去（队列里那一列读的就是它）。读不懂的老块仍然算
+                // 「已完成」—— 只是结论显示不出来，总比让这个 PR 永远留在队列里好。
+                try
+                {
+                    var payload = ActaJson.Deserialize<PromulgationPayload>(reader.GetString(2));
+                    verdicts[revisionId] = payload is null
+                        ? new Verdict(ReviewDecision.Error, 0)
+                        : new Verdict(payload.Decision, payload.Findings.Count);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    verdicts[revisionId] = new Verdict(ReviewDecision.Error, 0);
+                }
+
+                continue;
+            }
+
+            BallotPayload? ballot;
+            try
+            {
+                ballot = ActaJson.Deserialize<BallotPayload>(reader.GetString(2));
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // 读不懂的老区块不该让整份摘要失败 —— 那会让所有 PR 都卡在队列里。
+                continue;
+            }
+
+            if (ballot is not null && ballot.Decision.CountsTowardMajority())
+            {
+                ballots[revisionId] = ballots.GetValueOrDefault(revisionId) + 1;
+            }
         }
 
-        return open;
+        return new ChainSummary(ballots, verdicts);
     }
 
     public async Task<IReadOnlyList<Block>> ReadChainAsync(long fromIndex, CancellationToken ct)
@@ -361,8 +409,9 @@ public sealed class SqliteActa : IActaStore
     /// 一张 Ballot 落链后写进 <c>reviews</c> 投影。
     /// </summary>
     /// <remarks>
-    /// PR 的元数据不从 Ballot 里读 —— 那会让同一份快照在链上存两遍。改为回查同一个
-    /// revision 的 Summons 块，它才是 PR 快照的权威来源。
+    /// PR 的元数据从票自己带的 <see cref="BallotPayload.Pr"/> 读。以前它在 Summons 块上，
+    /// 但 Summons 已不再上链（队列改由实时状态承载），所以快照必须跟着票走 ——
+    /// 否则账单里连「这一票评的是哪个仓库的哪个 PR」都答不上来。
     /// </remarks>
     private static async Task ProjectBallotAsync(
         SqliteConnection conn, Block block, CancellationToken ct)
@@ -387,7 +436,10 @@ public sealed class SqliteActa : IActaStore
             return;
         }
 
-        var pr = await ReadSummonsPrAsync(conn, ballot.RevisionId, ct).ConfigureAwait(false);
+        // PR 快照现在跟着票走。老区块（Summons 还上链那会儿）没有这个字段，
+        // 回查一次 Summons 兜底 —— 这样改造前落链的票在报表里仍然认得出仓库和标题。
+        var pr = ballot.Pr
+            ?? await ReadSummonsPrAsync(conn, ballot.RevisionId, ct).ConfigureAwait(false);
         var usage = ballot.Metering;
 
         await using var cmd = conn.CreateCommand();
@@ -457,6 +509,13 @@ public sealed class SqliteActa : IActaStore
         }
     }
 
+    /// <summary>
+    /// 从老的 Summons 块里回查 PR 快照。
+    /// </summary>
+    /// <remarks>
+    /// 只为改造之前落链的票服务 —— 那时候快照在 Summons 上。新票自带
+    /// <see cref="BallotPayload.Pr"/>，走不到这里。
+    /// </remarks>
     private static async Task<PrMeta?> ReadSummonsPrAsync(
         SqliteConnection conn, string revisionId, CancellationToken ct)
     {

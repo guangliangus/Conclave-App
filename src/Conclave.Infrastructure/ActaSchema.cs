@@ -81,6 +81,10 @@ internal static class ActaSchema
             CREATE INDEX IF NOT EXISTS ix_reviews_reviewer_id ON reviews (reviewer_id);
             CREATE INDEX IF NOT EXISTS ix_reviews_reviewed_at ON reviews (reviewed_at);
             CREATE INDEX IF NOT EXISTS ix_reviews_repo        ON reviews (repo);
+            -- 「作者 fix 之后仍由同一个节点复审」要按 PR 反查上一次的评审者，
+            -- 而 revision_id 里不含 project，所以单独建这个复合索引。
+            CREATE INDEX IF NOT EXISTS ix_reviews_pr
+                ON reviews (project, pr_id, reviewed_at);
 
             CREATE TABLE IF NOT EXISTS review_model_usages (
                 id                 INTEGER PRIMARY KEY AUTOINCREMENT,
