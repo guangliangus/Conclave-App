@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
+     viewBox="0 0 256 256" role="img" aria-label="Conclave">
+  <title>Conclave — 啄木鸟，品牌色版（墨蓝底 · 羊皮纸白 · 金冠）</title>
+  <!--
+    啄木鸟：它专挑木头里的虫，就是 review 在代码里找 bug —— 比猫头鹰更直白。
+    姿势是它最有辨识度的那一个：竖着贴在树干上，硬尾巴撑住，长喙伸进树洞。
+    洞里一只刚被揪出来的小虫，是这个比喻的落点（小尺寸下它自然消失，大图上是彩蛋）。
+
+    小尺寸上这只鸟只剩三根「刺」—— 冠、喙、尾 —— 所以它们都比写实比例更粗更翘。
+    剪影跟树干同色，靠一圈底色的光晕把鸟从树干上分开；光晕只裁在树干范围内，
+    免得鸟其余的边缘在渐变底上带一圈暗边。
+  -->
+  <defs>
+    <clipPath id="trunk"><rect x="70" y="34" width="28" height="188" rx="10"/></clipPath>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#212150"/>
+      <stop offset="1" stop-color="#111228"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="128" fill="url(#plate)"/>
+  <rect x="70" y="34" width="28" height="188" rx="10" fill="#F2EDE4"/>
+  <rect x="76" y="140" width="12" height="4" rx="2" fill="#151635"/><rect x="80" y="182" width="10" height="4" rx="2" fill="#151635"/>
+  <circle cx="86" cy="92" r="12" fill="#151635"/>
+  <g clip-path="url(#trunk)" fill="#151635" stroke="#151635" stroke-width="9" stroke-linejoin="round"><path d="M126 104 C118 128 116 166 122 194 L104 226 L128 208 C144 200 154 180 156 156 C158 132 172 118 170 106 Z"/><circle cx="146" cy="88" r="20"/><path d="M134 74 C138 58 148 46 162 38 L176 44 C170 56 172 70 170 88 C164 82 156 74 150 70 Z"/></g>
+  <path d="M126 104 C118 128 116 166 122 194 L104 226 L128 208 C144 200 154 180 156 156 C158 132 172 118 170 106 Z" fill="#F2EDE4"/>
+  <circle cx="146" cy="88" r="20" fill="#F2EDE4"/>
+  <!-- 颈：头是个圆，盖不到冠尾与肩之间那一小块，不补就漏一个底色的小三角 -->
+  <circle cx="160" cy="98" r="14" fill="#F2EDE4"/>
+  <path d="M134 74 C138 58 148 46 162 38 L176 44 C170 56 172 70 170 88 C164 82 156 74 150 70 Z" fill="#E2AC44"/>
+  <path d="M130 82 L84 93 L130 102 Z" fill="#F2EDE4"/>
+  <path d="M124 150 L104 146 M124 166 L104 164" stroke="#F2EDE4" stroke-width="6" stroke-linecap="round" fill="none"/>
+  <circle cx="149" cy="86" r="4.5" fill="#151635"/>
+  <path d="M156 112 C166 138 160 168 140 192" fill="none" stroke="#151635" stroke-width="5" stroke-linecap="round"/>
+  <ellipse cx="79" cy="87" rx="3.5" ry="5" fill="#F2EDE4"/><path d="M76 84 L72 81 M76 87 L71 87 M76 90 L72 93 M82 84 L86 81 M82 87 L87 87 M82 90 L86 93" stroke="#F2EDE4" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22" role="img" aria-label="Conclave">
+  <title>Conclave — 菜单栏模板图（啄木鸟，只画头）</title>
+  <!--
+    全身贴着树干那张在 22px 上塌成两根竖条，鸟没了。这里只画头：圆头、翘冠、长喙、一个眼洞 ——
+    冠和喙是这只鸟的全部辨识度，所以都比写实更粗更翘。眼洞 r=12，缩到 18px 约 1.7px。
+    眼洞用 mask 挖而不是 evenodd：喙和冠都压在头上，evenodd 会把重叠处反挖成白缝。
+  -->
+  <defs>
+    <mask id="eye">
+      <rect width="256" height="256" fill="#fff"/>
+      <circle cx="158" cy="108" r="12" fill="#000"/>
+    </mask>
+  </defs>
+  <g transform="scale(0.0859375)" fill="#000" mask="url(#eye)">
+    <circle cx="150" cy="120" r="46"/>
+    <path d="M150 62 C158 62 166 64 174 68 C184 60 194 50 206 46 L216 62 C210 74 206 88 206 104 L190 100 Z"/>
+    <path d="M112 106 L22 124 L112 142 Z"/>
+  </g>
+</svg>

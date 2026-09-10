@@ -38,6 +38,20 @@ GitHub Octocat 那种做法：一枚近黑的圆徽，里面一个白色剪影�
 改图案的顺序：**先改 SVG，再把数字搬进脚本**，然后 `python3 scripts/make-icon.py src/Conclave.App/Assets`（约一分钟）。
 App 图标用 squircle 而不是 SVG 里的圆徽：Dock 里别的图标都是 squircle，一枚圆的会显得矮一截。
 
+## 对比候选：啄木鸟（`conclave-woodpecker-*`）
+
+同一套 Octocat 做法，换成啄木鸟：它专挑木头里的虫，就是 review 在代码里找 bug —— 比猫头鹰更直白。
+姿势取最有辨识度的那个：竖着贴在树干上，硬尾巴撑住，长喙伸进树洞，洞里一只刚揪出来的小虫。
+
+| 文件 | 用途 |
+|---|---|
+| `conclave-woodpecker.svg` | 主徽：`#24292F` 圆底 + 白剪影，靠一圈底色光晕把鸟从树干上分开 |
+| `conclave-woodpecker-ink.svg` | 品牌色版：墨蓝渐变底、羊皮纸白剪影，冠用金（真鸟的红冠在这套色里就是这一点金） |
+| `conclave-woodpecker-tray.svg` | 22×22 模板图。**只画头**：全身贴树干那版缩到 18px 塌成两根竖条，鸟没了 |
+
+取舍：大图上它的比喻更准、彩蛋更多；小尺寸上它天生吃亏 —— 侧面剪影贴在竖条上，
+辨识度只剩冠、喙、尾三根刺，不像猫头鹰那样有一对眼洞撑着。
+
 ---
 
 ## 上一版：一方印（已退役，`candidates/seal-*`）
