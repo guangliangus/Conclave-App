@@ -1,4 +1,5 @@
 using System.Globalization;
+using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
 
@@ -46,10 +47,19 @@ public sealed class NodeRow
 
         var alive = node.IsAlive(now);
 
+        // 两个版本号都摆在明面上而不是只进 tooltip：版本过旧会让那台机器的评审在服务端
+        // 直接被拒，而且只有它会挂 —— 别的节点照常出票，表面上看是「某个 PR 偶尔评不出来」。
+        // 混合版本的集群里，这一格能省掉一次逐台去问的排查。
+        //
+        // Conclave 自己的版本同理，而且它比 claude 的更难从别处看出来：升级是各机器各自
+        // 装的，一台落在旧版上时，它的行为差异（新加的规则、改过的阈值）不会有任何报错，
+        // 只会表现成「这台机器的判断跟别人不一样」。
         Subtitle = string.Join("  ·  ", new[]
         {
             IdShort,
             string.Format(CultureInfo.InvariantCulture, "{0} 个 project", node.Projects.Count),
+            node.AppVersion.Length > 0 ? "Conclave v" + node.AppVersion : string.Empty,
+            node.ClaudeVersion.Length > 0 ? "claude " + node.ClaudeVersion : string.Empty,
             node.Endpoint,
         }.Where(x => x.Length > 0));
 
@@ -108,6 +118,10 @@ public sealed class NodeRow
         {
             $"指纹 {node.Id}",
             $"az 身份 {(string.IsNullOrWhiteSpace(node.AzIdentity) ? "(未取到)" : node.AzIdentity)}",
+            AppVersionLine(node, isSelf),
+            node.ClaudeVersion.Length > 0
+                ? $"claude {node.ClaudeVersion}（那台机器上实际会被起的那一份）"
+                : "claude 版本未知 —— 节点还没报上来，或者那台机器上根本找不到 claude",
             node.Endpoint.Length > 0 ? $"端点 {node.Endpoint}" : "端点 (未广播)",
             $"最后心跳 {node.LastHeartbeat.ToLocalTime():MM-dd HH:mm:ss}"
                 + (alive ? string.Empty : $"（超过 {Elector.HeartbeatWindow.TotalSeconds:F0} 秒未更新，已判离线）"),
@@ -173,4 +187,27 @@ public sealed class NodeRow
     public bool HasReviewing => Reviewing.Length > 0;
 
     public string Tip { get; }
+
+    /// <summary>
+    /// tooltip 里那行版本：它跑的是哪一版，跟本节点是不是同一版。
+    /// </summary>
+    /// <remarks>
+    /// 差异要直接写出来而不是让人自己比对两行小字 —— 「为什么只有它评不出来」「为什么它
+    /// 的结论跟别人不一样」，多数时候答案就是有人没升级。协议版本一起带上：不兼容的心跳
+    /// 在 <c>HttpMesh</c> 那层就被挡掉了，所以这张表里出现的一定是同一个协议版本，
+    /// 真出现不一样就说明有别的问题。
+    /// </remarks>
+    private static string AppVersionLine(Elector node, bool isSelf)
+    {
+        if (node.AppVersion.Length == 0)
+        {
+            return "Conclave 版本未知 —— 那台机器还没报上来";
+        }
+
+        var line = $"Conclave v{node.AppVersion}（心跳协议 v{node.ProtocolVersion}）";
+
+        return isSelf || node.AppVersion == AppInfo.Version
+            ? line
+            : line + $"，本节点是 v{AppInfo.Version}";
+    }
 }

@@ -311,6 +311,12 @@ internal sealed class MutableAllowList(string selfId) : IElectorAllowList
 }
 
 /// <summary>假的更新源：测试直接塞「最新版是哪个」，或者让它抛。</summary>
+/// <summary>不起子进程的 claude：心跳要能在一台没装 claude 的机器上照常发（CI 就是）。</summary>
+internal sealed class FakeClaudeCli(string version = "2.1.268") : IClaudeCli
+{
+    public Task<string> VersionAsync(CancellationToken ct) => Task.FromResult(version);
+}
+
 internal sealed class FakeUpdateInstaller : IUpdateInstaller
 {
     internal bool Installable { get; set; } = true;

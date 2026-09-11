@@ -157,7 +157,7 @@ scripts/package-macos.sh                       # 或者打成 dist/Conclave.app
 
 ### 2. 额度与账单条
 
-每个额度窗口各画一条进度条（5 小时会话额度、7 天周额度、按模型细分的周额度），带各自的重置时刻。**过 80% 变红** —— 那正是本机不再接活的那条线，所以「界面变红」和「真的停下来」是同一刻。
+每个额度窗口各画一条进度条（5 小时会话额度、7 天周额度、按模型细分的周额度），带各自的重置时刻。**过了自己那条线才变红** —— 5h 是 80%，周额度当下是硬顶 95%（周额度的权重临时摘掉了，见 DESIGN）。变红的那条线就是本机不再接活的那条线，所以「界面变红」和「真的停下来」是同一刻。
 
 右边是今日/累计的评审次数、金额、token、缓存命中率。这一区每 30 秒刷新一次，左上角写着「更新于 HH:MM:SS」——数字冻住的时候你得看得出来是没变化还是没在刷新。
 
@@ -169,7 +169,7 @@ scripts/package-macos.sh                       # 或者打成 dist/Conclave.app
 | **我的 PR** | 队列里作者是你自己的那些。本机评不了它们（不评自己的 PR），只能指派出去 |
 | **评审记录** | 账单。谁评了什么、多少 token、多少钱、缓存命中、分模型明细 |
 | **Acta 会议录** | 账本本体的区块浏览器 |
-| **在线节点** | mesh 里每台机器的额度 / 正在跑几个 / 近 24 小时评了几个 —— 正好是席位权重的三个输入 |
+| **在线节点** | mesh 里每台机器的额度 / 正在跑几个 / 近 24 小时评了几个 —— 正好是席位权重的三个输入；名字下面那行还有它的 Conclave 版本和 claude 版本（tooltip 里会写明跟本节点是不是同一版） |
 | **通知** | 本机看到的事件收件箱，tab 上的角标是未读数 |
 
 ### 4. 状态栏
@@ -366,6 +366,25 @@ HTTP     :47708               ← 区块传播、补链、指派、实时日志
 **双击图标启动后提示「读不到 az 登录身份」或者「0 个 project」，但终端里一切正常**
 
 从 Finder 启动 `.app` 时，系统只给一个最小 PATH（`/usr/bin:/bin:/usr/sbin:/sbin`），而 `az` 在 `/opt/homebrew/bin`、`claude` 在 `~/.local/bin`，都不在里面。程序内部有兜底（配置 → PATH → 常见安装目录），还找不到就在 `ExtraToolPaths` 里显式写上。
+
+**某个节点的评审全是 Error，日志里是 `API Error: 400 … does not support this model; version X or newer is required`**
+
+那台机器上有**不止一份 claude**，而 Conclave 起的不是人更新过的那一份。典型组合：官方安装器装在 `~/.local/bin`，`/usr/local/bin` 里还躺着一份没卸干净的旧 `npm i -g @anthropic-ai/claude-code`。他在终端里 `claude --version` 看到的是新的（shell 的 PATH 把 `~/.local/bin` 排在前面），Conclave 从 Finder 启动、拿不到他的 PATH，落到兜底目录挑中了旧的那份。
+
+程序现在会自己处理：把找到的每一份都跑一次 `--version`，**挑版本号最大的**，并且多份并存时在日志里留一条警告列出全部。每台机器用的是哪个版本会跟着心跳摊到整个 mesh —— **「在线节点」表里每一行的小字上就能看到**，不用登上去查。所以先看那台机器的日志：
+
+```
+info: Conclave.Infrastructure.ClaudeCli[0] claude 2.1.268 · /Users/x/.local/bin/claude
+warn: Conclave.Infrastructure.ClaudeCli[0] 这台机器上有 2 份 claude，用的是 …；另外还有：…
+```
+
+评审日志里每一轮也会写明用的是哪一个（`claude 启动，会话 c4fb5ba8 · 2.1.268 · /Users/x/.local/bin/claude`），失败时这条信息会一并落进账本的 Error 里。
+
+如果最新的那份本身就太旧，那就是真该更新了：在那台机器上跑 `claude update`。要钉死用哪一个，在他的 `~/.conclave/appsettings.json` 里写绝对路径（配置优先级最高，不参与挑选）：
+
+```json
+{ "Conclave": { "ClaudeExecutable": "~/.local/bin/claude" } }
+```
 
 **我指派给别人了，对方那边什么都没出现**
 

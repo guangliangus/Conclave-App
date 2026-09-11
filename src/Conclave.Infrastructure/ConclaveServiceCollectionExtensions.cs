@@ -91,6 +91,8 @@ public static class ConclaveServiceCollectionExtensions
         });
 
         _ = services.AddSingleton<ExecutableResolver>();
+        _ = services.AddSingleton<ClaudeCli>();
+        _ = services.AddSingleton<IClaudeCli>(sp => sp.GetRequiredService<ClaudeCli>());
         _ = services.AddSingleton<NodeState>();
         // 装配处二选一，调用处（HttpMesh / SqliteActa）不用关心当前是哪种放行策略
         _ = opts.Mesh.TrustAllElectors

@@ -44,7 +44,7 @@ namespace Conclave.Infrastructure;
 /// </remarks>
 public sealed partial class ClaudeCliUsageProbe(
     ConclaveOptions options,
-    ExecutableResolver executables,
+    ClaudeCli claudeCli,
     ILogger<ClaudeCliUsageProbe> logger)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -96,7 +96,9 @@ public sealed partial class ClaudeCliUsageProbe(
         string claude;
         try
         {
-            claude = executables.Resolve(options.ClaudeExecutable);
+            // 跟评审走同一个入口：一台机器上有好几份 claude 时，额度必须读自
+            // 真正会去跑评审的那一份，否则报出来的额度是另一个账号/另一套缓存的。
+            claude = (await claudeCli.ResolveAsync(ct).ConfigureAwait(false)).Path;
         }
         catch (FileNotFoundException ex)
         {

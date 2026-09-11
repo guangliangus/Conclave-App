@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using Conclave.App.ViewModels;
+using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
 
@@ -95,5 +96,81 @@ public sealed class NodeRowTests
             static r => r.Id);
 
         Assert.Equal("55%", target[0].Quotas[0].PercentText);
+    }
+
+    /// <summary>
+    /// claude 版本要摆在明面上。
+    /// </summary>
+    /// <remarks>
+    /// 版本过旧的节点会被服务端直接拒（<c>API Error: 400 … does not support this model</c>），
+    /// 而且只有它自己会挂 —— 别的节点照常出票，表面上只是「某个 PR 偶尔评不出来」。
+    /// 真事故里，找出是哪台机器花掉的时间远多于修它。
+    /// </remarks>
+    [Fact]
+    public void The_claude_version_is_on_the_row_not_only_in_the_tooltip()
+    {
+        var row = new NodeRow(
+            TestElectors.Make("n1", claudeVersion: "2.1.104"), isSelf: false, Now, []);
+
+        Assert.Contains("claude 2.1.104", row.Subtitle, StringComparison.Ordinal);
+        Assert.Contains("claude 2.1.104", row.Tip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_node_that_reports_no_claude_version_says_so_instead_of_showing_a_blank()
+    {
+        // 老节点不广播这个字段，那台机器上找不到 claude 也是空 —— 两种都得说人话。
+        var row = new NodeRow(
+            TestElectors.Make("n1", claudeVersion: ""), isSelf: false, Now, []);
+
+        Assert.DoesNotContain("claude", row.Subtitle, StringComparison.Ordinal);
+        Assert.Contains("claude 版本未知", row.Tip, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Conclave 自己的版本也要摆在明面上。
+    /// </summary>
+    /// <remarks>
+    /// 它比 claude 的版本更难从别处看出来：升级是各机器各自装的，一台落在旧版上不会有
+    /// 任何报错，只表现成「这台机器的判断跟别人不一样」。
+    /// </remarks>
+    [Fact]
+    public void The_app_version_is_on_the_row_not_only_in_the_tooltip()
+    {
+        var row = new NodeRow(
+            TestElectors.Make("n1", appVersion: "1.4.2"), isSelf: false, Now, []);
+
+        Assert.Contains("Conclave v1.4.2", row.Subtitle, StringComparison.Ordinal);
+        Assert.Contains("Conclave v1.4.2", row.Tip, StringComparison.Ordinal);
+    }
+
+    /// <summary>版本跟本节点不一样时直接说出来，不让人自己比对两行小字。</summary>
+    [Fact]
+    public void A_peer_on_another_version_says_which_version_this_node_is_on()
+    {
+        var row = new NodeRow(
+            TestElectors.Make("n1", appVersion: "0.0.1-ancient"), isSelf: false, Now, []);
+
+        Assert.Contains($"本节点是 v{AppInfo.Version}", row.Tip, StringComparison.Ordinal);
+    }
+
+    /// <summary>本节点那一行不必跟自己比。</summary>
+    [Fact]
+    public void The_self_row_does_not_compare_itself_with_itself()
+    {
+        var row = new NodeRow(
+            TestElectors.Make("n1", appVersion: "0.0.1-ancient"), isSelf: true, Now, []);
+
+        Assert.DoesNotContain("本节点是 v", row.Tip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_node_that_reports_no_app_version_says_so_instead_of_showing_a_blank()
+    {
+        var row = new NodeRow(
+            TestElectors.Make("n1", appVersion: ""), isSelf: false, Now, []);
+
+        Assert.DoesNotContain("Conclave v", row.Subtitle, StringComparison.Ordinal);
+        Assert.Contains("Conclave 版本未知", row.Tip, StringComparison.Ordinal);
     }
 }

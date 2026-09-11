@@ -142,4 +142,39 @@ public sealed class ExecutableResolverTests : IDisposable
             // 临时目录清不掉不影响结论
         }
     }
+
+    /// <summary>
+    /// 同名工具有好几份时要能全部列出来 —— 「排在前面」不等于「是对的那份」。
+    /// </summary>
+    /// <remarks>
+    /// claude 就是这个形状：官方安装器装 <c>~/.local/bin</c>，旧的 npm 全局版留在
+    /// <c>/usr/local/bin</c>。<c>ClaudeCli</c> 要看到全部候选才能逐个验版本再挑。
+    /// </remarks>
+    [Fact]
+    public void Every_copy_is_listed_in_search_order()
+    {
+        var second = Path.Combine(_dir, "second");
+        _ = Directory.CreateDirectory(second);
+        var twin = Path.Combine(second, "faketool");
+        File.WriteAllText(twin, "#!/bin/sh\nexit 0\n");
+
+        var all = Build(_dir, second).ResolveAll("faketool");
+
+        Assert.Equal([_tool, twin], all);
+    }
+
+    [Fact]
+    public void A_symlink_to_a_copy_already_listed_is_not_listed_twice()
+    {
+        var second = Path.Combine(_dir, "link");
+        _ = Directory.CreateDirectory(second);
+        File.CreateSymbolicLink(Path.Combine(second, "faketool"), _tool);
+
+        // 官方安装器装出来的就是这个形状：~/.local/bin/claude 是个指向版本目录的链接。
+        Assert.Equal([_tool], Build(_dir, second).ResolveAll("faketool"));
+    }
+
+    [Fact]
+    public void Nothing_found_is_an_empty_list_not_a_throw()
+        => Assert.Empty(Build().ResolveAll("conclave-no-such-tool"));
 }

@@ -20,6 +20,7 @@ public sealed class DiscoveryService(
     IActaStore acta,
     IMesh mesh,
     IUsageMeter usage,
+    IClaudeCli claudeCli,
     NodeState state,
     ConclaveOptions options,
     ILogger<DiscoveryService> logger) : BackgroundService
@@ -442,12 +443,18 @@ public sealed class DiscoveryService(
             projects = mesh.Self.Projects;
         }
 
+        // 每轮都问一次而不是启动时取一次：claude 会自己原地更新，而「他明明更新过了」
+        // 正是这个字段要回答的问题 —— 显示一个开机时的快照等于把人指回同一个坑。
+        // 实现自己带缓存（半小时），所以这里并不会每轮都 fork 一个子进程。
+        var claudeVersion = await claudeCli.VersionAsync(ct).ConfigureAwait(false);
+
         mesh.UpdateSelf(self => self with
         {
             Projects = [.. projects],
             Reviews24h = reviews,
             Utilization = utilization,
             MaxConcurrent = options.MaxConcurrent,
+            ClaudeVersion = claudeVersion,
             LastHeartbeat = DateTimeOffset.UtcNow,
         });
     }

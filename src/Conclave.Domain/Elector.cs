@@ -56,6 +56,28 @@ public sealed record Elector
     public string AppVersion { get; init; } = string.Empty;
 
     /// <summary>
+    /// 本节点实际会用的那个 claude 的版本号；验不出来或节点太旧没广播时为空。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 为什么要把它摊到 mesh 上：claude 的版本过旧会让评审在服务端直接被拒
+    /// （<c>API Error: 400 … does not support this model</c>），而且<b>只有那一台机器会挂</b> ——
+    /// 别的节点照常出票，表面上看是「某个 PR 偶尔评不出来」。集群里有几十台机器时，
+    /// 一眼看到谁落后了比逐台去问有用得多。
+    /// </para>
+    /// <para>
+    /// 「实际会用的那个」是重点：一台机器上常有不止一份 claude（官方安装器一份、
+    /// 旧的 npm 全局一份），这里报的是 <c>ClaudeCli</c> 真正挑中的那份，不是 <c>which claude</c>。
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>刻意不进 <see cref="Beacon.SigningPayload"/></b>。加字段进签名载荷 = 新旧节点
+    /// 互相验签失败、整个 mesh 必须同时升级，而这只是一个给人看的诊断字段，不值这个代价。
+    /// 代价是它不受签名保护：传输中被篡改不会被发现。所以只拿它显示，别拿它做任何判定。
+    /// </para>
+    /// </remarks>
+    public string ClaudeVersion { get; init; } = string.Empty;
+
+    /// <summary>
     /// 心跳协议版本，见 <see cref="Beacon.ProtocolVersion"/>。
     /// </summary>
     /// <remarks>

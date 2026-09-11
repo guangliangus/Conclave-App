@@ -64,6 +64,35 @@ public sealed record Block
     public string Hash() => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(SigningPayload()))).ToLowerInvariant();
 
+    /// <summary>
+    /// 内容身份：同一块内容不论落在哪个索引上都是这个值。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>为什么不能拿 <see cref="Hash"/> 当身份。</b> 它含 <see cref="Index"/> 与
+    /// <see cref="PrevHash"/>，而让位重挂（<c>SqliteActa.RebaseAsync</c>）改的正好是这两个 ——
+    /// 同一张票每重挂一次就换一个块哈希。于是「这块我是不是已经有了」这个判断认不出
+    /// 重挂过的自己：对端把重挂前那一版推回来，本地当成新块又挂一遍，还顺带再触发一次
+    /// 索引冲突、再重挂一次，循环放大。
+    /// </para>
+    /// <para>
+    /// 实测代价：一张票在链上挂了 41 遍，账单的次数与金额被放大 8 倍，
+    /// 单节点一天打出 622 次索引冲突。
+    /// </para>
+    /// <para>
+    /// 所以身份只取<b>重挂动不了</b>的那几个字段。<see cref="Signature"/> 同样排除在外，
+    /// 理由跟 <see cref="SigningPayload"/> 一样：ECDSA 重签会得到不同签名。
+    /// <see cref="PublicKey"/> 也不必进来 —— 它的指纹就是 <see cref="ElectorId"/>。
+    /// </para>
+    /// </remarks>
+    public string ContentId() => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+        string.Join('|',
+            ChainId,
+            At.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            Kind.ToString(),
+            PayloadJson,
+            ElectorId)))).ToLowerInvariant();
+
     /// <summary>验证签名确实出自 <see cref="PublicKey"/>，且公钥指纹与 <see cref="ElectorId"/> 一致。</summary>
     public bool VerifySignature()
         => ElectorIdentity.FingerprintOf(PublicKey) == ElectorId

@@ -1,4 +1,5 @@
 using System.Globalization;
+using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
 
@@ -9,8 +10,10 @@ namespace Conclave.App.ViewModels;
 /// </summary>
 /// <remarks>
 /// <para>
-/// 颜色阈值直接引 <see cref="Elector.MaxUtilization"/>（0.8）—— 那是「不再入席」的那条线，
-/// 界面上变红的时刻必须跟真实行为改变的时刻是同一刻，另写一个 0.9 只会骗自己。
+/// 颜色阈值取<b>这个窗口自己那条线</b>（<see cref="UsagePressure.GateFor"/>）—— 界面上变红的
+/// 时刻必须跟真实行为改变的时刻是同一刻，另写一个数只会骗自己。5h 那条线就是
+/// <see cref="Elector.MaxUtilization"/>（0.8），跟以前一模一样；周额度当下是硬顶 0.95
+/// （见 <see cref="UsagePressure.WeeklyCeilingOnly"/>），所以 76% 不再无端染红。
 /// </para>
 /// <para>
 /// <b>是 record 而不是 class</b>：它现在既是额度卡自己的一行，也<b>嵌在</b>
@@ -22,8 +25,14 @@ namespace Conclave.App.ViewModels;
 /// </remarks>
 public sealed record UsageWindowRow
 {
-    /// <summary>接近上限：还能接活，但值得看一眼。</summary>
-    private const double WarnAt = 0.6;
+    /// <summary>
+    /// 接近自己那条线：还能接活，但值得看一眼。
+    /// </summary>
+    /// <remarks>
+    /// 是线的比例而不是绝对值，因为每个窗口的线不一样。0.75 × 0.8 = 0.6，5h 那条
+    /// 跟改之前分毫不差；周额度则从「0.6 就发黄」变成「硬顶的四分之三（71%）才发黄」。
+    /// </remarks>
+    private const double WarnRatio = 0.75;
 
     public UsageWindowRow(UsageWindow window, DateTimeOffset now)
     {
@@ -37,13 +46,15 @@ public sealed record UsageWindowRow
 
         // 不参与判定的子额度不按入席阈值变色 —— 变红代表「这个节点停了」，
         // 而 Fable 的周额度打满并不妨碍用 Opus 评审，染红只会造成假警报。
-        IsBad = window.Gates && window.Utilization >= Elector.MaxUtilization;
-        IsWarn = window.Gates && !IsBad && window.Utilization >= WarnAt;
+        var gate = UsagePressure.GateFor(window, now);
+
+        IsBad = window.Gates && window.Utilization >= gate;
+        IsWarn = window.Gates && !IsBad && window.Utilization >= gate * WarnRatio;
 
         Tip = window.Gates
             ? IsBad
-                ? $"已超过 {Format.Percent(Elector.MaxUtilization)}：本节点暂不接评审任务，{ResetText}后自动恢复"
-                : $"超过 {Format.Percent(Elector.MaxUtilization)} 就不再入席"
+                ? $"已超过 {Format.Percent(gate)}：本节点暂不接评审任务，{ResetText}后自动恢复"
+                : $"超过 {Format.Percent(gate)} 就不再入席"
             : "按模型细分的子额度，不参与入席判定 —— 只用来看钱花在哪个模型上";
     }
 
@@ -62,7 +73,7 @@ public sealed record UsageWindowRow
         PercentText = Format.Percent(utilization);
         ResetText = detail;
         IsBad = utilization >= Elector.MaxUtilization;
-        IsWarn = !IsBad && utilization >= WarnAt;
+        IsWarn = !IsBad && utilization >= Elector.MaxUtilization * WarnRatio;
         Tip = detail;
     }
 

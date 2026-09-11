@@ -33,13 +33,18 @@ namespace Conclave.Infrastructure;
 /// </para>
 /// </remarks>
 public sealed class ClaudeReviewRunner(
-    ConclaveOptions options,
     IPrSource prSource,
     GitWorkspaceFactory workspaces,
-    ExecutableResolver executables,
+    ClaudeCli claudeCli,
     ReviewProgressLog progress,
     ILogger<ClaudeReviewRunner> logger) : IReviewRunner
 {
+    /// <summary>
+    /// <see cref="FailureReason"/> 愿意拿去解 JSON 的最大长度。
+    /// </summary>
+    /// <remarks>1MB 足够装下任何一条 result 事件，又不至于让几百 MB 的输出把解析器拖死。</remarks>
+    private const int MaxReasonJsonChars = 1024 * 1024;
+
     public async Task<BallotPayload> RunAsync(
         Revision revision, PrMeta pr, int round, CancellationToken ct)
     {
@@ -107,11 +112,17 @@ public sealed class ClaudeReviewRunner(
             ["CONCLAVE_ROUND"] = round.ToString(CultureInfo.InvariantCulture),
         };
 
-        progress.Append(revision.Id, "claude 启动，会话 " + sessionId.ToString()[..8]);
+        // 路径和版本要写进日志。一台机器上有好几份 claude 是常态（官方安装器一份、
+        // 旧的 npm 全局一份），而「用的是哪一份」原先在日志里完全看不出来 ——
+        // 一次「他明明更新过了」的排查全花在这上面。
+        var claude = await claudeCli.ResolveAsync(ct).ConfigureAwait(false);
+        progress.Append(
+            revision.Id,
+            $"claude 启动，会话 {sessionId.ToString()[..8]} · {claude}");
 
         var sw = Stopwatch.StartNew();
         var result = await ProcessRunner.RunAsync(
-            executables.Resolve(options.ClaudeExecutable), args, repoPath, env, ct,
+            claude.Path, args, repoPath, env, ct,
             onOutputLine: line => progress.Append(revision.Id, Summarize(line)),
             onErrorLine: line => progress.Append(revision.Id, "stderr: " + Truncate(line, 300)))
             .ConfigureAwait(false);
@@ -125,7 +136,7 @@ public sealed class ClaudeReviewRunner(
             return new BallotPayload(
                 revision.Id, round, ReviewDecision.Error, [], "n/a", sw.ElapsedMilliseconds,
                 ReviewUsage.None,
-                Error: $"claude 退出码 {result.ExitCode}：{Truncate(result.StdErr, 2000)}");
+                Error: $"claude 退出码 {result.ExitCode}（{claude}）：{Truncate(FailureReason(result), 2000)}");
         }
 
         if (result.Truncated)
@@ -182,6 +193,73 @@ public sealed class ClaudeReviewRunner(
         }
 
         return ndjson;
+    }
+
+    /// <summary>
+    /// claude 非零退出时，究竟为什么。
+    /// </summary>
+    /// <remarks>
+    /// <b>不能只看 stderr。</b> 原先就是只取 stderr，于是账本里留下的是
+    /// <c>claude 退出码 1：</c> —— 冒号后面是空的，事后翻账本只知道「挂了」，
+    /// 不知道「为什么挂」。实测 claude 把 API 层的错误打在 <b>stdout</b> 上
+    /// （stream-json 的 result 事件里），stderr 一个字都没有：
+    /// <c>API Error: 400 … does not support this model</c> 就是这么丢掉的。
+    /// <para>
+    /// 所以 stderr 空就去 result 事件里取 <c>result</c> 字段，再不行取 stdout 末行。
+    /// </para>
+    /// </remarks>
+    internal static string FailureReason(ProcessResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (!string.IsNullOrWhiteSpace(result.StdErr))
+        {
+            return result.StdErr;
+        }
+
+        var line = ResultLine(result.StdOut);
+
+        // ResultLine 一行都没挑出来时原样返回整份输出，而 stream-json --verbose 的输出
+        // 能有几百 MB —— 不能拿它去起 JsonDocument。
+        if (line.Length <= MaxReasonJsonChars)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                if (doc.RootElement.TryGetProperty("result", out var text)
+                    && text.GetString() is { Length: > 0 } reason)
+                {
+                    return reason;
+                }
+            }
+            catch (JsonException)
+            {
+                // 不是 JSON，往下取末行。
+            }
+        }
+
+        return LastNonEmptyLine(result.StdOut);
+    }
+
+    /// <summary>stdout 最后一行非空内容。整份输出可能极大，所以从后往前扫、不 Split。</summary>
+    private static string LastNonEmptyLine(string text)
+    {
+        var end = text.Length;
+
+        while (end > 0)
+        {
+            var start = text.LastIndexOf('\n', end - 1) + 1;
+            var line = text.AsSpan(start, end - start).Trim();
+
+            if (line.Length > 0)
+            {
+                return line.ToString();
+            }
+
+            end = start - 1;
+        }
+
+        return string.Empty;
     }
 
     /// <summary>这一行是不是 <c>type=result</c> 的事件。认不出（半行、非 JSON）一律 false。</summary>

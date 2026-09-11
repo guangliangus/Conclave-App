@@ -144,6 +144,18 @@ public sealed class SqliteActa : IActaStore
         {
             await using var conn = Open();
 
+            // 这块内容链上已经有了。<b>必须判在索引冲突之前</b>：对端手里多半是<b>重挂之前</b>
+            // 那一版（老 index、老 PrevHash），下面那个「同 index 同哈希」的判断认不出它 ——
+            // 于是它被当成新块又挂一遍，还顺带再触发一次索引冲突、再重挂一次，循环放大。
+            // 实测一张票在链上挂了 41 遍、单节点一天 622 次索引冲突，都是这条路径。
+            if (await ContentExistsAsync(conn, block, ct).ConfigureAwait(false))
+            {
+                _logger.LogDebug(
+                    "区块 {Chain}#{Index} 的内容已在链上（身份 {Content}），忽略",
+                    block.ChainId, block.Index, block.ContentId()[..12]);
+                return ApplyResult.AlreadyPresent;
+            }
+
             var existing = await ReadAtAsync(conn, block.Index, ct).ConfigureAwait(false);
             if (existing is not null)
             {
@@ -335,11 +347,16 @@ public sealed class SqliteActa : IActaStore
             _ = cmd.Parameters.AddWithValue(names[i], revisionIds[i]);
         }
 
+        // GROUP BY content_id：同一块内容在链上可能有好几份（改造之前写脏的库里就有）。
+        // 这里数出来的是「这个 revision 有几张有效票」，直接喂给 quorum ——
+        // 不去重的话一张票复制三份就能自己凑够法定票数，一个 PR 会拿着<b>同一个人的
+        // 同一票</b>宣告评审完成。同组里 revision_id / kind / payload 按定义逐字节相同，
+        // 所以裸列取哪一行都一样；排序用 MIN(block_index)，保留「最后一条结论胜出」。
         cmd.CommandText =
             "SELECT revision_id, kind, payload FROM blocks "
             + "WHERE kind IN ('Ballot', 'Promulgation') "
             + $"AND revision_id IN ({string.Join(", ", names)}) "
-            + "ORDER BY block_index";
+            + "GROUP BY content_id ORDER BY MIN(block_index)";
 
         await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -384,6 +401,15 @@ public sealed class SqliteActa : IActaStore
         }
     }
 
+    /// <summary>
+    /// 按索引原样读一段链。
+    /// </summary>
+    /// <remarks>
+    /// <b>这条路不去重，也永远不该去重。</b> 它是补链用的（<c>MeshHttpServer</c> 拿它回答
+    /// 对端的「我缺 N 之后的块」），对端收到之后要逐块验 <c>PrevHash</c> 咬不咬得上。
+    /// 去掉中间任何一块都会让补过去的链断在那里，对端从此再也追不上。
+    /// 显示与统计要的是去重后的视图，那是 <see cref="ReadRecentAsync"/> 的事。
+    /// </remarks>
     public async Task<IReadOnlyList<Block>> ReadChainAsync(
         long fromIndex, int limit, CancellationToken ct)
     {
@@ -400,7 +426,11 @@ public sealed class SqliteActa : IActaStore
     {
         await using var conn = Open();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"{BlockColumns} ORDER BY block_index DESC LIMIT $limit";
+        // 按内容去重：链上可能有同一块的好几份副本（判重曾经按块哈希做，而重挂正好改块哈希）。
+        // 这是<b>显示</b>用的读法 —— 人要看的是「发生过什么」，同一件事列十几遍只是噪音。
+        // 取 MIN(block_index) 那一份：事情第一次落链的位置才是它真正发生的位置。
+        cmd.CommandText =
+            $"{BlockColumns} GROUP BY content_id ORDER BY MIN(block_index) DESC LIMIT $limit";
         _ = cmd.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 1000));
         return await ReadAllAsync(cmd, ct).ConfigureAwait(false);
     }
@@ -409,8 +439,10 @@ public sealed class SqliteActa : IActaStore
     {
         await using var conn = Open();
         await using var cmd = conn.CreateCommand();
+        // DISTINCT content_id：这个数是 Elector.Weight 的三个输入之一，
+        // 数成副本份数会让一台机器看起来「最近很忙」而被系统性地少派活。
         cmd.CommandText = """
-            SELECT COUNT(*) FROM blocks
+            SELECT COUNT(DISTINCT content_id) FROM blocks
             WHERE kind = 'Ballot' AND elector_id = $elector AND created_at >= $since
             """;
         _ = cmd.Parameters.AddWithValue("$elector", electorId);
@@ -428,7 +460,7 @@ public sealed class SqliteActa : IActaStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT
-              (SELECT COUNT(*) FROM blocks),
+              (SELECT COUNT(DISTINCT content_id) FROM blocks),
               (SELECT COUNT(DISTINCT revision_id) FROM blocks),
               (SELECT COALESCE(value, 0) FROM acta_counters WHERE name = $seen),
               (SELECT COALESCE(value, 0) FROM acta_counters WHERE name = $lost)
@@ -489,17 +521,21 @@ public sealed class SqliteActa : IActaStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             INSERT OR IGNORE INTO reviews
-                (block_hash, revision_id, project, repo, pr_id, pr_title, pr_author,
+                (content_id, block_hash, revision_id, project, repo, pr_id, pr_title, pr_author,
                  reviewer_id, reviewer_az, seat_round, status, findings, reviewed_at,
                  duration_ms, model, turns, input_tokens, output_tokens,
                  cache_read_tokens, cache_write_tokens, thinking_tokens, cost_usd, cost_basis)
             VALUES
-                ($hash, $revision, $project, $repo, $pr, $title, $author,
+                ($content, $hash, $revision, $project, $repo, $pr, $title, $author,
                  $reviewer, $az, $round, $status, $findings, $at,
                  $duration, $model, $turns, $in, $out,
                  $cacheRead, $cacheWrite, $thinking, $cost, $basis)
             RETURNING id
             """;
+
+        // 唯一键是票的身份而不是块哈希：同一票重挂之后块哈希变了，按块哈希判重
+        // 会让它在报表里再算一遍钱。ux_reviews_content 挡住的就是这个。
+        _ = cmd.Parameters.AddWithValue("$content", block.ContentId());
         _ = cmd.Parameters.AddWithValue("$hash", block.Hash());
         _ = cmd.Parameters.AddWithValue("$revision", ballot.RevisionId);
         _ = cmd.Parameters.AddWithValue("$project", pr?.Project ?? string.Empty);
@@ -528,7 +564,7 @@ public sealed class SqliteActa : IActaStore
         var reviewId = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
         if (reviewId is null)
         {
-            return;   // OR IGNORE 命中，这一票已经投影过
+            return;   // OR IGNORE 命中：这一票已经投影过（可能来自它重挂前的那个块）
         }
 
         foreach (var model in usage.Models)
@@ -654,10 +690,10 @@ public sealed class SqliteActa : IActaStore
         cmd.CommandText = """
             INSERT INTO blocks
                 (chain_id, block_index, revision_id, prev_hash, block_hash, created_at, kind,
-                 payload, elector_id, public_key, signature)
+                 payload, elector_id, public_key, signature, content_id)
             VALUES
                 ($chain, $index, $revision, $prev, $hash, $at, $kind,
-                 $payload, $elector, $pubkey, $sig)
+                 $payload, $elector, $pubkey, $sig, $content)
             """;
         _ = cmd.Parameters.AddWithValue("$chain", block.ChainId);
         _ = cmd.Parameters.AddWithValue("$index", block.Index);
@@ -671,7 +707,20 @@ public sealed class SqliteActa : IActaStore
         _ = cmd.Parameters.AddWithValue("$elector", block.ElectorId);
         _ = cmd.Parameters.AddWithValue("$pubkey", block.PublicKey);
         _ = cmd.Parameters.AddWithValue("$sig", block.Signature);
+        _ = cmd.Parameters.AddWithValue("$content", block.ContentId());
         _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>这块内容是不是已经在链上了（不管它当初挂在哪个索引）。</summary>
+    private static async Task<bool> ContentExistsAsync(
+        SqliteConnection conn, Block block, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT 1 FROM blocks WHERE chain_id = $chain AND content_id = $content LIMIT 1";
+        _ = cmd.Parameters.AddWithValue("$chain", block.ChainId);
+        _ = cmd.Parameters.AddWithValue("$content", block.ContentId());
+        return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null;
     }
 
     private static async Task<(long Index, string? Hash)> ReadTailAsync(
@@ -697,6 +746,13 @@ public sealed class SqliteActa : IActaStore
         return blocks.Count > 0 ? blocks[0] : null;
     }
 
+    /// <summary>
+    /// 从某个索引起的整段链，原样。
+    /// </summary>
+    /// <remarks>
+    /// 同 <see cref="ReadChainAsync"/>：<b>不能去重</b>。让位重挂要把这一整段摘下来重挂，
+    /// 漏掉任何一块，重挂出来的链就少了那一块 —— 那是真的丢数据，不是「视图干净了」。
+    /// </remarks>
     private static async Task<IReadOnlyList<Block>> ReadFromAsync(
         SqliteConnection conn, long fromIndex, CancellationToken ct)
     {

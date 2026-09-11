@@ -25,15 +25,29 @@ public sealed class ExecutableResolver(ConclaveOptions options)
     /// PATH 之外还去这些目录找。
     /// </summary>
     /// <remarks>
+    /// <para>
     /// 覆盖 Homebrew（Apple Silicon 与 Intel 两种前缀）、pipx/uv 的用户目录、
     /// dotnet 全局工具、MacPorts。
+    /// </para>
+    /// <para>
+    /// <b>用户目录排在系统目录前面</b>，这个顺序是踩出来的：claude 的官方安装器装在
+    /// <c>~/.local/bin</c>，而 <c>/usr/local/bin</c> 里常常还躺着一份没卸干净的旧 npm 版
+    /// （<c>npm i -g @anthropic-ai/claude-code</c>）。原先的顺序让后者赢，于是终端里
+    /// <c>claude --version</c> 是新的、Conclave 起的却是旧的 —— 实测表现为评审直接
+    /// 「API Error: 400 … does not support this model; version 2.1.251 or newer is required」，
+    /// 而日志里完全看不出用的是哪个文件。
+    /// </para>
+    /// <para>
+    /// 顺序只是缩小概率。真正的兜底是 <see cref="ResolveAll"/>：claude 那条路会把每个候选
+    /// 都验一次版本再挑（见 <c>ClaudeCli</c>），不指望这张表排得对。
+    /// </para>
     /// </remarks>
     private static readonly string[] FallbackDirectories =
     [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
         "~/.local/bin",
         "~/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
         "~/.dotnet/tools",
         "/opt/local/bin",
     ];
@@ -48,6 +62,60 @@ public sealed class ExecutableResolver(ConclaveOptions options)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(command);
         return _cache.GetOrAdd(command, Locate);
+    }
+
+    /// <summary>
+    /// 按搜索顺序列出<b>全部</b>候选，而不只是第一个。
+    /// </summary>
+    /// <remarks>
+    /// 同一个命令在一台机器上有好几份是常态（npm 全局装一份、官方安装器又装一份），
+    /// 而「排在前面」不等于「是对的那份」。要在多份之间做选择的调用方（<c>ClaudeCli</c>
+    /// 会逐个验版本）需要看到全部，光有 <see cref="Resolve"/> 做不到。
+    /// <para>
+    /// 按真实路径去重：<c>~/.local/bin/claude</c> 这种符号链接和它的目标是同一个文件，
+    /// 验两遍纯属浪费。返回的仍是找到它的那个路径，不是链接目标。
+    /// </para>
+    /// <para>
+    /// 配置里给的是绝对路径时只会有一个候选 —— 配置就是最终答案，不参与挑选。
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> ResolveAll(string command)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(command);
+
+        if (command.Contains(Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            var expanded = ConclaveOptions.ExpandHome(command);
+            return File.Exists(expanded) ? [expanded] : [];
+        }
+
+        var found = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var dir in Directories())
+        {
+            var candidate = Path.Combine(dir, command);
+            if (File.Exists(candidate) && seen.Add(RealPath(candidate)))
+            {
+                found.Add(candidate);
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>符号链接走到底，用于去重。走不动（不是链接、或者断了）就用原路径。</summary>
+    private static string RealPath(string path)
+    {
+        try
+        {
+            return File.ResolveLinkTarget(path, returnFinalTarget: true)?.FullName
+                ?? Path.GetFullPath(path);
+        }
+        catch (IOException)
+        {
+            return path;
+        }
     }
 
     /// <summary>解析不到时返回 null，用于「有没有装」这种探测。</summary>

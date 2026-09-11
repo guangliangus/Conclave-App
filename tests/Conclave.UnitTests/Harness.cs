@@ -48,14 +48,18 @@ internal sealed class Harness : IDisposable
         Notifier = new FakeNotifier();
         State = new NodeState();
         Usage = new FakeUsageMeter(utilization);
+        ClaudeCli = new FakeClaudeCli();
 
         Discovery = new DiscoveryService(
-            PrSource, Acta, Mesh, Usage, State, Options, NullLogger<DiscoveryService>.Instance);
+            PrSource, Acta, Mesh, Usage, ClaudeCli, State, Options,
+            NullLogger<DiscoveryService>.Instance);
         ReviewLog = new SqliteReviewLog(Options);
         Orchestrator = new ReviewOrchestrator(
             Acta, Mesh, Runner, PrSource, ReviewLog, Notifier, State, Options,
             NullLogger<ReviewOrchestrator>.Instance);
     }
+
+    internal FakeClaudeCli ClaudeCli { get; }
 
     internal ConclaveOptions Options { get; }
 

@@ -81,7 +81,7 @@ public sealed class ClaudeUsageMeterTests : IDisposable
             : Path.Combine(_dir, "no-such-claude");
 
         var probe = new ClaudeCliUsageProbe(
-            options, new ExecutableResolver(options), NullLogger<ClaudeCliUsageProbe>.Instance);
+            options, new ClaudeCli(options, new ExecutableResolver(options), NullLogger<ClaudeCli>.Instance), NullLogger<ClaudeCliUsageProbe>.Instance);
 
         return new ClaudeUsageMeter(options, probe, log, new FixedClock(Wednesday));
     }
@@ -118,28 +118,29 @@ public sealed class ClaudeUsageMeterTests : IDisposable
         var reading = await Meter(Options(tokenBudget: 0), new FakeReviewLog(), Usage("46", "40"))
             .ReadAsync(SelfId, CancellationToken.None);
 
-        // 「最紧」不再等于「用量最大」：5h 46% 离它 80% 的线还有距离（压力 0.58），
-        // 而周三中午周额度的线只有 68%，40% 已经用掉 0.59 —— 卡住的是周额度。
-        // 这正是按工作日配速判的意义：管的是烧得太快，不是烧得太多。
-        Assert.Equal(0.40 / 0.6833 * Elector.MaxUtilization, reading.Utilization, 2);
-        Assert.Contains("卡在 7d", reading.Detail);
+        // 周额度暂时只当硬顶（UsagePressure.WeeklyCeilingOnly），40% 一点压力都不贡献 ——
+        // 卡住的是 5h，而 SessionGate 就取自 Elector.MaxUtilization，
+        // 所以上报的数恰好等于它的原始读数。
+        Assert.Equal(0.46, reading.Utilization, 4);
+        Assert.Contains("卡在 5h", reading.Detail);
         Assert.Equal("claude-cli", reading.Source);
         Assert.Contains("5h 46%", reading.Detail);
-        Assert.Contains("7d 40%", reading.Detail);
+        Assert.Contains("7d 40%", reading.Detail);   // 不判定，但照样显示
     }
 
     [Fact]
     public async Task The_reset_time_comes_from_the_window_that_actually_binds()
     {
-        // 周额度更紧：5h 窗口今天下午就重置，但真正卡住我们的是几天后才重置的那个。
+        // 周额度到了硬顶：5h 窗口今天下午就重置，但真正卡住我们的是几天后才重置的那个。
         // 报「半小时后恢复」是误导。
-        var reading = await Meter(Options(tokenBudget: 0), new FakeReviewLog(), Usage("10", "90"))
+        var reading = await Meter(Options(tokenBudget: 0), new FakeReviewLog(), Usage("10", "96"))
             .ReadAsync(SelfId, CancellationToken.None);
 
-        // 90% 在周三已经远超配速上限（68%），压力 >1，上报值夹到 1。
-        Assert.Equal(1.0, reading.Utilization);
-        Assert.NotNull(reading.ResetsAt);
-        Assert.True(reading.ResetsAt!.Value > DateTimeOffset.UtcNow.AddDays(1));
+        // 96% 过了硬顶 95%，压力 96/95 > 1，折回 0.8 那把尺子就是 80.8% —— 刚好出局。
+        Assert.Equal(0.96 / UsagePressure.WeeklyCeiling * Elector.MaxUtilization, reading.Utilization, 4);
+        Assert.True(reading.Utilization >= Elector.MaxUtilization);
+        Assert.Equal(
+            new DateTimeOffset(2026, 9, 14, 2, 0, 0, TimeSpan.FromHours(8)), reading.ResetsAt);
     }
 
     [Fact]
@@ -152,9 +153,8 @@ public sealed class ClaudeUsageMeterTests : IDisposable
             .ReadAsync(SelfId, CancellationToken.None);
 
         // Fable 的周额度打满不妨碍用 Opus 评审 —— 聚合值不该被它拉到 95%，
-        // 但它照样要显示：人需要知道钱花在哪个模型上。
-        // 卡住的是周额度（20% / 68% 的线），不是 Fable。
-        Assert.Equal(0.20 / 0.6833 * Elector.MaxUtilization, reading.Utilization, 2);
+        // 但它照样要显示：人需要知道钱花在哪个模型上。卡住的是 5h。
+        Assert.Equal(0.10, reading.Utilization, 4);
         Assert.Equal(3, reading.Windows.Count);
         Assert.Contains("7d/Fable 95%", reading.Detail);
     }
@@ -174,17 +174,24 @@ public sealed class ClaudeUsageMeterTests : IDisposable
     }
 
     [Fact]
-    public async Task A_tighter_budget_than_the_real_reading_still_wins()
+    public async Task A_tighter_budget_never_overrides_the_real_reading()
     {
-        var log = new FakeReviewLog { Tokens = 36_000_000 };   // 折算 90%
+        var log = new FakeReviewLog { Tokens = 52_000_000 };   // 折算 132%，夹到 100%
 
-        // 取更紧的那个，方向上偏保守（宁可少接活）。
-        var reading = await Meter(Options(tokenBudget: 40_000_000), log, Usage("5", "5"))
+        // 折算的分母是个没有出处的估计（默认 4000 万 token / 7 天，官方并没有公开 token
+        // 配额），真值是订阅侧的事实 —— 估计值不该有权把节点关在门外。这里的数字是实测：
+        // 这台机器 7 天出票 5285 万 token，于是折算判它「额度满」，而 Claude 自己报的是
+        // 5h 18% / 7d 76%，压力 18%，本来还能接一整天的活。
+        var reading = await Meter(Options(tokenBudget: 40_000_000), log, Usage("18", "76"))
             .ReadAsync(SelfId, CancellationToken.None);
 
-        Assert.Equal(0.9, reading.Utilization);
-        Assert.Equal("claude-cli+budget", reading.Source);
-        Assert.Equal(2, reading.Windows.Count);   // 聚合取了折算，窗口明细仍来自真值
+        Assert.Equal(0.18, reading.Utilization, 4);
+        Assert.Equal("claude-cli", reading.Source);
+        Assert.Equal(2, reading.Windows.Count);
+
+        // 不参与判定，但要看得见 —— 折算是唯一能看出「本节点自己烧了多少」的数。
+        Assert.Contains("本机折算 100%", reading.Detail);
+        Assert.Contains("不参与判定", reading.Detail);
     }
 
     [Fact]

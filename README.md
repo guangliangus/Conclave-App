@@ -206,8 +206,12 @@ Current week (Fable): 23% used · resets Sep 14 at 2am (Asia/Shanghai)
 （跟 statusLine JSON 和 `/api/oauth/usage` 用的是同一套词，将来换来源不用动界面），
 自带 **60 秒缓存**（面板每 30 秒刷、发现循环每 60 秒一轮，共用一份，不会每次都 fork）。
 
-**取参与判定的窗口里的最大值** —— 任一窗口打满都会被限流。按模型细分的子额度
-（`seven_day:Fable`）**只显示、不参与判定**：Fable 的周额度打满不妨碍用 Opus 评审。
+**取参与判定的窗口里压力最大的那个** —— 每个窗口各有各的线，比的是「离自己那条线还有多远」。
+按模型细分的子额度（`seven_day:Fable`）**只显示、不参与判定**：Fable 的周额度打满不妨碍用
+Opus 评审。周额度**当下也只在到硬顶 95% 时才算数**（临时，见 DESIGN 里的
+`UsagePressure.WeeklyCeilingOnly`）。
+
+真值拿不到时才回落到按预算折算；折算**永远不会反过来盖掉真值** —— 它的分母只是个估计。
 
 比较过的四条路，这条最合适：
 
@@ -457,6 +461,7 @@ Conclave.Infrastructure   适配器
   ├ ClaudeUsageMeter        额度记账：滚动窗口折算 + usage 覆盖文件
   ├ Mesh/                   MeshBeaconSocket · MeshHttpServer · HttpMesh · MeshService
   ├ ExecutableResolver      az / claude / git 的路径兜底（见「踩过的坑」8）
+  ├ ClaudeCli               用哪个 claude：全部候选验版本，挑最新的那份
   └ FileElectorAllowList    ~/.conclave/electors.allow，按 mtime 热重载
 ```
 
@@ -530,11 +535,13 @@ target/action 通路，验证「点图标 → 出主面板」，**Avalonia 或 m
 六张表分别是：**PR 队列**（幂等键 / 阶段与收票进度 / 本节点席位 / 结论 + 手动触发与指派
 按钮）、**我的 PR**（队列里作者是本机 az 身份的那些 —— 本节点评不了它们，只能指派出去）、
 **评审记录**（账单，含缓存命中与分模型明细）、**Acta 会议录**（区块浏览器）、
-**在线节点**（额度 / 在跑 / 近 24H —— 正好是席位权重的三个输入）、**通知**（见下）。
+**在线节点**（额度 / 在跑 / 近 24H —— 正好是席位权重的三个输入；每行小字里还有那台机器的
+Conclave 版本和 claude 版本，混合版本的集群里这两个值是「为什么只有它评不出来」「为什么它的
+判断跟别人不一样」的第一现场，tooltip 里还会写明跟本节点是不是同一版）、**通知**（见下）。
 
 额度条**每个窗口各画一条**（会话额度 5h / 周额度 7d / 按模型细分的周额度），带各自的
-重置时刻；过 80% 变红 —— 那正是 `Elector.MaxUtilization`、也就是本节点不再入席的那条线，
-所以「界面变红」和「真的停止接活」是同一刻。真值拿不到时退一条「按预算折算」并标明
+重置时刻；**过了自己那条线才变红**（5h 是 80% = `Elector.MaxUtilization`，周额度当下是硬顶
+95%），所以「界面变红」和「真的停止接活」是同一刻。真值拿不到时退一条「按预算折算」并标明
 「（折算）」，同时说清为什么没有真值。
 
 **下半区的刷新是定时的（30 秒）**，跟其他面板不同 —— 额度和账单都没有事件可订阅：
@@ -878,6 +885,10 @@ CI（`azure-pipelines.yml`，`macos-latest`）四道门禁，每一条都对应�
    在终端里一切正常，双击图标就变成「读不到 az 登录身份」和「0 个 project」，
    而提示还指向了错误的方向。`ExecutableResolver` 在进程内兜底（配置 → PATH →
    常见安装目录），launchd 也是同一个坑（plist 里显式写 PATH）。
+   **后续**：兜底只能决定「先看到哪个」，决定不了「哪个是对的」—— 一台机器上装着两份
+   claude（官方安装器一份、旧的 npm 全局一份）时，挑中旧的那份会让评审全挂在
+   `API Error: 400 … does not support this model`，而机器的主人明明更新过。
+   所以 `ClaudeCli` 把全部候选都跑一次 `--version` 再按版本号挑，多份并存记成警告。
 9. **配置目录要先探出来再加载配置**。配置文件本身就放在 `HomeDirectory` 下，把路径写死成
    `~/.conclave` 会导致用 `CONCLAVE_Conclave__HomeDirectory` 换目录后，私钥和账本搬走了、
    配置还在读老地方 —— 实测双节点联调时两个节点都读到了「mesh 关」，正是这个原因。

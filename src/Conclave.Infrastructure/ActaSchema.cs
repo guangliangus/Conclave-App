@@ -1,3 +1,5 @@
+using System.Globalization;
+using Conclave.Domain;
 using Microsoft.Data.Sqlite;
 
 namespace Conclave.Infrastructure;
@@ -32,10 +34,136 @@ internal static class ActaSchema
 
         using var conn = new SqliteConnection(connectionString);
         conn.Open();
+        Execute(conn, Ddl);
+
+        // 老库是 CREATE TABLE IF NOT EXISTS 建的，加列改不到它们，只能显式补。
+        AddContentIdColumn(conn, "blocks");
+        AddContentIdColumn(conn, "reviews");
+
+        BackfillBlockContentIds(conn);
+        BackfillReviewContentIds(conn);
+        DeduplicateReviews(conn);
+
+        // 唯一索引必须建在去重之后：老库里同一票存着几十份，先建索引会直接失败。
+        Execute(conn, PostMigrationDdl);
+    }
+
+    private static void Execute(SqliteConnection conn, string sql)
+    {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = Ddl;
+        cmd.CommandText = sql;
         _ = cmd.ExecuteNonQuery();
     }
+
+    /// <summary>补 <c>content_id</c> 列；已经有就什么都不做。</summary>
+    private static void AddContentIdColumn(SqliteConnection conn, string table)
+    {
+        using var probe = conn.CreateCommand();
+        // 表名是这个方法的两个调用点写死的字面量，不接受外部输入。
+        probe.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'content_id'";
+        if (Convert.ToInt64(probe.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
+        {
+            return;
+        }
+
+        Execute(conn, $"ALTER TABLE {table} ADD COLUMN content_id TEXT NOT NULL DEFAULT ''");
+    }
+
+    /// <summary>
+    /// 给老块补算内容身份。
+    /// </summary>
+    /// <remarks>
+    /// 刻意<b>重建一个 <see cref="Block"/> 再调 <see cref="Block.ContentId"/></b>，而不是在这里
+    /// 照着那个公式拼一遍字符串：拼重了这里算出的身份跟运行时算出的对不上，
+    /// 表现是老块永远被当成新块、重复照旧，而且没有任何报错。
+    /// <see cref="Block.ContentId"/> 用不到的字段填占位值即可。
+    /// </remarks>
+    private static void BackfillBlockContentIds(SqliteConnection conn)
+    {
+        var pending = new List<(long Id, string ContentId)>();
+
+        using (var read = conn.CreateCommand())
+        {
+            read.CommandText =
+                "SELECT id, chain_id, created_at, kind, payload, elector_id FROM blocks WHERE content_id = ''";
+            using var reader = read.ExecuteReader();
+            while (reader.Read())
+            {
+                var block = new Block
+                {
+                    ChainId = reader.GetString(1),
+                    At = DateTimeOffset.ParseExact(
+                        reader.GetString(2), TimestampFormat, CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal),
+                    Kind = Enum.Parse<BlockKind>(reader.GetString(3)),
+                    PayloadJson = reader.GetString(4),
+                    ElectorId = reader.GetString(5),
+
+                    // ContentId 用不到这几个 —— 那正是它能扛住重挂的原因。
+                    Index = 0,
+                    PrevHash = Block.GenesisPrevHash,
+                    PublicKey = string.Empty,
+                    Signature = string.Empty,
+                };
+
+                pending.Add((reader.GetInt64(0), block.ContentId()));
+            }
+        }
+
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        using var tx = conn.BeginTransaction();
+        foreach (var (id, contentId) in pending)
+        {
+            using var update = conn.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText = "UPDATE blocks SET content_id = $content WHERE id = $id";
+            _ = update.Parameters.AddWithValue("$content", contentId);
+            _ = update.Parameters.AddWithValue("$id", id);
+            _ = update.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// 投影行的身份就是它来源块的身份，照着 <c>block_hash</c> 抄过来即可。
+    /// </summary>
+    /// <remarks>
+    /// 找不到来源块的行（理论上不该有）退回用自己的 <c>block_hash</c> 当身份 ——
+    /// 不能留空，留空的话它们会在下一步去重里被当成同一票互相吃掉。
+    /// </remarks>
+    private static void BackfillReviewContentIds(SqliteConnection conn) => Execute(conn, """
+            UPDATE reviews
+            SET content_id = COALESCE(
+                (SELECT b.content_id FROM blocks b WHERE b.block_hash = reviews.block_hash),
+                reviews.block_hash)
+            WHERE content_id = ''
+        """);
+
+    /// <summary>
+    /// 同一票的多份投影只留最早那一份。
+    /// </summary>
+    /// <remarks>
+    /// 投影是可重建的缓存，删重复不损失任何真相 —— 链还在，随时投得回来。
+    /// 实测一个库里 134 行投影只对应 17 张票，账单因此报出 8 倍的次数与金额。
+    /// </remarks>
+    private static void DeduplicateReviews(SqliteConnection conn) => Execute(conn, """
+            DELETE FROM reviews
+            WHERE id NOT IN (SELECT MIN(id) FROM reviews GROUP BY content_id);
+
+            DELETE FROM review_model_usages
+            WHERE review_id NOT IN (SELECT id FROM reviews);
+        """);
+
+    private const string TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffffffZ";
+
+    private const string PostMigrationDdl = """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_reviews_content ON reviews (content_id);
+        """;
 
     private const string Ddl = """
             PRAGMA journal_mode = WAL;
@@ -52,7 +180,10 @@ internal static class ActaSchema
                 payload      TEXT    NOT NULL,
                 elector_id   TEXT    NOT NULL,
                 public_key   TEXT    NOT NULL,
-                signature    TEXT    NOT NULL
+                signature    TEXT    NOT NULL,
+                -- 块的内容身份（Block.ContentId）。重挂改 index/prev_hash、块哈希跟着变，
+                -- 这个不变 —— 「这块我是不是已经有了」只能拿它判。
+                content_id   TEXT    NOT NULL DEFAULT ''
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS ux_blocks_chain_block_index
@@ -61,6 +192,11 @@ internal static class ActaSchema
             CREATE INDEX IF NOT EXISTS ix_blocks_created_at  ON blocks (created_at);
             CREATE INDEX IF NOT EXISTS ix_blocks_kind        ON blocks (kind);
             CREATE INDEX IF NOT EXISTS ix_blocks_elector_id  ON blocks (elector_id);
+            -- 刻意<b>不是</b>唯一索引：改造之前写脏的链里同一块内容存着几十份，
+            -- 建唯一索引会直接失败。重复的产生由写入路径挡住（SqliteActa.TryApplyAsync），
+            -- 而账单靠投影表那个唯一索引保证 —— 投影是可重建的缓存，链不是。
+            CREATE INDEX IF NOT EXISTS ix_blocks_content
+                ON blocks (chain_id, content_id);
 
             -- 评审记录投影。cost_usd 用 REAL 而不是全局规范里的 numeric(10,2)：
             -- 单次评审的折算金额常在 $0.001 量级，两位小数会全部归零。
@@ -88,7 +224,9 @@ internal static class ActaSchema
                 cache_write_tokens INTEGER NOT NULL,
                 thinking_tokens    INTEGER NOT NULL,
                 cost_usd           REAL    NOT NULL,
-                cost_basis         TEXT    NOT NULL
+                cost_basis         TEXT    NOT NULL,
+                -- 这一票的身份，来自它所在块的 Block.ContentId。
+                content_id         TEXT    NOT NULL DEFAULT ''
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS ux_reviews_block_hash ON reviews (block_hash);

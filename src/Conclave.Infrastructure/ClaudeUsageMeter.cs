@@ -9,7 +9,7 @@ namespace Conclave.Infrastructure;
 /// </summary>
 /// <remarks>
 /// <para>
-/// 两个来源，取<b>更紧</b>的那个：
+/// 两个来源，<b>真值优先</b>，折算只在真值拿不到时兜底：
 /// </para>
 /// <list type="number">
 /// <item>
@@ -60,18 +60,19 @@ public sealed class ClaudeUsageMeter(
             return real;
         }
 
-        // 折算比真值还高：真值只覆盖 Claude 订阅侧，而折算是按本节点出票算的，
-        // 极端情况下（预算配得很小）可能更紧。取更紧的那个，方向上偏保守（宁可少接活）。
+        // 折算比真值高时**不**盖掉真值 —— 这里原先取更紧的那个，看着保守，实际是这套判定
+        // 唯一一次真的把本节点关在门外的原因：折算的分母（默认 4000 万 token / 7 天）是个
+        // 没有出处的估计，官方并没有公开 token 配额。实测这台机器 7 天出票 5285 万 token，
+        // 折算 132% → 夹到 1.0 → 界面「额度满」，而同一时刻 Claude 自己报的是
+        // 5h 18% / 7d 76%，压力只有 64%，明明还能接一整天的活。
         //
-        // 两边比的都是「上报口径」的数，量纲一致：折算那条的阈值本来就是
-        // Elector.MaxUtilization，压力折回来恰好等于它自己的原始比例，所以不用换算。
-        return budget with
+        // 真值是订阅侧的事实，估计值不该有权推翻它。折算留在 Detail 里看得见但不参与判定，
+        // 它的位置仍然是「真值彻底拿不到时的兜底」，见类型注释。
+        return real with
         {
-            Source = "claude-cli+budget",
-            Detail = $"{budget.Detail}（Claude 报 {real.Utilization:P0}，取更紧的）",
-            ResetsAt = real.ResetsAt,
-            // 聚合值取了折算那个，但窗口明细只有真值有 —— 面板照样画出 5h / 7d 两条。
-            Windows = real.Windows,
+            Detail = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{real.Detail}；本机折算 {budget.Utilization * 100:F0}%（{budget.Detail}），不参与判定"),
         };
     }
 
@@ -80,9 +81,10 @@ public sealed class ClaudeUsageMeter(
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 聚合值取<b>参与判定的窗口</b>里的最大值（<see cref="UsageWindow.Gates"/>）——
-    /// 任一窗口打满都会被限流，所以决定「还能不能接活」的是最紧的那个。按模型细分的
-    /// 子额度（<c>seven_day:Fable</c>）不参与：Fable 的周额度打满不妨碍用 Opus 评审。
+    /// 聚合值取<b>参与判定的窗口</b>里压力最大的那个（见 <see cref="UsagePressure.Counts"/>）：
+    /// 决定「还能不能接活」的是离自己那条线最近的窗口。按模型细分的子额度
+    /// （<c>seven_day:Fable</c>）永远不参与 —— Fable 的周额度打满不妨碍用 Opus 评审；
+    /// 周额度当下只在到硬顶时参与（<see cref="UsagePressure.WeeklyCeilingOnly"/>）。
     /// </para>
     /// <para>
     /// <c>ResetsAt</c> 取<b>触线那个窗口</b>的，不是最早的那个 —— 5h 窗口半小时后重置、
@@ -104,19 +106,11 @@ public sealed class ClaudeUsageMeter(
             return (null, "额度窗口都已过期");
         }
 
-        var gating = live.Where(w => w.Gates).ToList();
-        if (gating.Count == 0)
-        {
-            // 只剩按模型细分的子额度：它们不参与判定，但也不该因此报「没有真值」。
-            gating = live;
-        }
-
-        // 各窗口各有各的阈值，取「离自己那条线最近」的那个，不是用量最大的那个。
-        // 周额度用工作日配速判，理由见 UsagePressure。
+        // 哪些窗口算数、各自的线在哪，全交给 UsagePressure —— 这里不再自己筛一遍。
+        // 取的是「离自己那条线最近」的那个，不是用量最大的那个。
         // 时区从 TimeProvider 拿，不读 TimeZoneInfo.Local —— 那样这段就没法在
         // 固定时区下测试，而周阈值恰恰取决于「现在是周几」。
-        var binding = UsagePressure.Tightest(gating, now, _time.LocalTimeZone)
-            ?? new UsagePressure.Binding(gating[0], UsagePressure.SessionGate, 0);
+        var binding = UsagePressure.Tightest(live, now, _time.LocalTimeZone);
 
 
         // 显式写 *100 加 % 而不是用 :P0 —— InvariantCulture 的百分号格式会插一个空格
@@ -126,16 +120,22 @@ public sealed class ClaudeUsageMeter(
 
         // 卡在哪个窗口、那个窗口当下的线在哪 —— 不写出来的话，日志里「额度 74%」旁边
         // 跟着「5h 10% · 7d 88%」，没有一个数对得上，排查时只能去读代码。
-        detail += string.Create(
-            CultureInfo.InvariantCulture,
-            $"；卡在 {Short(binding.Window.Key)}，阈值 {binding.Gate * 100:F0}%");
+        //
+        // 一个窗口都不算数是个真能走到的分支：周额度当下只在到硬顶时才参与判定
+        // （UsagePressure.WeeklyCeilingOnly），所以「只剩周额度」时确实没有任何东西挡着。
+        // 压力按 0 计，并且在 Detail 里说出来，免得被当成读数丢了。
+        detail += binding is { } bound
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"；卡在 {Short(bound.Window.Key)}，阈值 {bound.Gate * 100:F0}%")
+            : "；没有参与判定的窗口，压力按 0 计";
 
         return (
             new UsageReading(
-                UsagePressure.Reported(binding),
+                binding is { } b ? UsagePressure.Reported(b) : 0,
                 "claude-cli",
                 detail,
-                binding.Window.ResetsAt)
+                binding?.Window.ResetsAt)
             {
                 Windows = live,
             },

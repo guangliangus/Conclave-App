@@ -34,6 +34,11 @@ namespace Conclave.Application;
 /// 恰好等于 5h 的原始读数</b>，常见情况下含义跟以前完全一致。
 /// </para>
 /// <para>
+/// <b>⚠️ 当下周额度被临时摘掉了权重</b>，见 <see cref="WeeklyCeilingOnly"/>：
+/// <c>seven_day</c> 只在到硬顶时才参与判定，正常区间里一点压力都不贡献。
+/// 配速那套逻辑原样留着（<see cref="PaceGate"/>），恢复只要改一个布尔量。
+/// </para>
+/// <para>
 /// ⚠️ 这里的阈值是<b>节点间协议</b>，跟 <see cref="Elector.MaxUtilization"/> 同一性质：
 /// 各机器算法不一致的话，上报的压力值就不可比，加权 HRW 会系统性偏袒某几台。
 /// 所以是常量而不是配置项。
@@ -67,6 +72,32 @@ public static class UsagePressure
     /// </remarks>
     public const double WeeklyCeiling = 0.95;
 
+    /// <summary>
+    /// 【临时】周额度只当硬顶用，不再按配速贡献压力。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 开着的时候 <c>seven_day</c> 只在<b>真的快耗尽</b>（≥ <see cref="WeeklyCeiling"/>）时才
+    /// 参与判定：低于硬顶一点压力都不贡献 —— 既不会让节点出局，也不会通过
+    /// <see cref="Elector.Weight"/> 里的 <c>1 - 压力</c> 压低本机被派活的概率。
+    /// 于是正常区间里上报的数就等于 5h 的原始读数。
+    /// </para>
+    /// <para>
+    /// 硬顶留着不是保守，是必需：周额度真耗尽时 5h 反而读得很低，摘干净的话就会掉进
+    /// 「周额度耗尽 → 看起来最闲 → 优先派活 → 每次评审都失败」那个反馈陷阱。
+    /// </para>
+    /// <para>
+    /// 按工作日配速那套（<see cref="PaceGate"/>）原样留着、照常有测试覆盖，
+    /// 想恢复把这里改回 <c>false</c> 就行，<see cref="Tightest"/> 和界面会同步跟上。
+    /// </para>
+    /// <para>
+    /// <b>为什么是 <c>static readonly</c> 而不是 <c>const</c>：</b> const 会把配速那条分支
+    /// 变成编译期死代码（CS0162/CS0429），而 <c>TreatWarningsAsErrors</c> 下那就是编译不过。
+    /// 它跟别的阈值一样编译进二进制、不是配置项 —— 各机器算法不一致的话上报的压力值不可比。
+    /// </para>
+    /// </remarks>
+    public static readonly bool WeeklyCeilingOnly = true;
+
     /// <summary>Claude 的周窗口长度。</summary>
     private static readonly TimeSpan WeeklyWindow = TimeSpan.FromDays(7);
 
@@ -80,8 +111,9 @@ public static class UsagePressure
     /// 找出最紧的那个窗口。
     /// </summary>
     /// <remarks>
-    /// 只看 <see cref="UsageWindow.Gates"/> 为真的窗口 —— 按模型细分的子额度
-    /// （<c>seven_day:Fable</c>）打满不妨碍用 Opus 评审，拿它挡人是错的。
+    /// 只看 <see cref="Counts"/> 为真的窗口 —— 按模型细分的子额度（<c>seven_day:Fable</c>）
+    /// 打满不妨碍用 Opus 评审，拿它挡人是错的；周额度当下也只在到硬顶时才算数
+    /// （<see cref="WeeklyCeilingOnly"/>）。
     /// </remarks>
     /// <returns>没有可判定的窗口时返回 <c>null</c>。</returns>
     /// <param name="windows">候选窗口。</param>
@@ -96,7 +128,7 @@ public static class UsagePressure
         ArgumentNullException.ThrowIfNull(windows);
 
         Binding? tightest = null;
-        foreach (var window in windows.Where(w => w.Gates))
+        foreach (var window in windows.Where(Counts))
         {
             var gate = GateFor(window, now, zone);
             var value = gate <= 0 ? 1.0 : window.Utilization / gate;
@@ -108,6 +140,28 @@ public static class UsagePressure
         }
 
         return tightest;
+    }
+
+    /// <summary>
+    /// 这个窗口现在参不参与「还能不能接活」的判定。
+    /// </summary>
+    /// <remarks>
+    /// 两种不参与，理由完全不同：按模型细分的子额度（<see cref="UsageWindow.Gates"/>）
+    /// <b>永远</b>不参与，Fable 的周额度打满不妨碍用 Opus；周额度是<b>暂时</b>不参与，
+    /// 只在到 <see cref="WeeklyCeiling"/> 时才算数，见 <see cref="WeeklyCeilingOnly"/>。
+    /// <para>
+    /// 界面上「这条线画在哪」用 <see cref="GateFor"/>，跟这里是同一个判断的两面：
+    /// 周额度的线就是硬顶，到线即出局。
+    /// </para>
+    /// </remarks>
+    public static bool Counts(UsageWindow window)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+
+        return window.Gates
+            && (!WeeklyCeilingOnly
+                || window.Key != SevenDay
+                || window.Utilization >= WeeklyCeiling);
     }
 
     /// <summary>
@@ -138,9 +192,15 @@ public static class UsagePressure
     {
         ArgumentNullException.ThrowIfNull(window);
 
-        return window.Key == SevenDay
-            ? WeeklyGate(window.ResetsAt, now, zone ?? TimeZoneInfo.Local)
-            : SessionGate;
+        if (window.Key != SevenDay)
+        {
+            return SessionGate;
+        }
+
+        // 【临时】周额度只剩硬顶这一条线，见 WeeklyCeilingOnly。
+        return WeeklyCeilingOnly
+            ? WeeklyCeiling
+            : PaceGate(window.ResetsAt, now, zone);
     }
 
     private const string SevenDay = "seven_day";
@@ -172,9 +232,16 @@ public static class UsagePressure
     /// 拿不到重置时刻就退回 <see cref="WeeklyCeiling"/> —— 算不出配速时不该假装能算，
     /// 但也不能因此完全不设限。
     /// </para>
+    /// <para>
+    /// ⚠️ <see cref="WeeklyCeilingOnly"/> 开着的时候<b>没有人调用它</b>（<see cref="GateFor"/>
+    /// 直接给硬顶）。留着并且继续测，是因为摘掉周额度权重是临时的，这套算术恢复时要能直接用。
+    /// </para>
     /// </remarks>
-    private static double WeeklyGate(DateTimeOffset? resetsAt, DateTimeOffset now, TimeZoneInfo zone)
+    public static double PaceGate(
+        DateTimeOffset? resetsAt, DateTimeOffset now, TimeZoneInfo? zone = null)
     {
+        zone ??= TimeZoneInfo.Local;
+
         if (resetsAt is not { } reset)
         {
             return WeeklyCeiling;

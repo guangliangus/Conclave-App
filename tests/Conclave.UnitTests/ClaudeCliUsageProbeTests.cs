@@ -151,7 +151,7 @@ public sealed class ClaudeCliUsageProbeTests : IDisposable
         var options = Options(script);
         options.ClaudeUsage.CliProbeInterval = TimeSpan.Zero;   // 每次都真跑
         var probe = new ClaudeCliUsageProbe(
-            options, new ExecutableResolver(options), NullLogger<ClaudeCliUsageProbe>.Instance);
+            options, new ClaudeCli(options, new ExecutableResolver(options), NullLogger<ClaudeCli>.Instance), NullLogger<ClaudeCliUsageProbe>.Instance);
 
         Assert.Equal(3, (await probe.ReadAsync(CancellationToken.None)).Windows.Count);
 
@@ -169,7 +169,7 @@ public sealed class ClaudeCliUsageProbeTests : IDisposable
     {
         var options = Options(FakeClaudeRaw("这不是 JSON"));
         var probe = new ClaudeCliUsageProbe(
-            options, new ExecutableResolver(options), NullLogger<ClaudeCliUsageProbe>.Instance);
+            options, new ClaudeCli(options, new ExecutableResolver(options), NullLogger<ClaudeCli>.Instance), NullLogger<ClaudeCliUsageProbe>.Instance);
 
         var (windows, note) = await probe.ReadAsync(CancellationToken.None);
 
@@ -181,7 +181,7 @@ public sealed class ClaudeCliUsageProbeTests : IDisposable
     {
         var options = Options(executable);
         return new ClaudeCliUsageProbe(
-            options, new ExecutableResolver(options), NullLogger<ClaudeCliUsageProbe>.Instance);
+            options, new ClaudeCli(options, new ExecutableResolver(options), NullLogger<ClaudeCli>.Instance), NullLogger<ClaudeCliUsageProbe>.Instance);
     }
 
     private ConclaveOptions Options(string executable)
@@ -217,7 +217,12 @@ public sealed class ClaudeCliUsageProbeTests : IDisposable
             ? string.Empty
             : $"printf x >> '{countTo}'\n";
 
-        return WriteScript($"#!/bin/sh\n{count}cat <<'JSON'\n{payload}\nJSON\n");
+        // 假货也得认 --version：ClaudeCli 会先问一次版本再决定用哪一份 claude，
+        // 而那一问不该算进「探了几次额度」的计数里 —— 它自己是有缓存的。
+        return WriteScript(
+            "#!/bin/sh\n"
+            + "if [ \"$1\" = \"--version\" ]; then echo '2.1.268 (Claude Code)'; exit 0; fi\n"
+            + $"{count}cat <<'JSON'\n{payload}\nJSON\n");
     }
 
     private string FakeClaudeRaw(string stdout)
