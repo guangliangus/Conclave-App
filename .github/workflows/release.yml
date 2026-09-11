@@ -66,7 +66,26 @@ jobs:
           # SHA256SUMS + manifest.json），只把 NOTES.md 排除 —— 它是 release 正文，
           # 不是下载物。第一版写死了 release/*.zip，于是 tar.gz 生成了却没上传，
           # 而 NOTES 正指着那个不存在的文件让人 tar -xzf。
-          mapfile -t ASSETS < <(find release -type f ! -name NOTES.md | sort)
+          #
+          # 不能用 mapfile：runner 上的 /bin/bash 是 3.2（Apple 从 2019 年起就停在这一版，
+          # 因为 4.0 换成了 GPLv3），而 mapfile 是 bash 4.0 才有的内建命令。
+          # v1.0.3 就是挂在那一行上：mapfile: command not found，exit 127。
+          # while read 是 3.2 也有的写法；IFS= 与 -r 保证带空格或反斜杠的文件名不被拆开，
+          # 而 < <(...) 的进程替换让循环跑在当前 shell 里（管道会把它丢进子 shell，
+          # 数组就带不出来了）。
+          ASSETS=()
+          while IFS= read -r asset; do
+            ASSETS+=("$asset")
+          done < <(find release -type f ! -name NOTES.md | sort)
+
+          # 一个资产都没有时要当场失败。gh release create 不带文件照样会成功，
+          # 建出一个只有正文没有下载物的 release —— 而那正是「NOTES 指着一个
+          # 不存在的文件」那类故障最难被发现的形态。
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "release/ 下一个可发布的资产都没有 —— release-assets.sh 没出东西？" >&2
+            exit 1
+          fi
+
           printf '发布资产：%s\n' "${ASSETS[*]}"
 
           # 重跑同一个 tag 时 create 会失败，那就改成往已有的 release 上传（覆盖同名文件）。
