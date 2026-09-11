@@ -563,15 +563,22 @@ public sealed class HttpMesh : IMesh, IDisposable
         return signed.Body<T>();
     }
 
-    /// <summary>从某个节点回拉 <paramref name="fromIndex"/> 起的链段，用于补链。</summary>
+    /// <summary>从某个节点回拉 <paramref name="fromIndex"/> 起的一页链段，用于补链。</summary>
+    /// <remarks>
+    /// <paramref name="take"/> 是<b>请求</b>的页大小，对端会按自己的
+    /// <c>MeshHttpServer.MaxChainPage</c> 再夹一次 —— 所以拿回来的可能比要的少，
+    /// 调用方要按「实际拿到的最大索引」往前挪，不能按页号算偏移。
+    /// </remarks>
     public async Task<IReadOnlyList<Block>> PullChainAsync(
-        Elector peer, long fromIndex, CancellationToken ct)
+        Elector peer, long fromIndex, int take, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(peer);
 
         try
         {
-            var url = $"{peer.Endpoint}/chain?from={fromIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            var url = $"{peer.Endpoint}/chain"
+                + $"?from={fromIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)}"
+                + $"&take={Math.Max(1, take).ToString(System.Globalization.CultureInfo.InvariantCulture)}";
             var blocks = await _http
                 .GetFromJsonAsync<List<Block>>(url, ActaJson.Options, ct)
                 .ConfigureAwait(false);

@@ -54,6 +54,25 @@ public sealed class ClaudeStreamJsonTests
     }
 
     [Fact]
+    public void The_last_result_line_wins()
+    {
+        // ResultLine 是从后往前扫的（正着扫要把几百 MB 的 NDJSON 切成字符串数组）。
+        // 方向一改，「取最后一个」这条语义就得单独钉住 —— 一次会话里出现两个 result
+        // 的形状实测见过（--resume 续跑）。
+        var earlier = Result.Replace("\"result\":\"ok\"", "\"result\":\"旧的\"", StringComparison.Ordinal);
+        var ndjson = string.Join('\n', Init, earlier, Text, Result);
+
+        Assert.Equal(Result, ClaudeReviewRunner.ResultLine(ndjson));
+    }
+
+    [Fact]
+    public void A_trailing_newline_does_not_hide_the_result_line()
+    {
+        // 倒着扫的第一步是找最后一个 '\n'，末尾有空行时那一步会落在空串上。
+        Assert.Equal(Result, ClaudeReviewRunner.ResultLine(string.Join('\n', Init, Result) + "\n"));
+    }
+
+    [Fact]
     public void Without_a_result_line_the_raw_text_comes_back()
     {
         // 让 Parse 去报「不是合法 JSON」并带上原文 —— 那条错误信息比在这里另编一句有用。

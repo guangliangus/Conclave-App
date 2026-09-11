@@ -311,6 +311,23 @@ internal sealed class MutableAllowList(string selfId) : IElectorAllowList
 }
 
 /// <summary>假的更新源：测试直接塞「最新版是哪个」，或者让它抛。</summary>
+internal sealed class FakeUpdateInstaller : IUpdateInstaller
+{
+    internal bool Installable { get; set; } = true;
+
+    internal Exception? Throw { get; set; }
+
+    internal List<ReleaseInfo> Installed { get; } = [];
+
+    public bool CanInstall => Installable;
+
+    public Task InstallAsync(ReleaseInfo release, CancellationToken ct)
+    {
+        Installed.Add(release);
+        return Throw is null ? Task.CompletedTask : Task.FromException(Throw);
+    }
+}
+
 internal sealed class FakeUpdateSource : IUpdateSource
 {
     internal ReleaseInfo? Latest { get; set; }

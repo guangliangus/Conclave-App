@@ -1,8 +1,12 @@
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="Conclave.App.App"
+             Name="Conclave"
              RequestedThemeVariant="Default">
 
+    <!-- Name：Avalonia 的 macOS 后端会把 Application.Name 传给 setProcessName:，
+         这个运行时设的名字压过 Info.plist 的 CFBundleName。不写就用默认值，
+         活动监视器和菜单栏里会显示成「Avalonia Application」。 -->
     <!-- Default：跟随系统深浅色。两套令牌都在 Styles/Theme.axaml 里成对定义。 -->
     <Application.Resources>
         <ResourceDictionary>

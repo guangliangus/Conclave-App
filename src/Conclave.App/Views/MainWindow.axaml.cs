@@ -1,4 +1,6 @@
+using System.Collections.Specialized;
 using System.Reflection;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
@@ -42,12 +44,17 @@ public partial class MainWindow : Window
     /// <see cref="MainViewModel.Log"/> 一起换 —— 订在旧集合上的话，换了一行看日志之后
     /// 就再也不自动滚了。
     /// </remarks>
+    private MainViewModel? _bound;
+    private INotifyCollectionChanged? _watchedLines;
+
     private void Bind()
     {
-        if (DataContext is not MainViewModel vm)
+        if (DataContext is not MainViewModel vm || ReferenceEquals(_bound, vm))
         {
             return;
         }
+
+        _bound = vm;
 
         vm.PropertyChanged += (_, e) =>
         {
@@ -56,13 +63,54 @@ public partial class MainWindow : Window
                 ApplyLogLayout();
             }
 
-            if (e.PropertyName == nameof(MainViewModel.Log) && vm.Log is { } log)
+            if (e.PropertyName == nameof(MainViewModel.Log))
             {
-                log.Lines.CollectionChanged += (_, _) => OnLogLinesChanged();
+                WatchLogLines(vm);
             }
         };
 
         ApplyLogLayout();
+    }
+
+    /// <summary>
+    /// 把「滚到底」挂到当前这份日志的行集合上。
+    /// </summary>
+    /// <remarks>
+    /// <b>先退订再订。</b> 原先是每次 <c>Log</c> 换人就 <c>+=</c> 一个新的 lambda、从不退订，
+    /// 于是开第 N 次日志面板之后，每来一行就要滚 N 次、也就多算 N 次滚动布局 ——
+    /// 而每一次布局都会在 Avalonia 的 macOS 后端里留下一批字体对象。
+    /// </remarks>
+    private void WatchLogLines(MainViewModel vm)
+    {
+        if (_watchedLines is not null)
+        {
+            _watchedLines.CollectionChanged -= OnLogLinesChanged;
+            _watchedLines = null;
+        }
+
+        if (vm.Log is { } log)
+        {
+            log.Lines.CollectionChanged += OnLogLinesChanged;
+            _watchedLines = log.Lines;
+        }
+    }
+
+    /// <summary>
+    /// 窗口显示/隐藏时告诉 ViewModel。
+    /// </summary>
+    /// <remarks>
+    /// 面板的 x 只是 <c>Hide()</c>（<c>App.OnDashboardClosing</c> 把 Closing 取消掉了），
+    /// 所以没有 Closed 事件可用，只能看 <see cref="Visual.IsVisibleProperty"/>。
+    /// 为什么非停不可见 <see cref="MainViewModel.SetVisible"/>。
+    /// </remarks>
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+
+        if (change.Property == IsVisibleProperty && DataContext is MainViewModel vm)
+        {
+            vm.SetVisible(change.GetNewValue<bool>());
+        }
     }
 
     /// <summary>离底部这个距离以内就算「贴着底」。一行大概 17px。</summary>
@@ -199,7 +247,7 @@ public partial class MainWindow : Window
     /// <remarks>
     /// 人自己往上翻的时候不该被拽回来，所以只在已经贴着底部时才滚。
     /// </remarks>
-    private void OnLogLinesChanged()
+    private void OnLogLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         var tail = LogScroll.Extent.Height - LogScroll.Viewport.Height;
         if (tail - LogScroll.Offset.Y <= StickyTail)

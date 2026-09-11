@@ -130,8 +130,8 @@
           </StackPanel>
 
           <Panel DockPanel.Dock="Right" Width="34" IsVisible="{Binding !Layout.Wide}">
-            <Button Theme="{StaticResource GhostButton}" Content="⋯"
-                    Padding="8,2" VerticalAlignment="Center"
+            <Button Theme="{StaticResource IconButton}" Content="⋯"
+                    VerticalAlignment="Center"
                     IsVisible="{Binding HasActions}"
                     ToolTip.Tip="评审 · 认领 · 指派">
               <Button.Flyout>
@@ -264,97 +264,122 @@
       -->
       <Border Grid.Row="0" Classes="topbar" PointerPressed="OnChromeDrag">
         <!--
-          中间那列是 Auto 而不是 <c>*</c>：星号列拿的是「两边分完剩下的」，窗口一窄
-          就被挤成 0，状态先被裁成半截字再整个消失 —— 而它恰恰是这排里最该活到最后的。
-          现在换成右边那列吃剩余宽度并靠右排：品牌与状态各自拿够，挤没了的会是
+          两列：左边那串事实按内容取宽（Auto），右边那组开关吃掉剩余宽度并靠右排。
+          左边<b>不能</b>用 <c>*</c> —— 星号列拿的是「分完剩下的」，窗口一窄就被挤成 0，
+          状态先裁成半截字再整个消失，而它恰恰是这排里最该活到最后的。挤没了的应该是
           右边那组按钮之间的空隙，而不是「这台机器在不在干活」。
+          <para>
+          原先中间还有一列专门放 elector 指纹。它孤零零悬在品牌和开关之间，跟谁都不成
+          一句话 —— 现在并进左边那串，接在「组网」后面。
+          </para>
         -->
-        <Grid ColumnDefinitions="Auto,Auto,*">
+        <Grid ColumnDefinitions="Auto,*">
 
           <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="11">
             <!-- 用图标本体，不另画一个：三条横杠画出来会被当成汉堡菜单 -->
             <Image Source="/Assets/conclave.png" Width="30" Height="30" VerticalAlignment="Center" />
+            <!--
+              左边这一串读起来是一句话：「我跑的是哪一版」「它在不在干活」
+              「我跟谁在一起」「那我是哪一个」—— 同一个问句的四段，隔开放或者
+              窄了扔掉中间某一段，都得让人来回找。
+              所以只有<b>最后</b>那段（身份）会因为窗口变窄而让位：指纹一辈子不变，
+              看一次就够；前面三段每分钟都可能变。
+            -->
             <StackPanel VerticalAlignment="Center" Spacing="2">
-              <!--
-                字标与版本号窄了一起扔，只留图标。这排东西按「没了最不心疼」排序让位：
-                标语 → 字标 → elector 指纹，而<b>状态、两个开关、退出</b>一个都不能少 ——
-                退出更是这个应用唯一的退出口（accessory 应用没有 Cmd+Q）。
-                图标留着，认得出这是哪个窗口就够了。
-              -->
-              <StackPanel Orientation="Horizontal" Spacing="7" IsVisible="{Binding Layout.Mid}">
+              <StackPanel Orientation="Horizontal" Spacing="7">
                 <TextBlock Classes="wordmark" Text="CONCLAVE" />
                 <!-- 版本号原先在浮层头上。浮层退役了，但「我跑的是哪一版」还得看得见 -->
                 <TextBlock Name="VersionText" Classes="mono muted" VerticalAlignment="Bottom" />
+
+                <!--
+                  本节点此刻在干什么。
+                  刻意<b>不</b>做成胶囊：胶囊有底色有描边，看起来像能点 —— 而它只是个状态。
+                  一个色点加一句话就够，颜色本身就是状态：绿 = 空闲、金 = 在评
+                  （全局那套语义色，见 Controls.axaml 的 Ellipse.dot）。
+                -->
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                            Margin="4,0,0,0" ToolTip.Tip="{Binding SelfActivityTip}">
+                  <Ellipse Classes="dot"
+                           Classes.ok="{Binding !SelfIsBusy}"
+                           Classes.gold="{Binding SelfIsBusy}" />
+                  <TextBlock Classes="status"
+                             Classes.ok="{Binding !SelfIsBusy}"
+                             Classes.gold="{Binding SelfIsBusy}"
+                             Text="{Binding SelfActivityText}" />
+                </StackPanel>
+
+                <!--
+                  单机还是组网，紧跟在状态后面 —— 「我在干什么」和「我跟谁在一起」
+                  是连着读的一句话：一个人干，还是四台机器分着干。
+
+                  跟状态同一套画法（细竖线隔开 + 语义色的一句话，没有底色描边），
+                  因为它跟状态是同一类东西：都是<b>事实</b>，都点不动。
+                  之前那枚描边胶囊之所以难看，是它长得像个按钮却什么都不做。
+                  青色 = 组网、灰 = 单机；台数与 tooltip 见 MainViewModel.RenderMeshMode。
+                -->
+                <Border Classes="vrule" />
+                <TextBlock Classes="status"
+                           Classes.info="{Binding MeshIsNetworked}"
+                           Classes.muted="{Binding !MeshIsNetworked}"
+                           Text="{Binding MeshModeText}"
+                           ToolTip.Tip="{Binding MeshModeTip}" />
+
+                <!--
+                  「人:机器」。接在组网后面，因为它回答的是同一个问句的下一段 ——
+                  「我跟谁在一起」之后自然是「那我是哪一个」。放在中间那一列时它孤零零
+                  悬在品牌和开关之间，跟谁都不成一句话。
+
+                  冒号前是人、冒号后是机器。「elector」那个词去掉了：冒号这个形状本身
+                  就说明了「谁的哪一台」，不必再标一遍类型名。同一个人跑好几台节点是常态
+                  （dev-cluster 就是这么用的），所以两半都得在。
+
+                  三段都用等宽 —— 合起来是<b>一个标识符</b>（像 git 的 author、docker 的 tag），
+                  等宽才对得齐，也才不会在名字长短变化时抖。两档颜色分主次：名字用暗字，
+                  指纹用金，金色在这套里的意思就是「跟本节点有关」，而真正区分「哪一台」的
+                  正是指纹（见 Theme.axaml 的三类颜色）。
+
+                  <b>只有它跟着窗口宽度让位</b>，连同前面那根竖线一起 —— 指纹一辈子不变，
+                  看一次就够；左边那三段每分钟都可能变。竖线不跟着藏的话，窄下来会剩一根
+                  杵在行尾的孤线。
+                -->
+                <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center"
+                            IsVisible="{Binding Layout.Wide}"
+                            ToolTip.Tip="{Binding NodeIdTip}">
+                  <Border Classes="vrule" />
+                  <StackPanel Orientation="Horizontal" Spacing="0" VerticalAlignment="Center">
+                    <TextBlock Classes="mono dim" Text="{Binding SelfAccount}" />
+                    <TextBlock Classes="mono muted" Text=":" />
+                    <TextBlock Classes="mono gold" Text="{Binding NodeIdShort}" />
+                  </StackPanel>
+                </StackPanel>
               </StackPanel>
-              <!-- 一句说明，窄了先扔：它是纯装饰，而挤下去会把右边的「退出」切掉 -->
-              <TextBlock Classes="tagline" IsVisible="{Binding Layout.Mid}"
+              <TextBlock Classes="tagline"
                          Text="分布式 AI code review · 决议封存在一条签名哈希链上" />
             </StackPanel>
           </StackPanel>
 
-          <!--
-            本节点：身份 + 此刻在干什么。
-
-            原先这里有五枚胶囊（elector 指纹、az 身份、N 个 project、在跑 1/2、额度 46%），
-            窗口收窄之后它们跟右边的两个开关叠在一起，再收就被裁成半截字。
-            现在只留两枚：<b>elector 指纹</b>（席位、签名、认领、指派全都按它认人，
-            az 身份归进 tooltip）和<b>状态</b>（空闲 / 评审中 #1234）。
-            project 数与额度在别处都有（「在线节点」表的本机行、下面那条额度）。
-
-            状态那枚到 Mid 就显示、身份那枚要 Wide —— 窄的时候「在不在干活」比
-            「我是谁」有用：指纹一直没变过，状态每分钟都可能变。
-          -->
-          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7"
-                      Margin="24,0" VerticalAlignment="Center">
-            <Border Classes="chip gold" IsVisible="{Binding Layout.Wide}">
-              <TextBlock Classes="mono" Text="{Binding NodeIdShort, StringFormat='elector {0}'}"
-                         ToolTip.Tip="{Binding AzIdentity, StringFormat='az 身份 {0}（席位与签名都按 elector 指纹认人）'}" />
-            </Border>
-
-            <!--
-              本节点此刻在干什么。
-
-              刻意<b>不</b>做成胶囊：胶囊有底色有描边，跟右边的「退出」长得一样，
-              看起来像能点 —— 而它只是个状态，点不动。一个色点加一句话就够，
-              颜色本身就是状态：绿 = 空闲、金 = 在评（用的是全局那套语义色，
-              见 Controls.axaml 的 Ellipse.dot）。
-
-              也<b>不再跟着窗口宽度让位</b>。顶栏上最该一眼看到的就是「这台机器
-              在不在干活」：指纹那枚窄了可以扔（它从来不变），这枚不能 ——
-              而且脱掉胶囊的边框内衬之后它本来就窄了一截，最窄的窗口也放得下。
-            -->
-            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
-                        ToolTip.Tip="{Binding SelfActivityTip}">
-              <Ellipse Classes="dot"
-                       Classes.ok="{Binding !SelfIsBusy}"
-                       Classes.gold="{Binding SelfIsBusy}" />
-              <TextBlock Classes="status"
-                         Classes.ok="{Binding !SelfIsBusy}"
-                         Classes.gold="{Binding SelfIsBusy}"
-                         Text="{Binding SelfActivityText}" />
-            </StackPanel>
-          </StackPanel>
-
-          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="12"
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12"
                       HorizontalAlignment="Right" VerticalAlignment="Center">
-            <ToggleSwitch OnContent="自动评审" OffContent="自动评审"
-                          IsChecked="{Binding AutoReview}"
-                          ToolTip.Tip="关闭时只有手动点「评审」才会跑 claude，避免一开机就把所有活跃 PR 全评一遍" />
-            <ToggleSwitch OnContent="投递到 AzDO" OffContent="投递到 AzDO"
-                          IsChecked="{Binding PostToAzureDevOps}"
-                          ToolTip.Tip="开启后公布结论时会往真实 PR 发评论并投票" />
-            <!-- 文字跟着状态变：只变灰跟「按钮坏了」长得一样，见 MainViewModel.PollLabel -->
-            <Button Theme="{StaticResource PrimaryButton}" Content="{Binding PollLabel}"
-                    Command="{Binding PollCommand}" IsEnabled="{Binding !IsPolling}" />
             <!--
-              退出必须在这里。标题栏那个红色的 x <b>只是隐藏</b>（关掉之后轮询与评审在
-              后台继续跑，见 App.OnDashboardClosing），而 accessory 应用没有自己的菜单栏、
-              Cmd+Q 失效 —— 少了这个按钮就只能去活动监视器杀进程。
-              走 code-behind 而不是绑 VM 命令：退出是 Avalonia 生命周期的事，
-              ViewModel 不该知道 desktop.Shutdown() 的存在。
+              两个开关做成胶囊（ToggleChip，见 Theme.axaml）：Fluent 的滑轨在顶栏里
+              又大又黑，跟这一排胶囊不是一套东西。间距比外层的 12 紧一档 ——
+              它们是同一组设置，该看起来是一对，而不是各自孤立的两个按钮。
             -->
-            <Button Content="退出" Click="OnQuitClick"
-                    ToolTip.Tip="退出 Conclave。后台的轮询与评审会一起停，正在跑的 claude 子进程有 5 秒收尾" />
+            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+              <ToggleButton Theme="{StaticResource ToggleChip}" Content="自动评审"
+                            IsChecked="{Binding AutoReview}"
+                            ToolTip.Tip="关闭时只有手动点「评审」才会跑 claude，避免一开机就把所有活跃 PR 全评一遍" />
+              <!-- .hot：开态转告警色。这个开关一开，动的就是同事的 PR，误开必须扎眼 -->
+              <ToggleButton Theme="{StaticResource ToggleChip}" Classes="hot" Content="投递到 AzDO"
+                            IsChecked="{Binding PostToAzureDevOps}"
+                            ToolTip.Tip="开启后公布结论时会往真实 PR 发评论并投票（关着只写本地账本）" />
+            </StackPanel>
+            <!--
+              「立即轮询」撤了：PR 每 30 秒自己轮一遍（ConclaveOptions.PollInterval），
+              手动点一次只是把同一件事提前几秒，而它占着顶栏最显眼的一个位置。
+              「退出」也不在这里了 —— 它是<b>进程</b>级的动作，跟这两个设置不是一类，
+              挨着两个常点的开关放还容易误手。现在在窗口最下面那条状态栏的右端。
+            -->
           </StackPanel>
         </Grid>
       </Border>
@@ -396,14 +421,17 @@
           </Border>
 
           <!--
-            有新版本。装是人点的：安装器会先下载校验，等手上那个 PR 评完再替换 .app 并重启。
-            所以「立即更新」不因为正在评审而灰掉，只在已经点过、正在进行时灰。
+            有新版本。默认不问人：查到就下载校验，等本节点评完手上的 PR 后替换并重启
+            （见 UpdateOptions.AutoInstall）。所以这条横幅是<b>通告</b>而不是<b>提问</b>——
+            第二行说清楚接下来会发生什么，「立即更新」只在关掉了自动更新时才出现，
+            否则一个改变不了任何事的按钮会让人以为不点就不会更新。
           -->
-          <Border Classes="banner gold" Margin="0,0,0,14" IsVisible="{Binding HasUpdate}">
+          <Border Classes="banner info" Margin="0,0,0,14" IsVisible="{Binding HasUpdate}">
             <Grid ColumnDefinitions="*,Auto">
               <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                 <TextBlock Classes="cell" Text="{Binding UpdateText}" />
                 <TextBlock Classes="cell dim" FontSize="11" Text="{Binding UpdateStatus}"
+                           ToolTip.Tip="{Binding UpdateTip}"
                            IsVisible="{Binding UpdateStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
               </StackPanel>
 
@@ -412,7 +440,7 @@
                         Click="OnReleasePageClick"
                         ToolTip.Tip="在浏览器里打开这一版的 GitHub Release 页面" />
                 <Button Theme="{StaticResource PrimaryButton}" Content="立即更新"
-                        IsEnabled="{Binding CanUpdate}"
+                        IsVisible="{Binding CanUpdate}"
                         Command="{Binding UpdateCommand}"
                         ToolTip.Tip="{Binding UpdateTip}" />
               </StackPanel>
@@ -719,6 +747,19 @@
                 <Panel Grid.Row="1">
                   <ScrollViewer>
                     <ItemsControl ItemsSource="{Binding Reviews}">
+                      <!--
+                        虚拟化。这张表最长（评审记录 200 行、Acta 60 行），而 ItemsControl
+                        默认用非虚拟化的 StackPanel —— 所有行连同每行十几个 TextBlock 一直
+                        常驻。行高在这两张表里是齐的（单行 row dense，IsVisible 只切列不切行），
+                        所以换成 VirtualizingStackPanel 不会有变高滚动的抖动。
+                        另外四张表（队列 / 我的 PR / 节点 / 通知）的行会带可选的第二行，
+                        行高不齐；而它们本来就只有几十行，不值得为此冒滚动条跳动的风险。
+                      -->
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                          <VirtualizingStackPanel />
+                        </ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
                       <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:ReviewRow">
                           <Border Classes="row dense" ToolTip.Tip="{Binding Breakdown}">
@@ -787,6 +828,19 @@
                 <Panel Grid.Row="1">
                   <ScrollViewer>
                     <ItemsControl ItemsSource="{Binding Blocks}">
+                      <!--
+                        虚拟化。这张表最长（评审记录 200 行、Acta 60 行），而 ItemsControl
+                        默认用非虚拟化的 StackPanel —— 所有行连同每行十几个 TextBlock 一直
+                        常驻。行高在这两张表里是齐的（单行 row dense，IsVisible 只切列不切行），
+                        所以换成 VirtualizingStackPanel 不会有变高滚动的抖动。
+                        另外四张表（队列 / 我的 PR / 节点 / 通知）的行会带可选的第二行，
+                        行高不齐；而它们本来就只有几十行，不值得为此冒滚动条跳动的风险。
+                      -->
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                          <VirtualizingStackPanel />
+                        </ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
                       <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:BlockRow">
                           <Border Classes="row dense">
@@ -1026,17 +1080,35 @@
           </Grid>
         </Border>
 
-        <!-- ── 状态栏 ───────────────────────────────────────────────── -->
-        <Grid Grid.Row="6" Margin="4,10,4,0" ColumnDefinitions="Auto,*,Auto">
+        <!--
+          ── 状态栏 ─────────────────────────────────────────────────
+
+          这条讲的是「这个进程」：有没有告警、在做什么、链多长。
+          「退出」放在它的右端，理由有三条：
+            · 它是进程级的动作，跟顶栏那两个设置开关不是一类东西；
+            · 挨着两个常点的开关放，误手一下就把后台评审全停了；
+            · 这里永远在，不随窗口宽度收起 —— 而它是这个应用<b>唯一</b>的退出口
+              （标题栏那个红 x 只是隐藏，accessory 应用又没有菜单栏和 Cmd+Q）。
+          所以它必须一直看得见，但不该待在最显眼的地方。
+        -->
+        <Grid Grid.Row="6" Margin="4,10,4,0" ColumnDefinitions="Auto,*,Auto,Auto">
           <Ellipse Grid.Column="0" Classes="dot" Margin="0,0,9,0"
                    Classes.ok="{Binding !HasWarning}"
-                   Classes.gold="{Binding IsPolling}"
                    Classes.bad="{Binding HasWarning}" />
           <TextBlock Grid.Column="1" Classes="cell dim" TextTrimming="CharacterEllipsis"
                      Text="{Binding Status}" />
           <TextBlock Grid.Column="2" Classes="cell muted mono" Margin="16,0,0,0"
+                     VerticalAlignment="Center"
                      Text="{Binding ActaSummary}"
                      ToolTip.Tip="链长与冲突计数。两个节点同时抢同一个链索引时哈希小者胜出，本地那一段重挂到链尾" />
+          <!--
+            走 code-behind 而不是绑 VM 命令：退出是 Avalonia 生命周期的事，
+            ViewModel 不该知道 desktop.Shutdown() 的存在。
+          -->
+          <Button Grid.Column="3" Theme="{StaticResource GhostButton}" Content="退出"
+                  Margin="16,0,0,0" Padding="10,2" VerticalAlignment="Center"
+                  Click="OnQuitClick"
+                  ToolTip.Tip="退出 Conclave。后台的轮询与评审会一起停，正在跑的 claude 子进程有 5 秒收尾。关窗口（红 x）只是隐藏面板，不会停" />
         </Grid>
       </Grid>
 

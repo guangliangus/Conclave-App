@@ -17,6 +17,10 @@
     <ProjectReference Include="../../src/Conclave.Application/Conclave.Application.csproj" />
     <ProjectReference Include="../../src/Conclave.Domain/Conclave.Domain.csproj" />
     <ProjectReference Include="../../src/Conclave.Infrastructure/Conclave.Infrastructure.csproj" />
+    <!-- 只为 RowSync：那段索引挪移的逻辑是整个「刷新不重建 UI」改造的支点，
+         必须能测。这条引用会把 Avalonia 拖进测试程序集，但没有任何测试去初始化它，
+         所以不需要显示环境。架构守卫在另一个项目里，不受影响。 -->
+    <ProjectReference Include="../../src/Conclave.App/Conclave.App.csproj" />
   </ItemGroup>
 
   <ItemGroup>

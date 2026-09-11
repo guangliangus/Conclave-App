@@ -541,6 +541,16 @@ public sealed class AzCliPrSource(
                 $"az {string.Join(' ', args)} 失败（exit {result.ExitCode}）：{result.StdErr.Trim()}");
         }
 
+        // 这里拿到的整份 stdout 要当一个 JSON 文档解析，而截断保留的是<b>尾巴</b> ——
+        // 少了开头的 `[` 或 `{`，解析器只会报一句「意外的字符」，看不出真正的原因。
+        // 所以在这里就说清楚：不是 az 坏了，是输出超过了 ProcessRunner 的上限。
+        if (result.Truncated)
+        {
+            throw new InvalidOperationException(
+                $"az {string.Join(' ', args)} 的输出超过 {ProcessRunner.MaxCapturedChars} 字符已被截断，"
+                + "解析不了。缩小查询范围（project 白名单 / $top）或调高上限");
+        }
+
         // 退出码 0 时 stderr 里通常只有 ADO Server 的那句 WARNING，忽略。
         var stdout = result.StdOut.Trim();
         return string.IsNullOrEmpty(stdout) ? "[]" : stdout;

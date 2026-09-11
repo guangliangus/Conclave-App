@@ -74,7 +74,7 @@ public sealed class SqliteActaTests : IDisposable
         // 「按 PR 查」不再靠 ChainId，靠 revision_id 那一列。
         Assert.Single(await _acta.ReadRevisionAsync("1@aaaaaaaa", ct));
         Assert.Single(await _acta.ReadRevisionAsync("2@bbbbbbbb", ct));
-        Assert.Equal(2, (await _acta.ReadChainAsync(0, ct)).Count);
+        Assert.Equal(2, (await _acta.ReadChainAsync(0, int.MaxValue, ct)).Count);
     }
 
     [Fact]
@@ -101,12 +101,12 @@ public sealed class SqliteActaTests : IDisposable
         // 链上只记完成的评审了。「队列里有什么」是实时状态的事，链只回答「哪些评过了」——
         // 原先那个「Summons 数 > Promulgation 数」的查询把队列建在历史上，
         // PR 在 ADO 上关掉之后没人清，永远留在队列里（实测 41 个里 36 个是僵尸）。
-        Assert.Empty((await _acta.ReadSummaryAsync(ct)).ValidBallots);
-        Assert.Empty((await _acta.ReadSummaryAsync(ct)).Finished);
+        Assert.Empty((await _acta.ReadSummaryAsync([Rev.Id], ct)).ValidBallots);
+        Assert.Empty((await _acta.ReadSummaryAsync([Rev.Id], ct)).Finished);
 
         _ = await _acta.AppendAsync(Rev.Id, BlockKind.Ballot, Ballot(0, ReviewDecision.Reject), ct);
 
-        var afterBallot = await _acta.ReadSummaryAsync(ct);
+        var afterBallot = await _acta.ReadSummaryAsync([Rev.Id], ct);
         Assert.Equal(1, afterBallot.ValidBallots[Rev.Id]);
         Assert.Empty(afterBallot.Finished);
 
@@ -114,7 +114,35 @@ public sealed class SqliteActaTests : IDisposable
             Rev.Id, BlockKind.Promulgation,
             new PromulgationPayload(Rev.Id, ReviewDecision.Reject, [], false, 1, 1), ct);
 
-        Assert.Contains(Rev.Id, (await _acta.ReadSummaryAsync(ct)).Finished);
+        Assert.Contains(Rev.Id, (await _acta.ReadSummaryAsync([Rev.Id], ct)).Finished);
+
+        // 没问到的 revision 不该出现在结果里 —— 摘要现在按 id 限定范围（否则每轮编排
+        // 都要扫一遍只会越来越长的链），漏问一个的后果是它的票数凭空变 0、被重复评审。
+        var elsewhere = await _acta.ReadSummaryAsync(["nobody-asked"], ct);
+        Assert.Empty(elsewhere.ValidBallots);
+        Assert.Empty(elsewhere.Finished);
+
+        Assert.Empty((await _acta.ReadSummaryAsync([], ct)).Finished);
+    }
+
+    [Fact]
+    public async Task Reading_the_chain_honours_the_page_size()
+    {
+        var ct = CancellationToken.None;
+        for (var i = 0; i < 5; i++)
+        {
+            _ = await _acta.AppendAsync(Rev.Id, BlockKind.Ballot, Ballot(i, ReviewDecision.Reject), ct);
+        }
+
+        // 补链是分页拉的：对端一次只给一页，请求方按拿到的最大索引往前挪。
+        var page = await _acta.ReadChainAsync(1, 2, ct);
+        Assert.Equal([1, 2], page.Select(b => b.Index));
+
+        var next = await _acta.ReadChainAsync(3, 2, ct);
+        Assert.Equal([3, 4], next.Select(b => b.Index));
+
+        // 越界的页大小不该把整条链一次吐出来之外的行为 —— 要多少给多少，有多少给多少。
+        Assert.Equal(5, (await _acta.ReadChainAsync(0, 99, ct)).Count);
     }
 
     [Fact]
@@ -125,7 +153,7 @@ public sealed class SqliteActaTests : IDisposable
 
         // Error 票只说明那一轮跑失败了，要换个节点重试 —— 计入的话 quorum=1 时
         // 一次偶发的子进程失败就会被当成「已经评过了」，这个 PR 再也不会被评。
-        var summary = await _acta.ReadSummaryAsync(ct);
+        var summary = await _acta.ReadSummaryAsync([Rev.Id], ct);
         Assert.False(summary.ValidBallots.ContainsKey(Rev.Id));
         Assert.Empty(summary.Finished);
     }
@@ -262,7 +290,7 @@ public sealed class SqliteActaTests : IDisposable
         // 而不触发冲突判定 —— 账本里就会并存两条互不相干的序列。
         Assert.True(foreign.VerifySignature());
         Assert.Equal(ApplyOutcome.Rejected, (await _acta.TryApplyAsync(foreign, ct)).Outcome);
-        Assert.Empty(await _acta.ReadChainAsync(0, ct));
+        Assert.Empty(await _acta.ReadChainAsync(0, int.MaxValue, ct));
     }
 
     [Fact]

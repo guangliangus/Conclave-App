@@ -128,12 +128,37 @@ public interface IActaStore
     /// 这份摘要喂给 <see cref="Domain.QueueProjection.Build"/>。
     /// </para>
     /// </remarks>
-    Task<ChainSummary> ReadSummaryAsync(CancellationToken ct);
+    /// <param name="revisionIds">
+    /// 只问这些 revision。
+    /// <para>
+    /// 早先是无参的「扫一遍全链」：<c>WHERE kind IN ('Ballot','Promulgation')</c> 不带上限，
+    /// 把每一块的 payload 全文捞出来反序列化 —— 而这个方法在<b>每一轮编排</b>（默认 15 秒）
+    /// 都要跑一次。链是 append-only 的，所以那是一条开销随运行时长无限增长的热路径。
+    /// </para>
+    /// <para>
+    /// 调用方本来就只会问队列里那几十个 revision（见 <c>QueueProjection.Build</c> —— 它只对
+    /// <c>Discovered</c> 里出现过的 id 查 ballots/finished），所以限定范围跟原来完全等价，
+    /// 开销却从「链有多长」变成「队列有多长」。
+    /// </para>
+    /// </param>
+    /// <param name="ct">取消令牌。</param>
+    Task<ChainSummary> ReadSummaryAsync(
+        IReadOnlyCollection<string> revisionIds, CancellationToken ct);
 
     /// <summary>
     /// 读全局链，可从某个索引之后开始。供 mesh 补链与完整性校验。
     /// </summary>
-    Task<IReadOnlyList<Block>> ReadChainAsync(long fromIndex, CancellationToken ct);
+    /// <param name="fromIndex">从这个索引起（含）。</param>
+    /// <param name="limit">
+    /// 最多给几块。
+    /// <para>
+    /// 补链原先是「从 N 起<b>全都给我</b>」—— 服务端要把整条链读成 <c>List&lt;Block&gt;</c>
+    /// 再序列化成一个完整的 byte[]，同一时刻两份全链驻留，而链永远在长。
+    /// 分页之后单次请求的内存占用有了上限，代价是补一次链要多几个来回。
+    /// </para>
+    /// </param>
+    /// <param name="ct">取消令牌。</param>
+    Task<IReadOnlyList<Block>> ReadChainAsync(long fromIndex, int limit, CancellationToken ct);
 
     /// <summary>最近写入的若干区块，按链序倒序。供 UI 的账本浏览器用。</summary>
     Task<IReadOnlyList<Block>> ReadRecentAsync(int limit, CancellationToken ct);

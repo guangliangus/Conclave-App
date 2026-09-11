@@ -15,7 +15,6 @@ public sealed partial class MainViewModel : ViewModelBase
 {
     private readonly NodeState _state;
     private readonly IMesh _mesh;
-    private readonly DiscoveryService _discovery;
     private readonly ReviewOrchestrator _orchestrator;
     private readonly ConclaveOptions _options;
     private readonly IReviewLog _reviewLog;
@@ -151,13 +150,35 @@ public sealed partial class MainViewModel : ViewModelBase
     private DateTimeOffset _lastAssignmentSeen = DateTimeOffset.MinValue;
     private bool _readingLedger;
 
+    /// <summary>主面板此刻在不在屏幕上。见 <see cref="SetVisible"/>。</summary>
+    private bool _visible;
+
     /// <summary>公钥指纹全长；顶栏只显示前 8 位，完整值进 tooltip。</summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(NodeIdShort))]
+    [NotifyPropertyChangedFor(nameof(NodeIdShort), nameof(NodeIdTip))]
     public partial string NodeId { get; set; } = "—";
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(NodeIdTip))]
     public partial string AzIdentity { get; set; } = "—";
+
+    /// <summary>
+    /// 顶栏身份里「人」那一半：az 账号的短名。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 跟 <see cref="AzIdentity"/> 分开：那个是给 tooltip 的完整值
+    /// （<c>LIONMAIL\guangliangli</c> 或者一个邮箱），这个是顶栏上要显示的那一截。
+    /// </para>
+    /// <para>
+    /// 也跟 <c>AzName</c> 分开：那个在取不到 az 身份时退回指纹前 8 位，而顶栏这里
+    /// 指纹本来就在冒号后面 —— 退回指纹会变成「35641f20:35641f20」。
+    /// 取不到就明说「未登录」，顶上那条 <see cref="IdentityWarning"/> 横幅会解释后果。
+    /// </para>
+    /// </remarks>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(NodeIdTip))]
+    public partial string SelfAccount { get; set; } = "—";
 
     [ObservableProperty]
     public partial string Status { get; set; } = "启动中";
@@ -167,19 +188,6 @@ public sealed partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial bool PostToAzureDevOps { get; set; }
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(PollLabel))]
-    public partial bool IsPolling { get; set; }
-
-    /// <summary>
-    /// 「立即轮询」按钮上的字。
-    /// </summary>
-    /// <remarks>
-    /// 光靠 IsEnabled 变灰不够：一次轮询要跑好几秒 az 命令，灰掉的按钮跟「坏了」长得一样。
-    /// 按钮自己说「轮询中…」才能让人知道点上了。
-    /// </remarks>
-    public string PollLabel => IsPolling ? "轮询中…" : "立即轮询";
 
     /// <summary>
     /// 顶栏下面那条操作提示。
@@ -223,12 +231,30 @@ public sealed partial class MainViewModel : ViewModelBase
     public partial bool SelfIsBusy { get; set; }
 
     /// <summary>
-    /// 顶部的更新横幅。有新版本才出现；装不装是人点的。
+    /// 单机还是组网。
     /// </summary>
     /// <remarks>
-    /// 「立即更新」不因为本节点正在评审而灰掉：安装器自己会先下载校验、再等手上那个
-    /// 评完才替换（见 <see cref="IUpdateInstaller"/>）。按钮灰掉只在已经点过、正在进行时 ——
-    /// 免得再点一次开出第二个下载。
+    /// 「在线节点 1/1」这一个数分不出两种完全不同的处境：mesh <b>关着</b>（要改配置重启），
+    /// 还是 mesh 开着但<b>还没有邻居</b>（等对面开机，或者指纹没互相写进白名单）。
+    /// 前者要动手，后者只要等 —— 所以模式必须单独说出来。
+    /// </remarks>
+    [ObservableProperty]
+    public partial string MeshModeText { get; set; } = "单机";
+
+    [ObservableProperty]
+    public partial string MeshModeTip { get; set; } = string.Empty;
+
+    /// <summary>组网模式（有没有别的节点无关，只看 mesh 开没开）。界面用它上色。</summary>
+    [ObservableProperty]
+    public partial bool MeshIsNetworked { get; set; }
+
+    /// <summary>
+    /// 顶部的更新横幅。有新版本才出现。
+    /// </summary>
+    /// <remarks>
+    /// 默认<b>不需要人点</b>：查到新版就自动下载校验，等本节点评完手上的 PR 后替换并重启
+    /// （见 <see cref="UpdateOptions.AutoInstall"/>）。所以这条横幅是「告诉你要发生什么」，
+    /// 不是「问你要不要」—— 按钮只在关掉了自动更新时才出现（<see cref="CanUpdate"/>）。
     /// </remarks>
     [ObservableProperty]
     public partial bool HasUpdate { get; set; }
@@ -236,10 +262,23 @@ public sealed partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string UpdateText { get; set; } = string.Empty;
 
-    /// <summary>更新进行到哪一步（下载百分比 / 等评审 / 替换中）；没在更新时为空。</summary>
+    /// <summary>
+    /// 横幅第二行：更新进行到哪一步，或者「接下来会怎样」。
+    /// </summary>
+    /// <remarks>
+    /// 安装器在跑的时候用它的进度（下载百分比 / 等评审 / 替换中）；没在跑的时候不留空 ——
+    /// 「有新版本」而下面什么都不说，人只会去找那个不存在的按钮。
+    /// </remarks>
     [ObservableProperty]
     public partial string UpdateStatus { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 显示「立即更新」按钮。
+    /// </summary>
+    /// <remarks>
+    /// 自动更新开着（且这台机器真能替换）时<b>不</b>显示：那个按钮什么也改变不了，
+    /// 只会让人以为不点就不会更新。关掉自动更新才回到「人点」的老路子。
+    /// </remarks>
     [ObservableProperty]
     public partial bool CanUpdate { get; set; }
 
@@ -495,12 +534,27 @@ public sealed partial class MainViewModel : ViewModelBase
 
     public string NodeIdShort => NodeId.Length > 8 ? NodeId[..8] : NodeId;
 
+    /// <summary>顶栏那串指纹的 tooltip。</summary>
+    /// <remarks>
+    /// <b>全长指纹必须在界面上能拿到。</b> 把一台机器加进 mesh 要做的事就是把它的全长
+    /// 指纹写进对端的 <c>~/.conclave/electors.allow</c>，而顶栏只显示前 8 位。
+    /// 这条 tooltip 原先只有 az 身份，于是全长指纹在整个界面上无处可查 ——
+    /// 只能去翻启动日志里那行「节点身份 …」。
+    /// </remarks>
+    public string NodeIdTip => string.Join(
+        '\n',
+        "az 身份 " + AzIdentity,
+        "elector " + NodeId,
+        string.Empty,
+        "冒号前是人、冒号后是机器：同一个人可以跑好几台节点，",
+        "而席位、签名、认领、指派全都按 elector 指纹认人。",
+        "要让别的机器接受本节点，把上面那串完整指纹写进它的 ~/.conclave/electors.allow");
+
     public bool HasWarning => !string.IsNullOrEmpty(IdentityWarning);
 
     public MainViewModel(
         NodeState state,
         IMesh mesh,
-        DiscoveryService discovery,
         ReviewOrchestrator orchestrator,
         ConclaveOptions options,
         IReviewLog reviewLog,
@@ -515,7 +569,6 @@ public sealed partial class MainViewModel : ViewModelBase
 
         _state = state;
         _mesh = mesh;
-        _discovery = discovery;
         _orchestrator = orchestrator;
         _options = options;
         _reviewLog = reviewLog;
@@ -541,9 +594,11 @@ public sealed partial class MainViewModel : ViewModelBase
 
         // 只剩账单：它没有事件可订阅（写 reviews 投影表的可能是 gossip 进来的别人的票），
         // 只能定时去看。额度已经走 UsageChanged 了，不再挂在这里白转。
+        // 刻意<b>不</b>在这里 Start —— 由 SetVisible 按窗口可见性启停。
+        // 原先是无条件启动的，而这个 ViewModel 是单例、主面板关掉只是 Hide()，
+        // 于是窗口不在屏幕上时它照样每 30 秒把几张表拆了重建。见 SetVisible 的注释。
         _refreshTimer = new DispatcherTimer { Interval = RefreshInterval };
         _refreshTimer.Tick += (_, _) => _ = LoadLedgerAsync();
-        _refreshTimer.Start();
 
         // 单次触发：每次 ShowToast 重新计时，所以连续操作只会看到最后一条
         _toastTimer = new DispatcherTimer { Interval = ToastLifetime };
@@ -552,6 +607,61 @@ public sealed partial class MainViewModel : ViewModelBase
             _toastTimer.Stop();
             ToastText = string.Empty;
         };
+    }
+
+    /// <summary>
+    /// 主面板显示/隐藏时由 <c>MainWindow</c> 推进来。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>这是把那次 40GB 摁住的那道闸。</b> 这个 ViewModel 是单例，而主面板的 x 只是
+    /// <c>Hide()</c>（见 <c>App.OnDashboardClosing</c>）—— 所以在它之前，窗口不在屏幕上的
+    /// 时候两个定时器加 <see cref="NodeState.Changed"/> 照样每 15/30 秒把 PR 队列、账本、
+    /// 通知几张表整个 <c>Clear()</c> 重建一遍。而这个进程平时就是个菜单栏图标，
+    /// 窗口一天也开不了一次。
+    /// </para>
+    /// <para>
+    /// 实测（<c>dotnet-counters</c> + <c>vmmap</c> + 两次 heap 快照）：托管堆全程稳在
+    /// 110MB、分配速率只有几百 KB/5s，而 <c>MALLOC_SMALL</c> 的脏页一路涨；每 100 秒
+    /// 多出约 69 套 <c>TBaseFont</c> / <c>NSCTFont</c> / <c>TTrueTypeMemoryFont</c>，
+    /// 堆里是成百上千个 96KB 与 624KB 的块 —— 正是「把整个字体文件读进内存」的尺寸。
+    /// 也就是说漏的是 <b>Avalonia 12.1.2 macOS 后端的原生内存</b>，每重建一轮界面漏一批，
+    /// 被「永不停的刷新」放大成每分钟几十 MB。本项目里没有任何自定义绘制，也没碰过
+    /// <c>FormattedText</c> / <c>Typeface</c>，只有 <c>Program.BuildAvaloniaApp</c> 里
+    /// 一次性的 <c>.WithInterFont()</c>。
+    /// </para>
+    /// <para>
+    /// 那个泄漏不归这里修（该给 Avalonia 提 issue），但「没人在看的时候不重画」本来就是
+    /// 对的：它把放大系数拿掉了，顺带也省掉了一天到晚的无用功。菜单栏图标那条路
+    /// <b>不受影响</b> —— 它订的是 <see cref="NodeState.Changed"/> 而不是这个 ViewModel
+    /// （见 <c>App.WatchReviewingState</c>），所以窗口没开时图标照样跟着评审状态换脸。
+    /// </para>
+    /// </remarks>
+    public void SetVisible(bool visible)
+    {
+        if (_visible == visible)
+        {
+            return;
+        }
+
+        _visible = visible;
+
+        if (visible)
+        {
+            _refreshTimer.Start();
+            Log?.Resume();
+
+            // 隐藏期间攒下的变化在这里一次补齐。Refresh 是全量重建、从 NodeState 现读，
+            // 所以不需要记「欠了几次」—— 做一次就是最新的。
+            Refresh();
+            return;
+        }
+
+        _refreshTimer.Stop();
+        _liveTimer.Stop();
+        _toastTimer.Stop();
+        ToastText = string.Empty;
+        Log?.Suspend();
     }
 
     /// <summary>
@@ -582,20 +692,16 @@ public sealed partial class MainViewModel : ViewModelBase
             UsageDetail = reading.Detail;
 
             var now = DateTimeOffset.Now;
-            UsageWindows.Clear();
+            // 这一块每 60 秒必刷（ReadAt 每次都不同），而百分比多半没变 ——
+            // 就地对齐之后，没变的那几条一次布局都不会发生。
+            List<UsageWindowRow> windows = reading.Windows.Count > 0
+                ? [.. reading.Windows.Select(w => new UsageWindowRow(w, now))]
+                : unbounded
+                    ? []
+                    // 折算来源拆不出窗口，但那个数照样决定入席，所以仍然画一条。
+                    : [new UsageWindowRow("按预算折算", reading.Utilization, reading.Detail)];
 
-            if (reading.Windows.Count > 0)
-            {
-                foreach (var window in reading.Windows)
-                {
-                    UsageWindows.Add(new UsageWindowRow(window, now));
-                }
-            }
-            else if (!unbounded)
-            {
-                // 折算来源拆不出窗口，但那个数照样决定入席，所以仍然画一条。
-                UsageWindows.Add(new UsageWindowRow("按预算折算", reading.Utilization, reading.Detail));
-            }
+            RowSync.Apply(UsageWindows, windows, static r => r.Label);
 
             UsageEmpty = UsageWindows.Count == 0;
 
@@ -649,11 +755,12 @@ public sealed partial class MainViewModel : ViewModelBase
                 .ConfigureAwait(true);
             var health = await _acta.ReadHealthAsync(CancellationToken.None).ConfigureAwait(true);
 
-            Reviews.Clear();
-            foreach (var record in records)
-            {
-                Reviews.Add(new ReviewRow(record, OrgUrl, Layout));
-            }
+            // 这张表最大（200 行 × 十几个单元格），而且每 30 秒刷一次 ——
+            // Clear() 重建的代价最重的就是它。block_hash 是账本里的主键，天然唯一。
+            RowSync.Apply(
+                Reviews,
+                [.. records.Select(r => new ReviewRow(r, OrgUrl, Layout))],
+                static r => r.BlockHash);
 
             ReviewsEmpty = Reviews.Count == 0;
 
@@ -698,11 +805,11 @@ public sealed partial class MainViewModel : ViewModelBase
     {
         if (Dispatcher.UIThread.CheckAccess())
         {
-            RenderUsage();
+            RenderUsageIfVisible();
         }
         else
         {
-            Dispatcher.UIThread.Post(RenderUsage);
+            Dispatcher.UIThread.Post(RenderUsageIfVisible);
         }
     }
 
@@ -711,11 +818,29 @@ public sealed partial class MainViewModel : ViewModelBase
     {
         if (Dispatcher.UIThread.CheckAccess())
         {
-            Refresh();
+            RefreshIfVisible();
         }
         else
         {
-            Dispatcher.UIThread.Post(Refresh);
+            Dispatcher.UIThread.Post(RefreshIfVisible);
+        }
+    }
+
+    /// <summary>看得见才重建。看不见时什么都不做，理由见 <see cref="SetVisible"/>。</summary>
+    private void RefreshIfVisible()
+    {
+        if (_visible)
+        {
+            Refresh();
+        }
+    }
+
+    /// <summary>同上，只是额度那一块。</summary>
+    private void RenderUsageIfVisible()
+    {
+        if (_visible)
+        {
+            RenderUsage();
         }
     }
 
@@ -725,6 +850,9 @@ public sealed partial class MainViewModel : ViewModelBase
 
         NodeId = self.Id;
         AzIdentity = string.IsNullOrEmpty(self.AzIdentity) ? "(未取到)" : self.AzIdentity;
+        SelfAccount = string.IsNullOrWhiteSpace(self.AzIdentity)
+            ? "未登录"
+            : Labels.ShortAccount(self.AzIdentity);
 
         // 工具找不到与「没登录」是两回事，提示必须分开：从 Finder 启动 .app 时
         // LaunchServices 只给最小 PATH，az 根本不在里面，此时叫人去 az devops login
@@ -779,7 +907,7 @@ public sealed partial class MainViewModel : ViewModelBase
         var peers = _mesh.Members
             .Where(m => m.Id != self.Id)
             .Select(m => new PeerInfo(
-                m.Id,
+                m,
                 PeerName(m),
                 PeerLabel(m),
                 IsIdle: m.IsAlive(now) && m.RunningJobs == 0 && m.HasHeadroom))
@@ -799,8 +927,11 @@ public sealed partial class MainViewModel : ViewModelBase
         var selfOccupied = myClaims.Count > 0
             || _state.Pipeline.Any(v => v.ReviewingBy == self.Id);
 
-        Pipeline.Clear();
-        Mine.Clear();
+        // 先算出这一轮该有哪些行，最后交给 RowSync 就地对齐 —— 不再 Clear() 重建整张表，
+        // 理由见 RowSync 的注释（每重建一轮界面会漏一批 CoreText 字体对象）。
+        var queueRows = new List<PrRow>();
+        var mineRows = new List<PrRow>();
+
         foreach (var view in _state.Pipeline
             .OrderBy(v => v.Decision is not null)
             .ThenByDescending(v => v.Pr.PrId))
@@ -858,43 +989,48 @@ public sealed partial class MainViewModel : ViewModelBase
             // 本节点评不了它（硬规则），也认领不了，能做的只有指派给别人。
             if (row.IsMine)
             {
-                Mine.Add(row);
+                mineRows.Add(row);
             }
             else
             {
-                Pipeline.Add(row);
+                queueRows.Add(row);
             }
         }
+
+        RowSync.Apply(Pipeline, queueRows, static r => r.RevisionId);
+        RowSync.Apply(Mine, mineRows, static r => r.RevisionId);
 
         PipelineEmpty = Pipeline.Count == 0;
         MineEmpty = Mine.Count == 0;
 
         RenderNodes(self);
         RenderSelfActivity(self);
-        RenderUpdate(self);
+        RenderUpdate();
 
-        Pending.Clear();
-        foreach (var request in _mesh.State.Pending.OrderBy(p => p.At))
-        {
-            Pending.Add(new PendingRow(
-                request, AcceptCommand, DeclineCommand, _responding.Contains(request.Id)));
-        }
+        RowSync.Apply(
+            Pending,
+            [.. _mesh.State.Pending
+                .OrderBy(p => p.At)
+                .Select(p => new PendingRow(
+                    p, AcceptCommand, DeclineCommand, _responding.Contains(p.Id)))],
+            static r => r.Id);
 
         HasPending = Pending.Count > 0;
 
-        Blocks.Clear();
-        foreach (var block in _state.RecentBlocks)
-        {
-            Blocks.Add(new BlockRow(block));
-        }
+        // 区块哈希天然唯一，而且链是 append-only —— 稳态下这张表一个事件都不会发。
+        RowSync.Apply(
+            Blocks,
+            [.. _state.RecentBlocks.Select(b => new BlockRow(b))],
+            static r => r.Hash);
 
         BlocksEmpty = Blocks.Count == 0;
 
-        Notices.Clear();
-        foreach (var notice in _state.Notices)
-        {
-            Notices.Add(new NoticeRow(notice));
-        }
+        // 通知没有 id，用「发生时刻 + 标题」当身份：NodeState.Notify 已经把一分钟内
+        // 完全相同的一条挡掉了，所以这个组合在列表里是唯一的。
+        RowSync.Apply(
+            Notices,
+            [.. _state.Notices.Select(n => new NoticeRow(n))],
+            static r => r.Key);
 
         NoticesEmpty = Notices.Count == 0;
 
@@ -925,7 +1061,7 @@ public sealed partial class MainViewModel : ViewModelBase
     /// </remarks>
     private void SyncLiveTimer()
     {
-        var needed = Tab switch
+        var needed = _visible && Tab switch
         {
             // 节点页每行都显示「上次心跳多久前」，恒需要。
             MainTab.Nodes => true,
@@ -967,6 +1103,46 @@ public sealed partial class MainViewModel : ViewModelBase
         }
 
         Refresh();
+    }
+
+    /// <summary>
+    /// 顶栏那枚「单机 / 组网」胶囊。
+    /// </summary>
+    /// <remarks>
+    /// 台数含本机，跟「在线节点」那个 tab 的分母一致 —— 同一件事在两处显示成两个数
+    /// 只会让人怀疑哪个是真的。白名单关掉（TrustAllElectors）是个联调开关，
+    /// 它决定「谁能让你的机器起 claude 跑 Bash」，所以在 tooltip 里点名。
+    /// </remarks>
+    private void RenderMeshMode(DateTimeOffset now)
+    {
+        var mesh = _options.Mesh;
+
+        if (!mesh.Enabled)
+        {
+            MeshIsNetworked = false;
+            MeshModeText = "单机模式";
+            MeshModeTip = "mesh 关着：不发也不收心跳，队列与席位只有本机。"
+                + "要组网就把 Conclave:Mesh:Enabled 设为 true 后重启";
+            return;
+        }
+
+        MeshIsNetworked = true;
+
+        var alive = _mesh.Members.Count(m => m.IsAlive(now));
+
+        MeshModeText = alive > 1
+            ? string.Create(CultureInfo.InvariantCulture, $"组网 {alive} 台")
+            : "组网（就本机）";
+
+        MeshModeTip = string.Create(
+            CultureInfo.InvariantCulture,
+            $"心跳 {mesh.MulticastAddress}:{mesh.BeaconPort}（UDP 组播）· 载荷 HTTP :{mesh.HttpPort}")
+            + (alive > 1
+                ? "\n席位在这些节点间分配，每个节点同时只评一个 PR"
+                : "\n还没收到别的节点：对面没开、不在同一个二层网段、或者指纹没互相写进 electors.allow")
+            + (mesh.TrustAllElectors
+                ? "\n⚠️ 白名单已关闭（TrustAllElectors）：任何能验签的节点都能把评审任务派到本机"
+                : string.Empty);
     }
 
     /// <summary>
@@ -1014,21 +1190,23 @@ public sealed partial class MainViewModel : ViewModelBase
             .GroupBy(v => v.ReviewingBy!)
             .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)[.. g.Select(v => v.Revision.Id)]);
 
-        Nodes.Clear();
-        foreach (var node in _mesh.Members
-            .OrderByDescending(m => m.Id == self.Id)
-            .ThenByDescending(m => m.IsAlive(now))
-            .ThenBy(m => m.AzIdentity, StringComparer.OrdinalIgnoreCase))
-        {
-            Nodes.Add(new NodeRow(
-                node,
-                node.Id == self.Id,
-                now,
-                reviewing.TryGetValue(node.Id, out var ids) ? ids : [],
-                Layout));
-        }
+        RowSync.Apply(
+            Nodes,
+            [.. _mesh.Members
+                .OrderByDescending(m => m.Id == self.Id)
+                .ThenByDescending(m => m.IsAlive(now))
+                .ThenBy(m => m.AzIdentity, StringComparer.OrdinalIgnoreCase)
+                .Select(m => new NodeRow(
+                    m,
+                    m.Id == self.Id,
+                    now,
+                    reviewing.TryGetValue(m.Id, out var ids) ? ids : [],
+                    Layout))],
+            static r => r.Id);
 
         NodesEmpty = Nodes.Count == 0;
+
+        RenderMeshMode(now);
     }
 
     /// <summary>
@@ -1136,26 +1314,38 @@ public sealed partial class MainViewModel : ViewModelBase
     private string TickWait => _options.OrchestratorInterval.TotalSeconds
         .ToString("F0", CultureInfo.InvariantCulture);
 
-    private void RenderUpdate(Elector self)
+    private void RenderUpdate()
     {
         var release = _state.UpdateAvailable;
         var busy = _state.UpdateInProgress;
+
+        // 「想自动装」和「这台机器装得了」是两件事：dotnet run 起的开发进程不在 .app 里，
+        // 没有可替换的目标 —— 那时候要说清楚，不能显示成「即将自动更新」然后什么都不发生。
+        var wants = _options.Update.AutoInstall;
+        var auto = wants && _installer.CanInstall;
 
         HasUpdate = release is not null;
         UpdateText = release is null
             ? string.Empty
             : $"有新版本 v{release.Version}（本机 v{AppInfo.Version}）";
-        UpdateStatus = _state.UpdateStatus;
-        CanUpdate = release is not null && !busy;
+        CanUpdate = release is not null && !busy && !wants && _installer.CanInstall;
 
-        var occupied = _state.Pipeline.Any(v => v.ReviewingBy == self.Id);
+        // 安装器一动起来就用它的进度；还没动的时候说清楚「接下来会自己发生什么」。
+        // 这条横幅是<b>通告</b>：三种措辞都不能出现「请你去下载」——
+        // 自动更新的全部意义就是不必有人去做这件事。
+        UpdateStatus = _state.UpdateStatus.Length > 0
+            ? _state.UpdateStatus
+            : auto
+                ? "会自动下载校验，等本节点空闲后替换并重启，不用管"
+                : wants
+                    ? "开发态构建：进程不在 Conclave.app 里，不做就地替换"
+                    : "自动更新已关掉（Conclave:Update:AutoInstall）";
+
         UpdateTip = busy
-            ? "正在更新，别再点一次"
-            : occupied
-                ? "会先下载、校验，等手上这个 PR 评完再替换 Conclave.app 并重启"
-                : string.Create(
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    $"下载（约 {(release?.Bytes ?? 0) / 1_048_576.0:F0} MB）、校验、替换 Conclave.app 并重启。旧版留一份 .previous");
+            ? "正在更新，别打断它"
+            : string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"下载（约 {(release?.Bytes ?? 0) / 1_048_576.0:F0} MB）、校验、替换 Conclave.app 并重启。旧版留一份 .previous，新版起不来时能换回去");
     }
 
     /// <summary>
@@ -1181,31 +1371,6 @@ public sealed partial class MainViewModel : ViewModelBase
             // 安装器已经把失败写进状态和通知了；这里只是别让它成为未观察的异常。
             _logger.LogError(ex, "更新到 v{Version} 失败", release.Version);
             Status = "更新失败：" + ex.Message;
-        }
-    }
-
-    [RelayCommand]
-    private async Task PollAsync()
-    {
-        if (IsPolling)
-        {
-            return;
-        }
-
-        IsPolling = true;
-        try
-        {
-            await _discovery.PollOnceAsync(CancellationToken.None).ConfigureAwait(true);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "手动轮询失败");
-            Status = $"轮询失败：{ex.Message}";
-            ShowToast($"轮询失败：{ex.Message}", BadgeTone.Bad);
-        }
-        finally
-        {
-            IsPolling = false;
         }
     }
 

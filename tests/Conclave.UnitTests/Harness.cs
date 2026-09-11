@@ -139,7 +139,7 @@ internal sealed class Harness : IDisposable
 
     /// <summary>整条全局链，用来验证索引连续与哈希链完整。</summary>
     internal Task<IReadOnlyList<Block>> WholeChainAsync()
-        => Acta.ReadChainAsync(0, CancellationToken.None);
+        => Acta.ReadChainAsync(0, int.MaxValue, CancellationToken.None);
 
     internal async Task<ChainState> StateOfAsync(Revision rev)
         => ActaProjection.Project(await ChainAsync(rev), rev.Id);

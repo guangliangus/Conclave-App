@@ -128,6 +128,16 @@ public sealed class ClaudeReviewRunner(
                 Error: $"claude 退出码 {result.ExitCode}：{Truncate(result.StdErr, 2000)}");
         }
 
+        if (result.Truncated)
+        {
+            // 说出来而不是让它表现成「解析不到契约」。stream-json 要的那一行在末尾、
+            // 所以多半还是解得出来的，但半年后回看这张票时得知道当时输出被截过。
+            logger.LogWarning(
+                "{Revision} round={Round} 的 claude 输出超过 {Max} 字符，开头已被丢弃",
+                revision.Id, round, ProcessRunner.MaxCapturedChars);
+            progress.Append(revision.Id, "⚠️ 输出过大，日志开头已被丢弃");
+        }
+
         var ballot = Parse(revision, round, ResultLine(result.StdOut), sw.ElapsedMilliseconds);
         progress.End(
             revision.Id,
@@ -142,38 +152,51 @@ public sealed class ClaudeReviewRunner(
     /// 从 NDJSON 里挑出最后那个 <c>type=result</c> 的对象。
     /// </summary>
     /// <remarks>
+    /// <para>
     /// 它跟 <c>--output-format json</c> 的输出是同一个形状，所以 <see cref="Parse"/> 不用改。
     /// 一行都挑不出来时原样返回 —— 让 Parse 去报「不是合法 JSON」，那条错误信息比
     /// 这里另编一句更有用（它会带上原文）。
+    /// </para>
+    /// <para>
+    /// <b>从后往前扫，而且不 <c>Split</c>。</b> 要找的那一行是最后一个事件，所以正着扫
+    /// 意味着把整份 NDJSON 切成一个几十万元素的字符串数组（又一份完整拷贝），再对每一行
+    /// 起一次 <see cref="JsonDocument"/> —— 而 <c>stream-json --verbose</c> 会把每个工具
+    /// 返回体的全文都打出来，那份输出本身就能有几百 MB。倒着扫通常第一行就命中。
+    /// </para>
     /// </remarks>
     internal static string ResultLine(string ndjson)
     {
-        var found = string.Empty;
+        var end = ndjson.Length;
 
-        foreach (var line in ndjson.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        while (end > 0)
         {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0 || trimmed[0] != '{')
+            var start = ndjson.LastIndexOf('\n', end - 1) + 1;
+            var line = ndjson.AsSpan(start, end - start).Trim();
+
+            if (line.Length > 0 && line[0] == '{' && IsResult(line))
             {
-                continue;
+                return line.ToString();
             }
 
-            try
-            {
-                using var doc = JsonDocument.Parse(trimmed);
-                if (doc.RootElement.TryGetProperty("type", out var type)
-                    && type.ValueEquals("result"))
-                {
-                    found = trimmed;
-                }
-            }
-            catch (JsonException)
-            {
-                // 不是完整 JSON 的行（比如被截断的）直接跳过。
-            }
+            end = start - 1;   // 跳过这一行的换行符；start 为 0 时变成 -1，循环结束
         }
 
-        return found.Length > 0 ? found : ndjson;
+        return ndjson;
+    }
+
+    /// <summary>这一行是不是 <c>type=result</c> 的事件。认不出（半行、非 JSON）一律 false。</summary>
+    private static bool IsResult(ReadOnlySpan<char> line)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(line.ToString());
+            return doc.RootElement.TryGetProperty("type", out var type) && type.ValueEquals("result");
+        }
+        catch (JsonException)
+        {
+            // 不是完整 JSON 的行（比如被截断的）直接跳过。
+            return false;
+        }
     }
 
     /// <summary>

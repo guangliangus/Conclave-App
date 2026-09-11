@@ -231,14 +231,14 @@
   -->
   <ControlTheme x:Key="MenuButton" TargetType="Button">
     <Setter Property="Cursor" Value="Hand" />
-    <Setter Property="FontSize" Value="12" />
-    <Setter Property="Padding" Value="10,6" />
+    <Setter Property="FontSize" Value="12.5" />
+    <Setter Property="Padding" Value="11,6" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
     <Setter Property="HorizontalContentAlignment" Value="Left" />
     <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
     <Setter Property="Template">
       <ControlTemplate>
-        <Border Name="bg" CornerRadius="7" Padding="{TemplateBinding Padding}"
+        <Border Name="bg" CornerRadius="6" Padding="{TemplateBinding Padding}"
                 Background="Transparent">
           <ContentPresenter Content="{TemplateBinding Content}"
                             Foreground="{TemplateBinding Foreground}"
@@ -247,14 +247,20 @@
       </ControlTemplate>
     </Setter>
 
+    <!--
+      悬浮态是<b>实心</b>强调色配反色文字，不是淡底配蓝字。
+      淡底那种画法在菜单里会读成「一颗按钮」——菜单项本来就都能点，
+      再给每一项画个按钮壳只会让人以为它跟别的项不是一类东西。
+      实心一条横杠是「光标在这一行」的通用写法（系统菜单、编辑器菜单都是）。
+    -->
     <Style Selector="^:pointerover /template/ Border#bg">
-      <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+      <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
     </Style>
     <Style Selector="^:pointerover">
-      <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource AccentInkBrush}" />
     </Style>
     <Style Selector="^:pressed /template/ Border#bg">
-      <Setter Property="Opacity" Value="0.7" />
+      <Setter Property="Opacity" Value="0.8" />
     </Style>
 
     <!--
@@ -268,6 +274,40 @@
     </Style>
     <Style Selector="^:disabled /template/ Border#bg">
       <Setter Property="Background" Value="Transparent" />
+    </Style>
+  </ControlTheme>
+
+  <!--
+    图标按钮。行尾那个「⋯」用它。
+
+    原先借的是 GhostButton —— 那是个<b>描边胶囊</b>，给「日志 / 认领 / 指派」这种
+    带字的动作用没问题，套在一个三点符号上就变成一枚空心药丸，比它要触发的菜单还抢眼。
+    这里改成没有描边的圆角小方块：静态一层浅底表示「这儿能点」，悬浮才上强调色。
+  -->
+  <ControlTheme x:Key="IconButton" TargetType="Button">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="Padding" Value="7,0,7,2" />
+    <Setter Property="Foreground" Value="{DynamicResource TextDimBrush}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="bg" CornerRadius="6" Padding="{TemplateBinding Padding}"
+                Background="{DynamicResource Surface2Brush}">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            Foreground="{TemplateBinding Foreground}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+      </ControlTemplate>
+    </Setter>
+
+    <Style Selector="^:pointerover /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+    </Style>
+    <Style Selector="^:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+    </Style>
+    <Style Selector="^:pressed /template/ Border#bg">
+      <Setter Property="Opacity" Value="0.7" />
     </Style>
   </ControlTheme>
 
@@ -307,5 +347,79 @@
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
   </ControlTheme>
+
+  <!--
+    开关胶囊。<c>ToggleSwitch</c> 退役换成它：Fluent 那个滑轨在顶栏里又大又黑
+    （关态的把手取 Foreground，在浅色主题下就是一颗黑点），跟这一排胶囊完全不是
+    一套东西；而且开关只有两个状态，用不着一条会滑动的轨道来表达。
+
+    胶囊本来就长得像能点 —— 顶栏那枚「空闲 / 评审中」正是因为这一点刻意<b>不</b>做成
+    胶囊（见 MainWindow.axaml）。既然如此，真正能点的东西就该是胶囊。
+
+    状态靠色点 + 颜色 + 字重三样一起读，跟全局那套语义色一致（见 Ellipse.dot）：
+      关 = 空心灰点、暗字 · 开 = 实心彩点、同色描边与底色、半粗字
+
+    <c>.hot</c> 是给「开了会动到别人」的开关用的：开态转成告警色而不是强调色。
+    强调色的意思是「这是正常的活动状态」，而「往同事的 PR 里发评论并投票」被误开了
+    应该扎眼 —— 颜色本身就是那道提醒。
+  -->
+  <ControlTheme x:Key="ToggleChip" TargetType="ToggleButton">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="FontSize" Value="11.5" />
+    <Setter Property="Padding" Value="9,4" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="bg" CornerRadius="7" Padding="{TemplateBinding Padding}"
+                Background="Transparent" BorderThickness="1"
+                BorderBrush="{DynamicResource BorderBrush}">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <Ellipse Name="dot" Width="7" Height="7" VerticalAlignment="Center"
+                     Fill="Transparent" StrokeThickness="1.5"
+                     Stroke="{DynamicResource TextMutedBrush}" />
+            <ContentPresenter Content="{TemplateBinding Content}"
+                              Foreground="{TemplateBinding Foreground}"
+                              VerticalAlignment="Center" />
+          </StackPanel>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+
+    <Style Selector="^:pointerover /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+    </Style>
+    <Style Selector="^:pointerover">
+      <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+    </Style>
+
+    <Style Selector="^:checked /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+    </Style>
+    <Style Selector="^:checked /template/ Ellipse#dot">
+      <Setter Property="Fill" Value="{DynamicResource AccentBrush}" />
+      <Setter Property="Stroke" Value="{DynamicResource AccentBrush}" />
+    </Style>
+    <Style Selector="^:checked">
+      <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <!-- 放在 :checked 之后才压得住它 -->
+    <Style Selector="^.hot:checked /template/ Border#bg">
+      <Setter Property="Background" Value="{DynamicResource WarnSoftBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource WarnBrush}" />
+    </Style>
+    <Style Selector="^.hot:checked /template/ Ellipse#dot">
+      <Setter Property="Fill" Value="{DynamicResource WarnBrush}" />
+      <Setter Property="Stroke" Value="{DynamicResource WarnBrush}" />
+    </Style>
+    <Style Selector="^.hot:checked">
+      <Setter Property="Foreground" Value="{DynamicResource WarnBrush}" />
+    </Style>
+  </ControlTheme>
+
 
 </ResourceDictionary>

@@ -111,6 +111,17 @@
     <Setter Property="Padding" Value="13,10" />
   </Style>
 
+  <!--
+    通告版的横幅：说一件正在发生的事，不要人做什么。
+    告警色（上面那档）是留给「不处理就一直卡着」的东西的 —— 缺 az 身份、
+    有人在等你确认指派。「有新版本，空闲后自动装」不是那种事，用它的颜色
+    会让人以为得动手，而恰恰不用。
+  -->
+  <Style Selector="Border.banner.info">
+    <Setter Property="Background" Value="{DynamicResource InfoSoftBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource InfoBrush}" />
+  </Style>
+
   <Style Selector="GridSplitter.splitter">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="Height" Value="10" />
@@ -229,6 +240,10 @@
 
   <Style Selector="TextBlock.bad">
     <Setter Property="Foreground" Value="{DynamicResource BadBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.info">
+    <Setter Property="Foreground" Value="{DynamicResource InfoBrush}" />
   </Style>
 
   <Style Selector="TextBlock.num">
@@ -452,19 +467,16 @@
 
   <!-- ── 其他控件 ───────────────────────────────────────────────────── -->
 
-  <Style Selector="ToggleSwitch">
-    <Setter Property="FontSize" Value="12" />
-    <Setter Property="Foreground" Value="{DynamicResource TextDimBrush}" />
-    <Setter Property="MinWidth" Value="0" />
-    <Setter Property="Cursor" Value="Hand" />
-  </Style>
-
-  <!-- 弹出层。跟卡片一套配色，圆角比卡片小一档 -->
+  <!--
+    弹出层。跟卡片一套配色。
+    描边用 BorderBrush 而不是 BorderStrongBrush：浮层已经靠悬空区分层次了，
+    再加一道重边框会让它看起来像被框住的一块，而不是浮在上面的一层。
+  -->
   <Style Selector="FlyoutPresenter">
     <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
-    <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="CornerRadius" Value="11" />
     <Setter Property="Padding" Value="5" />
     <Setter Property="MinWidth" Value="0" />
   </Style>
@@ -472,6 +484,19 @@
   <Style Selector="StackPanel.menu">
     <Setter Property="Spacing" Value="1" />
     <Setter Property="MinWidth" Value="146" />
+  </Style>
+
+  <!--
+    细竖线。顶栏里把并排的两段状态隔开。
+    比中点「·」更轻 —— 中点是标点，会被读成同一句话的一部分；
+    这两段是各自独立的事实（本节点在干什么 / 跟谁在一起）。
+  -->
+  <Style Selector="Border.vrule">
+    <Setter Property="Width" Value="1" />
+    <Setter Property="Height" Value="11" />
+    <Setter Property="Margin" Value="3,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Background" Value="{DynamicResource BorderStrongBrush}" />
   </Style>
 
   <Style Selector="Border.menu-sep">

@@ -25,6 +25,40 @@ namespace Conclave.Infrastructure.Mesh;
 /// </remarks>
 public sealed class MeshHttpServer : IDisposable
 {
+    /// <summary>
+    /// 同时处理几个请求。
+    /// </summary>
+    /// <remarks>
+    /// 原先是每来一个请求就 <c>Task.Run</c> 一个，没有任何上限 —— 而 <c>GET /chain</c>
+    /// 单次就要把一段链读进内存再整个序列化一遍。补链风暴（多个节点同时发现自己缺块）
+    /// 下这是「并发数 × 单次峰值」，没有封顶。
+    /// <para>
+    /// 闸在 <c>GetContextAsync</c> <b>之前</b>：不收新请求，压力就退到 TCP 连接队列上，
+    /// 由对端的超时去自然退避，而不是在本进程里排成一堆各自攥着请求体的 Task。
+    /// </para>
+    /// </remarks>
+    private const int MaxConcurrentRequests = 16;
+
+    /// <summary>
+    /// 请求体最大字节数。
+    /// </summary>
+    /// <remarks>
+    /// <c>POST /blocks</c> 原先是 <c>ReadToEndAsync</c>，对端塞多大就吃多大 ——
+    /// 一个区块正常是几 KB，八兆已经是三个数量级的余量。超了回 413，
+    /// 而不是先把它读进内存再判断。
+    /// </remarks>
+    private const int MaxBodyBytes = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// 一次 <c>GET /chain</c> 最多给几块。
+    /// </summary>
+    /// <remarks>
+    /// 补链方按 <c>?take=</c> 分页往前挪（见 <c>MeshService.CatchUpAsync</c>）。
+    /// 一块含 finding 全文时能有几 KB，500 块的响应体量级在几 MB，可控。
+    /// </remarks>
+    internal const int MaxChainPage = 500;
+
+    private readonly SemaphoreSlim _slots = new(MaxConcurrentRequests, MaxConcurrentRequests);
     private readonly HttpListener _listener = new();
     private readonly IActaStore _acta;
     private readonly Func<Elector> _self;
@@ -74,22 +108,42 @@ public sealed class MeshHttpServer : IDisposable
     {
         while (!ct.IsCancellationRequested)
         {
-            HttpListenerContext context;
+            // 手上已经有 MaxConcurrentRequests 个在处理就先不收新的，见那个常量的说明。
             try
             {
-                context = await _listener.GetContextAsync().WaitAsync(ct).ConfigureAwait(false);
+                await _slots.WaitAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
                 return;
             }
-            catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException)
+
+            HttpListenerContext context;
+            try
             {
-                return;   // 监听器被关掉了
+                context = await _listener.GetContextAsync().WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException
+                                          or HttpListenerException or ObjectDisposedException)
+            {
+                _ = _slots.Release();
+                return;   // 取消了，或者监听器被关掉了
             }
 
             // 单个请求出错不能让接受循环退出，否则一个坏包就把节点从 mesh 里摘掉了。
-            _ = Task.Run(() => HandleSafelyAsync(context, ct), CancellationToken.None);
+            _ = Task.Run(
+                async () =>
+                {
+                    try
+                    {
+                        await HandleSafelyAsync(context, ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        _ = _slots.Release();
+                    }
+                },
+                CancellationToken.None);
         }
     }
 
@@ -124,8 +178,13 @@ public sealed class MeshHttpServer : IDisposable
 
         if (method == "POST" && path == "/blocks")
         {
-            using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
-            var body = await reader.ReadToEndAsync(ct).ConfigureAwait(false);
+            var body = await ReadBodyAsync(context, ct).ConfigureAwait(false);
+            if (body is null)
+            {
+                TrySetStatus(context, HttpStatusCode.RequestEntityTooLarge);
+                return;
+            }
+
             var block = ActaJson.Deserialize<Block>(body);
 
             if (block is null)
@@ -150,7 +209,16 @@ public sealed class MeshHttpServer : IDisposable
                 from = Math.Max(0, parsed);
             }
 
-            var chain = await _acta.ReadChainAsync(from, ct).ConfigureAwait(false);
+            // 一次最多给 MaxChainPage 块。对端要更多就带着新的 from 再来一次。
+            var take = MaxChainPage;
+            var rawTake = context.Request.QueryString["take"];
+            if (!string.IsNullOrEmpty(rawTake)
+                && int.TryParse(rawTake, System.Globalization.CultureInfo.InvariantCulture, out var parsedTake))
+            {
+                take = Math.Clamp(parsedTake, 1, MaxChainPage);
+            }
+
+            var chain = await _acta.ReadChainAsync(from, take, ct).ConfigureAwait(false);
             await WriteJsonAsync(context, chain, ct).ConfigureAwait(false);
             return;
         }
@@ -158,8 +226,12 @@ public sealed class MeshHttpServer : IDisposable
         // 指派：A→B 请求评审，B→A 答复同意/拒绝。两条都要签名 + 白名单校验。
         if (method == "POST" && (path == "/assignments" || path == "/assignments/reply"))
         {
-            using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
-            var body = await reader.ReadToEndAsync(ct).ConfigureAwait(false);
+            var body = await ReadBodyAsync(context, ct).ConfigureAwait(false);
+            if (body is null)
+            {
+                TrySetStatus(context, HttpStatusCode.RequestEntityTooLarge);
+                return;
+            }
 
             SignedAssignment? signed;
             try
@@ -235,6 +307,38 @@ public sealed class MeshHttpServer : IDisposable
         TrySetStatus(context, HttpStatusCode.NotFound);
     }
 
+    /// <summary>
+    /// 把请求体读成字符串，超过 <see cref="MaxBodyBytes"/> 就放弃。
+    /// </summary>
+    /// <returns>超限返回 <c>null</c>，调用方回 413。</returns>
+    /// <remarks>
+    /// 先看 <c>Content-Length</c>，但<b>不能只看它</b> —— 那个头是对端自报的，可以撒谎或者
+    /// 干脆不给（chunked）。所以边读边数，越线立刻停手。
+    /// </remarks>
+    private static async Task<string?> ReadBodyAsync(HttpListenerContext context, CancellationToken ct)
+    {
+        if (context.Request.ContentLength64 > MaxBodyBytes)
+        {
+            return null;
+        }
+
+        var buffer = new byte[16 * 1024];
+        using var body = new MemoryStream();
+        int read;
+
+        while ((read = await context.Request.InputStream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
+            if (body.Length + read > MaxBodyBytes)
+            {
+                return null;
+            }
+
+            body.Write(buffer, 0, read);
+        }
+
+        return Encoding.UTF8.GetString(body.GetBuffer(), 0, (int)body.Length);
+    }
+
     private static async Task WriteJsonAsync<T>(HttpListenerContext context, T value, CancellationToken ct)
     {
         var bytes = Encoding.UTF8.GetBytes(ActaJson.Serialize(value));
@@ -287,5 +391,6 @@ public sealed class MeshHttpServer : IDisposable
         }
 
         _listener.Close();
+        _slots.Dispose();
     }
 }

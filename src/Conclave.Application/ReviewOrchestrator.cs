@@ -297,14 +297,23 @@ public sealed class ReviewOrchestrator : BackgroundService
         var members = _mesh.Members;
         var alive = members.Where(m => m.IsAlive(now)).Select(m => m.Id).ToHashSet(StringComparer.Ordinal);
 
-        var summary = await _acta.ReadSummaryAsync(ct).ConfigureAwait(false);
-        var queue = QueueProjection.Build(_mesh.PeerStates, alive, summary.ValidBallots, summary.Finished);
+        // 先算出这一轮到底要问链上哪几个 revision，再去读 —— 读账本的开销从「链有多长」
+        // 变成「队列有多长」。这条路径每 15 秒跑一次，而链是永远在长的。
+        var states = _mesh.PeerStates;
+        var summary = await _acta
+            .ReadSummaryAsync(QueueProjection.RevisionIds(states, alive), ct)
+            .ConfigureAwait(false);
+        var queue = QueueProjection.Build(states, alive, summary.ValidBallots, summary.Finished);
 
         var views = new List<PrView>(queue.Count);
 
         // 手上已经有活（在跑的，或在信号量后面排着的）就这一轮不再接新的。
         // 「一个节点一次只评一个 PR」——见 ConclaveOptions.MaxConcurrent 的说明。
-        var busy = !_inFlight.IsEmpty;
+        //
+        // 更新在排队时也算「忙」：安装器要等本节点空闲才替换二进制（见 IUpdateInstaller），
+        // 这边要是还在不停接新活，那个空闲可能永远等不到 —— 接了又被重启掐断，
+        // 等于白烧十几分钟额度。所以一开始下载就排空手上的活，替换完由新进程接着干。
+        var busy = !_inFlight.IsEmpty || _state.UpdateInProgress;
 
         // ── 第一遍：读每个 entry 的链上上下文（轮次、出过票的人、复审归属）。
         // 这些都要 I/O，所以必须先收集齐，才能整队做一次席位分配。
@@ -755,7 +764,16 @@ public sealed class ReviewOrchestrator : BackgroundService
     }
 
     /// <summary>等当前所有在跑的评审收尾。</summary>
+    /// <remarks>
+    /// 返回的是<b>调用那一刻</b>的快照。等到它完成不等于「之后也还空着」——
+    /// 要「一直空着」得先让这个节点不再接新活（更新就是这么做的：
+    /// <see cref="NodeState.UpdateInProgress"/> 一置起来，上面那道 busy 闸就把它排空了），
+    /// 然后配合 <see cref="IsIdle"/> 再确认一次。
+    /// </remarks>
     public Task WhenIdleAsync() => Task.WhenAll(_inFlight.Values.ToArray());
+
+    /// <summary>此刻手上没有在跑的评审。</summary>
+    public bool IsIdle => _inFlight.IsEmpty;
 
     /// <summary>
     /// 停机：先停编排循环，再掐断在跑的评审并等它们各补一张 Error 票。
@@ -907,6 +925,7 @@ public sealed class ReviewOrchestrator : BackgroundService
             ClaimedBy = entry.ClaimedBy,
             StartedAt = entry.StartedAt,
             NobodyEligible = nobodyEligible,
+            AllowSelfReview = entry.AllowSelfReview,
         };
     }
 

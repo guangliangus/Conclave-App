@@ -65,6 +65,26 @@ public class HttpMeshTests
         }
     }
 
+    /// <summary>把请求的 URL 记下来，并回一个空链。</summary>
+    private sealed class ChainHandler : HttpMessageHandler
+    {
+        internal List<Uri> Urls { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri is { } uri)
+            {
+                Urls.Add(uri);
+            }
+
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]", System.Text.Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
     private static (HttpMesh Mesh, MutableAllowList Allow, ElectorIdentity Self) Build(
         HttpMessageHandler? handler = null)
     {
@@ -82,6 +102,29 @@ public class HttpMeshTests
             elector, self, allow, new ConclaveOptions(), NullLogger<HttpMesh>.Instance,
             handler ?? new DeadHandler());
         return (mesh, allow, self);
+    }
+
+    [Fact]
+    public async Task Catching_up_asks_for_one_page_at_a_time()
+    {
+        // 「从 N 起全都给我」会让对端把那一段链同时以 List<Block> 和一个完整 byte[]
+        // 驻留，而链是永远在长的。页大小必须真的发出去。
+        var handler = new ChainHandler();
+        var (mesh, _, _) = Build(handler);
+        var peer = new Elector
+        {
+            Id = "peer",
+            PublicKey = "k",
+            AzIdentity = "peer",
+            Endpoint = "http://10.0.0.9:47707",
+            LastHeartbeat = Now,
+        };
+
+        _ = await mesh.PullChainAsync(peer, 42, 500, CancellationToken.None).ConfigureAwait(true);
+
+        var query = Assert.Single(handler.Urls).Query;
+        Assert.Contains("from=42", query, StringComparison.Ordinal);
+        Assert.Contains("take=500", query, StringComparison.Ordinal);
     }
 
     [Fact]

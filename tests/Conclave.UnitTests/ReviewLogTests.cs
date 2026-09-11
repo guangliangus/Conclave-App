@@ -235,7 +235,7 @@ public sealed class ReviewLogTests : IDisposable
         var ct = CancellationToken.None;
         await SeedAsync();
 
-        var chainHashes = (await _acta.ReadChainAsync(0, ct)).Select(b => b.Hash()).ToHashSet(StringComparer.Ordinal);
+        var chainHashes = (await _acta.ReadChainAsync(0, int.MaxValue, ct)).Select(b => b.Hash()).ToHashSet(StringComparer.Ordinal);
 
         // 链是唯一真相：投影行必须都能追回一个仍然存在的区块，
         // 否则让位重挂之后报表里会留下幽灵行、金额重复计。
