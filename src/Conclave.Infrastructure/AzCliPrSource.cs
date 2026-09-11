@@ -421,7 +421,7 @@ public sealed class AzCliPrSource(
         ArgumentNullException.ThrowIfNull(pr);
         ArgumentNullException.ThrowIfNull(result);
 
-        var markdown = RenderComment(pr, result);
+        var markdown = CommentBody(pr, result);
         var threadFile = Path.Combine(Path.GetTempPath(), $"conclave-thread-{pr.PrId}-{Guid.NewGuid():N}.json");
         var voteFile = false;
 
@@ -487,6 +487,31 @@ public sealed class AzCliPrSource(
     }
 
     /// <summary>把合并结论渲染成 PR 评论。Confidence 直接摊在读者面前，方便判断哪条值得看。</summary>
+    /// <summary>
+    /// 要发到 PR 上的那段 markdown。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 有评审节点起草的原文（<see cref="PromulgationPayload.Comment"/>）就<b>一个字不改</b>
+    /// 地发它。那段文字是这次评审里最有价值的产出 —— 为什么是问题、该怎么改、哪些地方
+    /// 看过了没问题；压成一张「置信度/严重度/位置/标题」的表格之后剩下的只有索引。
+    /// </para>
+    /// <para>
+    /// 退回 <see cref="RenderComment"/> 的两种情况，都不是异常：
+    /// quorum ≥ 2 时有 N 份原文、没有唯一答案，而合并渲染正好是那时候该说的话；
+    /// 以及老 Ballot（改造之前落链的）和还没更新 skill 的节点没有这个字段。
+    /// </para>
+    /// </remarks>
+    internal static string CommentBody(PrMeta pr, PromulgationPayload result)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        ArgumentNullException.ThrowIfNull(result);
+
+        return string.IsNullOrWhiteSpace(result.Comment)
+            ? RenderComment(pr, result)
+            : result.Comment;
+    }
+
     private static string RenderComment(PrMeta pr, PromulgationPayload result)
     {
         var sb = new StringBuilder();

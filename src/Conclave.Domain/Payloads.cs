@@ -97,6 +97,29 @@ public sealed record BallotPayload(
     /// </remarks>
     public PrMeta? Pr { get; init; }
 
+    /// <summary>
+    /// 评审节点<b>起草好的那条评论原文</b>（markdown）；拿不到就是 null。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 投递到 Azure DevOps 的就是这段文本，一个字不改（见
+    /// <c>AzCliPrSource.CommentBody</c>）。原先是把 <see cref="Findings"/> 重新拼成一张
+    /// 表格再发 —— 那样丢掉的是评审里最有价值的部分：为什么是问题、该怎么改、
+    /// 以及那些不该被压成一行标题的上下文。结构化的 finding 仍然留着，
+    /// 它们喂的是账单、投影表和界面，跟人看的那条评论各管一头。
+    /// </para>
+    /// <para>
+    /// 上链是必需的而不是顺手：公布那一步读的是
+    /// <see cref="ChainState.ValidBallots"/>，未必跑在评审的那个节点上。
+    /// 长度由 <c>ClaudeReviewRunner</c> 在出票时截断，因为链是 append-only 的。
+    /// </para>
+    /// <para>
+    /// 是 init 属性，理由同 <see cref="Pr"/>：既有构造点不用改，老 Ballot 反序列化留 null
+    /// 也正是「那时候没有这个东西」的正确表达 —— 读取点据此退回旧的渲染。
+    /// </para>
+    /// </remarks>
+    public string? Comment { get; init; }
+
     /// <summary>拿不到计量时退成全 0，免得每个读取点都判空。</summary>
     public ReviewUsage Metering => Usage ?? ReviewUsage.None;
 }
@@ -116,7 +139,19 @@ public sealed record PromulgationPayload(
     bool Degraded,
     int ActualQuorum,
     int ExpectedQuorum,
-    int? ThreadId = null);
+    int? ThreadId = null)
+{
+    /// <summary>
+    /// 要原样投递的评论原文；null 表示没有，投递方退回自己渲染。
+    /// </summary>
+    /// <remarks>
+    /// <b>只在恰好一票有效时才有值</b>（见 <see cref="QuorumEngine.Merge"/>）。
+    /// quorum ≥ 2 时有 N 份各自起草的评论，"原样投递"就没有唯一答案了 ——
+    /// 那种情况下合并渲染才是对的：它的价值本来就在「几个节点独立提到了同一条」。
+    /// 默认策略是全 1（<see cref="QuorumPolicy.Single"/>），所以常态走原文这条路。
+    /// </remarks>
+    public string? Comment { get; init; }
+}
 
 /// <summary>
 /// Recess 块的载荷：某一轮超时弃权，席位让给下一轮。

@@ -66,7 +66,19 @@ public static class QuorumEngine
             findings,
             Degraded: ballots.Count < expectedQuorum,
             ActualQuorum: ballots.Count,
-            ExpectedQuorum: expectedQuorum);
+            ExpectedQuorum: expectedQuorum)
+        {
+            // 恰好一票才把原文带出去。N 票时「原样投递」没有唯一答案，而且合并渲染
+            // 在那种情况下本来就更有价值（它说的是「几个节点独立提到了同一条」）。
+            //
+            // 空白也归成 null：出票那侧已经归一过（ClaudeReviewRunner.CapComment），
+            // 这里再挡一次是因为<b>这个值要上链</b> —— 让链上存一串空白，读的人就得
+            // 自己判「这是没有评论，还是评论真的是空白」。不变量就一条：
+            // Comment 要么是 null，要么是真有内容。
+            Comment = valid.Count == 1 && !string.IsNullOrWhiteSpace(valid[0].Comment)
+                ? valid[0].Comment
+                : null,
+        };
     }
 
     /// <summary>

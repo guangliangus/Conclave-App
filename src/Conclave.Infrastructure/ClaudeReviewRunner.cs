@@ -27,7 +27,10 @@ namespace Conclave.Infrastructure;
 /// <para>
 /// <b>输出契约</b>：skill 需要在 <c>REVIEW_MODE=collect</c> 下于回复末尾输出一个
 /// <c>```json</c> 代码块，形如
-/// <c>{"decision":"reject","findings":[{"file":"a.cs","line":12,"severity":"major","title":"…","detail":"…"}]}</c>。
+/// <c>{"decision":"reject","comment":"## …","findings":[{"file":"a.cs","line":12,"severity":"major","title":"…","detail":"…"}]}</c>。
+/// <c>comment</c> 是<b>起草好的评论原文</b>，投递到 Azure DevOps 时一个字不改地发它
+/// （见 <c>AzCliPrSource.CommentBody</c>）；缺这个字段不算失败，投递方会退回用
+/// <c>findings</c> 自己渲染 —— 老节点的 skill 还没更新时就是这条路。
 /// 解析不到就出 <see cref="ReviewDecision.Error"/> 票 —— 刻意不去猜结论：
 /// 猜错方向会让一个该拦的 PR 被放过，而 Error 票只会让这一轮不计入多数决。
 /// </para>
@@ -44,6 +47,16 @@ public sealed class ClaudeReviewRunner(
     /// </summary>
     /// <remarks>1MB 足够装下任何一条 result 事件，又不至于让几百 MB 的输出把解析器拖死。</remarks>
     private const int MaxReasonJsonChars = 1024 * 1024;
+
+    /// <summary>
+    /// 评论原文上链时的长度上限。
+    /// </summary>
+    /// <remarks>
+    /// 链是 append-only 的，所以这里必须有个数。64KB：实测一条评审评论几 KB 到十几 KB，
+    /// 留足余量；真超了宁可截断也不能让一条评论把链撑起来。截断时在尾部留一行说明，
+    /// 因为发出去的评论会少内容，而少了内容却没痕迹是最坏的。
+    /// </remarks>
+    private const int MaxCommentChars = 64 * 1024;
 
     public async Task<BallotPayload> RunAsync(
         Revision revision, PrMeta pr, int round, CancellationToken ct)
@@ -450,7 +463,32 @@ public sealed class ClaudeReviewRunner(
             Model = model,
             DurationMs = elapsedMs,
             Usage = usage,
+            Comment = CapComment(contract.Comment),
         };
+    }
+
+    /// <summary>
+    /// 评论原文的入链前处理：空白归一成 null，超长截断并留痕。
+    /// </summary>
+    /// <remarks>
+    /// 空字符串和只有空白的都归成 null，这样下游只用判一个 null
+    /// （<c>AzCliPrSource.CommentBody</c> 据此决定原样发还是自己渲染）。
+    /// </remarks>
+    internal static string? CapComment(string? comment)
+    {
+        if (string.IsNullOrWhiteSpace(comment))
+        {
+            return null;
+        }
+
+        var text = comment.Trim();
+        if (text.Length <= MaxCommentChars)
+        {
+            return text;
+        }
+
+        const string note = "\n\n<sub>（评论原文超过 64KB，已截断）</sub>";
+        return string.Concat(text.AsSpan(0, MaxCommentChars - note.Length), note);
     }
 
     /// <summary>
