@@ -631,10 +631,22 @@ public sealed partial class MainViewModel : ViewModelBase
     /// 一次性的 <c>.WithInterFont()</c>。
     /// </para>
     /// <para>
-    /// 那个泄漏不归这里修（该给 Avalonia 提 issue），但「没人在看的时候不重画」本来就是
-    /// 对的：它把放大系数拿掉了，顺带也省掉了一天到晚的无用功。菜单栏图标那条路
-    /// <b>不受影响</b> —— 它订的是 <see cref="NodeState.Changed"/> 而不是这个 ViewModel
-    /// （见 <c>App.WatchReviewingState</c>），所以窗口没开时图标照样跟着评审状态换脸。
+    /// <b>这道闸只挡住了「没人在看的时候」，漏本身还在。</b> 后来又量了一轮：
+    /// 面板收着时确实持平（2.7 分钟 +0.2MB），一打开就回到每分钟 10–15MB ——
+    /// 光打开那一下的全量 <see cref="Refresh"/> 就是 33 秒 +48MB，一个进程跑了
+    /// 五十几分钟就到 1.0GB。所以这里挡的是<b>放大系数</b>，不是原因。
+    /// </para>
+    /// <para>
+    /// 真正的原因后来定位到了：字体缺少请求的字重时，Avalonia 会把字体字节读出来
+    /// 再造一份带模拟效果的 typeface（<c>SkiaTypeface.TryGetStream</c> →
+    /// <c>FontManagerImpl.TryCreateGlyphTypeface(Stream, FontSimulations)</c> →
+    /// <c>SKTypeface.FromStream</c>），而那个 typeface 不释放也不复用，每次约 1.3MB。
+    /// 修法是让默认字体同时覆盖用到的文字和请求的字重，见
+    /// <c>Program.UiFontFamily</c> 与 <c>Controls.axaml</c> 里那段「字重上限」的注释；
+    /// 上游已报 AvaloniaUI/Avalonia#22214。
+    /// 菜单栏图标那条路<b>不受影响</b> —— 它订的是 <see cref="NodeState.Changed"/>
+    /// 而不是这个 ViewModel（见 <c>App.WatchReviewingState</c>），
+    /// 所以窗口没开时图标照样跟着评审状态换脸。
     /// </para>
     /// </remarks>
     public void SetVisible(bool visible)

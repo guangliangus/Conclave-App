@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Media;
 using Avalonia.Threading;
 using System.Globalization;
 using Conclave.App.ViewModels;
@@ -356,6 +357,37 @@ internal sealed class Program
             .WithDeveloperTools()
 #endif
             .With(new MacOSPlatformOptions { ShowInDock = false })
-            .WithInterFont()
+            .With(new FontManagerOptions { DefaultFamilyName = UiFontFamily })
             .LogToTrace();
+
+    /// <summary>
+    /// 界面默认字体。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 理由是<b>字形覆盖</b>，不是性能：这个界面通篇是中文，而原先的 <c>.WithInterFont()</c>
+    /// 给的 Inter 没有任何 CJK 字形，于是每一段中文都得再向平台要一次回退字体
+    /// （实测本进程只 mmap 了四个字体文件，中文全落在 PingFang 上）。PingFang 自带中西文
+    /// 两套字形，常规文字一次就命中。
+    /// </para>
+    /// <para>
+    /// <b>它不是那个原生内存泄漏的修法。</b> 换掉 Inter 最初正是冲着泄漏去的 ——
+    /// 堆里每多一套 <c>TBaseFont</c> / <c>TFPInMemoryFont</c> / <c>TTrueTypeMemoryFont</c>
+    /// 就跟着多一个 624KB 的字体全文块与 7 个 96KB 的块（三次快照的增量都是整齐的
+    /// +175，96KB 块正好 175×7），而 <c>TFPInMemoryFont</c> 的意思是「从内存字节解析出来的
+    /// 字体」，看起来直指嵌入资源那条路。<b>但对照实验否掉了这个推断</b>：一个只变这一个
+    /// 变量的隔离工程（同样中文混 ASCII、同样两秒一轮、同样 600 行封顶），无论用
+    /// <c>.WithInterFont()</c> 还是整行换实例逼 <c>ItemsControl</c> 拆建容器，四分钟里
+    /// 那几个计数一动不动 —— <c>.WithInterFont()</c> 的 in-memory font 是常数 6 个。
+    /// 也就是说触发点在别处，<b>至今没定位</b>；要定位得用
+    /// <c>MallocStackLogging=1</c> 起一次，再对那 624KB 的块跑 <c>malloc_history</c>。
+    /// </para>
+    /// <para>
+    /// 选 PingFang SC 而不是系统 UI 字体（<c>.AppleSystemUIFont</c> / <c>.SF NS</c>）：
+    /// 后两个是点号开头的私有名，Skia 的 <c>matchFamilyName</c> 未必认。
+    /// macOS 10.11 起 PingFang 就是随系统走的，取不到时 Avalonia 会退回平台默认字体，
+    /// 不会崩。
+    /// </para>
+    /// </remarks>
+    private const string UiFontFamily = "PingFang SC";
 }

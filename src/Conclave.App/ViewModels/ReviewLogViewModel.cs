@@ -36,6 +36,9 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     private long _from;
     private bool _polling;
 
+    /// <summary>这次评审一共收到过多少行。<see cref="Lines"/> 有上限，这个没有。</summary>
+    private long _received;
+
     /// <summary>日志已经收尾（对端报 Running=false，或者压根取不到）。恢复时不必再起定时器。</summary>
     private bool _done;
 
@@ -80,6 +83,7 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     /// <summary>谁在评。</summary>
     public string Reviewer { get; }
 
+    /// <summary>面板上显示的行，最多 <see cref="ReviewProgressLog.MaxLines"/> 条，超了从头挤掉。</summary>
     public ObservableCollection<string> Lines { get; } = [];
 
     [ObservableProperty]
@@ -160,19 +164,33 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
             if (chunk.From < _from)
             {
                 Lines.Clear();
+                _received = 0;
             }
 
             foreach (var line in chunk.Lines)
             {
                 Lines.Add(line);
+                _received++;
+            }
+
+            // 上限跟源端的环形缓冲对齐。这个集合原先<b>只增不减</b> ——
+            // ReviewProgressLog 那头只留最后 600 行，而这头是按序号取增量，
+            // 所以一次十几分钟的评审推进来多少行，这里就攒多少行
+            // （claude --output-format stream-json --verbose 会把每个工具返回体
+            // 全文打出来，几千行是常态）。而日志面板的每一行都是一个 TextBlock。
+            while (Lines.Count > ReviewProgressLog.MaxLines)
+            {
+                Lines.RemoveAt(0);
             }
 
             _from = chunk.Next;
             IsEmpty = Lines.Count == 0;
 
+            // 说的是「这次评审一共出过多少行」而不是 Lines.Count —— 后者到了上限就不动了，
+            // 于是一条还在跑的评审看起来会像卡在 600 行。
             Status = chunk.Running
-                ? string.Create(CultureInfo.InvariantCulture, $"{Reviewer} 正在评 · {Lines.Count} 行")
-                : string.Create(CultureInfo.InvariantCulture, $"已结束 · 共 {Lines.Count} 行");
+                ? string.Create(CultureInfo.InvariantCulture, $"{Reviewer} 正在评 · {_received} 行")
+                : string.Create(CultureInfo.InvariantCulture, $"已结束 · 共 {_received} 行");
 
             if (!chunk.Running)
             {

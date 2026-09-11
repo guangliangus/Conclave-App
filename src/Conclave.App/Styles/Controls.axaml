@@ -129,9 +129,18 @@
 
   <!-- ── 文字 ───────────────────────────────────────────────────────── -->
 
+  <!--
+    字重上限是 SemiBold(600)，不要写 Bold。
+    默认字体是 PingFang SC（见 Program.UiFontFamily），而它只到 Semibold ——
+    请求 700 的时候 Avalonia 匹配不到，会走「把字体字节读出来再造一份带模拟效果的」
+    那条路（FontManagerImpl.TryCreateGlyphTypeface(Stream, FontSimulations)
+    → SKTypeface.FromStream），而那条路在 Avalonia 12.1.2 / SkiaSharp 上每走一次
+    漏约 1.3MB 原生内存（624KB 字体全文 + 7×96KB 字形表），不释放。
+    600 是原生字重，精确命中，不进模拟。
+  -->
   <Style Selector="TextBlock.wordmark">
     <Setter Property="FontSize" Value="14" />
-    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="LetterSpacing" Value="3" />
     <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
   </Style>
@@ -181,8 +190,17 @@
     <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
   </Style>
 
+  <!--
+    等宽。原先写的是 "Menlo,Monaco,Consolas,monospace" —— 这个进程只打 macOS 的包，
+    而后三个名字在 macOS 上一个都不存在（Consolas 是 Windows 的，monospace 是 CSS 的
+    通用名，Avalonia 不认），于是每一次文字布局都要把这串名字从头解析一遍才落到 Menlo。
+
+    第二个名字是必需的而不是保险：Menlo 没有任何 CJK 字形，而挂 .mono 的地方有中文
+    （最密的是日志面板）。不写出来就得每段中文再向平台要一次回退字体，正是
+    Program.UiFontFamily 那段注释里说的那条会漏原生内存的路。
+  -->
   <Style Selector="TextBlock.mono">
-    <Setter Property="FontFamily" Value="Menlo,Monaco,Consolas,monospace" />
+    <Setter Property="FontFamily" Value="Menlo,PingFang SC" />
     <Setter Property="FontSize" Value="11" />
   </Style>
 
@@ -339,9 +357,10 @@
     <Setter Property="Margin" Value="0,-3,0,0" />
   </Style>
 
+  <!-- 字重见上面 .wordmark 那段注释：上限 SemiBold -->
   <Style Selector="Border.tabcount > TextBlock">
     <Setter Property="FontSize" Value="9.5" />
-    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="TextAlignment" Value="Center" />
     <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
   </Style>
