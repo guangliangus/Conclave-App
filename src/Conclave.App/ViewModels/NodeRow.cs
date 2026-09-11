@@ -1,4 +1,5 @@
 using System.Globalization;
+using Conclave.Application.Ports;
 using Conclave.Domain;
 
 namespace Conclave.App.ViewModels;
@@ -27,6 +28,7 @@ public sealed class NodeRow
         bool isSelf,
         DateTimeOffset now,
         IReadOnlyList<string> reviewing,
+        IReadOnlyList<UsageWindow>? quotas = null,
         TableLayout? layout = null)
     {
         ArgumentNullException.ThrowIfNull(node);
@@ -64,6 +66,20 @@ public sealed class NodeRow
             _ => new Badge("在线", BadgeTone.Ok),
         };
 
+        // 本节点画各个窗口的原始读数（会话 5h / 周 7d），不画折算过的那个标量：
+        // 「额度用了多少」人只认 Claude 自己报的那个数，而 node.Utilization 是
+        // UsagePressure 把最紧的窗口折回 0.8 那把尺子之后的结果 —— 两者对不上是常态
+        // （实测 7d 74% / 阈值 95% 折出来是 62%），同一个界面上摆两个对不上的百分比
+        // 只会让人以为有一处是坏的。折算值改进 tooltip，那里放得下一句解释。
+        //
+        // 只画参与入席判定的窗口：这张表回答的是「席位为什么落在它身上」，
+        // 而 Fable 那种按模型细分的子额度压根不参与（UsageWindow.Gates）。
+        Quotas = quotas is null
+            ? []
+            : [.. quotas.Where(w => w.Gates).Select(w => new UsageWindowRow(w, now))];
+
+        // 对端只有心跳里那一个标量 —— Beacon.SigningPayload 里就只有 Utilization，
+        // 窗口明细进不了协议。所以对端那一行仍然画压力值，并在标签上写明。
         QuotaPercent = node.Utilization * 100;
         QuotaText = Format.Percent(node.Utilization);
         IsBad = node.Utilization >= Elector.MaxUtilization;
@@ -95,9 +111,13 @@ public sealed class NodeRow
             node.Endpoint.Length > 0 ? $"端点 {node.Endpoint}" : "端点 (未广播)",
             $"最后心跳 {node.LastHeartbeat.ToLocalTime():MM-dd HH:mm:ss}"
                 + (alive ? string.Empty : $"（超过 {Elector.HeartbeatWindow.TotalSeconds:F0} 秒未更新，已判离线）"),
+            HasQuotas
+                ? $"入席用的压力值 {QuotaText}（各窗口取「离自己那条线最近」的一个，"
+                    + $"折回 {Format.Percent(Elector.MaxUtilization)} 这把尺子）"
+                : $"入席用的压力值 {QuotaText}（对端心跳里只有这一个标量，窗口明细拿不到）",
             node.HasHeadroom
-                ? $"权重 = 1/(1+在跑) × 1/(1+近 24h×0.1) × (1-额度) = {node.Weight:F3}"
-                : $"额度已过 {Format.Percent(Elector.MaxUtilization)}，不参与席位分配",
+                ? $"权重 = 1/(1+在跑) × 1/(1+近 24h×0.1) × (1-压力) = {node.Weight:F3}"
+                : $"压力已过 {Format.Percent(Elector.MaxUtilization)}，不参与席位分配",
             Reviewing.Length > 0 ? Reviewing : "当前没有在评的 PR",
         });
     }
@@ -119,6 +139,15 @@ public sealed class NodeRow
 
     public Badge Status { get; }
 
+    /// <summary>
+    /// 本节点各个额度窗口的原始读数。对端为空。
+    /// </summary>
+    public IReadOnlyList<UsageWindowRow> Quotas { get; }
+
+    /// <summary>有逐窗口的真实读数可画（只有本节点有）。</summary>
+    public bool HasQuotas => Quotas.Count > 0;
+
+    /// <summary>折算成入席尺度的压力值。<see cref="HasQuotas"/> 为假时才画在表里。</summary>
     public string QuotaText { get; }
 
     /// <summary>0–100，喂给额度条。</summary>

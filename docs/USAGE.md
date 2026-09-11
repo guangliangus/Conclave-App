@@ -259,7 +259,7 @@ conclave                 # 默认：菜单栏常驻（图标 + 后台服务）
 conclave serve           # 无 UI 常驻。只贡献算力的机器用这个
 conclave review 2878     # 只评这一个 PR 然后退出（草稿也评）
 conclave report          # 账单
-conclave tray-selftest   # 自检「点图标 → 出面板」这条原生通路
+conclave tray-selftest   # 自检「点图标 → 出面板」这条原生通路，顺带验呼吸帧读得出、动得起来
 ```
 
 怎么调到它，取决于你是怎么装的：

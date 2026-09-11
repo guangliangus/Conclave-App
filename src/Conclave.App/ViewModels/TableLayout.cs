@@ -14,15 +14,17 @@ namespace Conclave.App.ViewModels;
 /// <list type="table">
 /// <item>
 /// <term>一直显示</term>
-/// <description>PR 号 · 作者 · 状态（外加那个「⋯」动作按钮）</description>
+/// <description>PR 号 · 作者 · 状态 · 描述（外加那个「⋯」动作按钮）</description>
 /// </item>
-/// <item><term><see cref="Mid"/> 起</term><description>再加 描述 · 结论</description></item>
+/// <item><term><see cref="Mid"/> 起</term><description>再加 结论</description></item>
 /// <item><term><see cref="Wide"/> 起</term><description>再加 仓库</description></item>
 /// </list>
 /// <para>
-/// 「描述先走、作者留下」是刻意的：描述再长也只是一句话，截断之后信息还在（悬浮能看全），
-/// 而作者是「这个 PR 是谁的」—— 最窄的时候人要的就是「哪个 PR、谁的、现在什么状态」
-/// 这三样。
+/// <b>让位的只能是定宽的列。</b>每张表都有一列是 <c>DockPanel</c> 的 LastChildFill
+/// （PR 表是描述，评审记录是评审，节点表是节点），它吃的是「别人分完剩下的」——
+/// 把它按断点藏掉，剩余宽度不会回流给别的列，那一片就是纯死区。
+/// 所以这两个断点只用来砍定宽列，fill 那一列一直在，窄了就是被压窄、截断，
+/// 而截断的一句话还剩半句可读，空白则什么都不是。
 /// </para>
 /// <para>
 /// 只有两个断点，不是每列一个：断点越多越难说清「现在为什么少了一列」，
@@ -35,7 +37,7 @@ namespace Conclave.App.ViewModels;
 /// </remarks>
 public sealed partial class TableLayout : ObservableObject
 {
-    /// <summary>描述、结论、TOKEN、在跑、心跳在这个宽度以下让位。</summary>
+    /// <summary>结论、TOKEN、在跑、心跳在这个宽度以下让位。</summary>
     private const double MidAt = 820;
 
     /// <summary>仓库、问题数、近 24H、权重在这个宽度以下让位。</summary>
