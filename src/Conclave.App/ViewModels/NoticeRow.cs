@@ -16,6 +16,7 @@ public sealed class NoticeRow
 
         // 通知是「刚刚发生的事」，看的是几点几分几秒，不是哪一天
         At = notice.At.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+        Key = notice.At.UtcTicks.ToString(CultureInfo.InvariantCulture) + '\u241e' + notice.Title;
         Title = notice.Title;
         Detail = notice.Detail ?? string.Empty;
         HasDetail = Detail.Length > 0;
@@ -27,6 +28,16 @@ public sealed class NoticeRow
             _ => new Badge("消息", BadgeTone.Info),
         };
     }
+
+    /// <summary>
+    /// 这一条在列表里的身份，刷新之间不变。
+    /// </summary>
+    /// <remarks>
+    /// 通知本身没有 id。用「发生时刻（到 tick）+ 标题」：<see cref="NodeState.Notify"/>
+    /// 已经把一分钟内内容完全相同的一条挡掉了，所以这个组合在列表里唯一。
+    /// 撞了也不会出错，只是那一行会白重建一次（见 <see cref="RowSync"/>）。
+    /// </remarks>
+    public string Key { get; }
 
     public string At { get; }
 

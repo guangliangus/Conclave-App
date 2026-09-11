@@ -16,4 +16,20 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
+  <!--
+    开发态把版本号顶到一个永远不会被 Release 超过的值。
+    不这么做的话开发态是 SDK 默认的 1.0.0，比线上任何一版都旧，于是 UpdateService
+    每次跑起来都判定「有新版本」，AutoInstall 默认开着，就地替换那一步会把下载来的
+    Conclave.app 解到<b>源码目录</b>上 —— MacUpdateInstaller.TryResolveBundle 从
+    Environment.ProcessPath 往上找第一个以 .app 结尾的目录，而 bin/Debug 的上面正好是
+    src/Conclave.App（EndsWith 用的 OrdinalIgnoreCase，".App" 就是 ".app"）。
+    实测结果：整个 src/Conclave.App 被挪成 Conclave.App.previous，原地换成 117MB 的发布包。
+
+    只在没人从命令行传 Version 时生效。package-macos.sh 传的 -p:Version 是全局属性，
+    优先级高于这里，打包不受影响。
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' AND '$(Version)' == ''">
+    <Version>100.99.99</Version>
+  </PropertyGroup>
+
 </Project>

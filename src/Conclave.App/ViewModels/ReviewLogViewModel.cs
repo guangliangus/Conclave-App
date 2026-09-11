@@ -36,6 +36,12 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     private long _from;
     private bool _polling;
 
+    /// <summary>日志已经收尾（对端报 Running=false，或者压根取不到）。恢复时不必再起定时器。</summary>
+    private bool _done;
+
+    /// <summary>面板被隐藏了。见 <see cref="Suspend"/>。</summary>
+    private bool _suspended;
+
     public ReviewLogViewModel(
         IMesh mesh,
         ReviewProgressLog local,
@@ -85,6 +91,39 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     public void Dispose() => _timer.Stop();
 
     /// <summary>
+    /// 主面板隐藏了，停掉两秒一次的轮询。
+    /// </summary>
+    /// <remarks>
+    /// 这个定时器原先跟着 ViewModel 一直转到评审结束 —— 而主面板的 x 只是 <c>Hide()</c>，
+    /// 所以窗口早就不在屏幕上了，它还在每两秒往集合里灌行、连带重建那一列 UI。
+    /// 那正是 <see cref="MainViewModel.SetVisible"/> 里说的那个放大器的另一半。
+    /// </remarks>
+    internal void Suspend()
+    {
+        _suspended = true;
+        _timer.Stop();
+    }
+
+    /// <summary>面板又显示出来了，把轮询接回去并立刻补一次增量。</summary>
+    internal void Resume()
+    {
+        if (!_suspended)
+        {
+            return;
+        }
+
+        _suspended = false;
+
+        if (_done)
+        {
+            return;
+        }
+
+        _timer.Start();
+        _ = PollAsync();
+    }
+
+    /// <summary>
     /// 取一次增量。
     /// </summary>
     /// <remarks>
@@ -110,8 +149,17 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
                 Status = _reviewerId is null
                     ? "没有节点在评这一版"
                     : $"{Reviewer} 那边取不到日志（可能已经评完，或者版本较旧）";
+                _done = true;
                 _timer.Stop();
                 return;
+            }
+
+            // 对端把序号倒回去了 —— 同一版重试时 ReviewProgressLog.Begin 会丢掉旧缓冲、
+            // 把序号从 0 重新开始，于是这一块是<b>整段重发</b>而不是增量。
+            // 不清就会把同样的几百行再追加一遍，而这个集合没有上限。
+            if (chunk.From < _from)
+            {
+                Lines.Clear();
             }
 
             foreach (var line in chunk.Lines)
@@ -128,6 +176,7 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
 
             if (!chunk.Running)
             {
+                _done = true;
                 _timer.Stop();
             }
         }

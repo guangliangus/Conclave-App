@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
@@ -24,6 +25,56 @@ public sealed class MeshService(
     ILogger<MeshHttpServer> serverLogger) : BackgroundService
 {
     private MeshHttpServer? _server;
+
+    /// <summary>
+    /// 让位重挂之后等着重新广播的块，按块哈希去重。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>为什么不在收块的那条路上直接广播。</b> <c>Novel</c> 那道闸挡的是「本来就有的块
+    /// 被再转一次」造成的 A→B→A 回弹，对<b>重挂</b>这条路径是失效的：让位重挂会改
+    /// <c>Index</c> 和 <c>PrevHash</c> 并<b>重新签名</b>，对端看到的是一个哈希全新的块，
+    /// 永远判作 Novel。于是一个入站块能换来「本地链尾有多长」那么多个出站 POST，
+    /// 对端让位之后再把它自己的整条尾巴推回来 —— 扇出随跳数往上翻。
+    /// </para>
+    /// <para>
+    /// 所以改成攒起来，由心跳循环每 <see cref="MeshOptions.BeaconInterval"/> 领
+    /// <see cref="RepublishPerTick"/> 个出去。收一个块的即时扇出变成 0，放大就不存在了；
+    /// 代价是两边的链要多花几个心跳周期才收敛，而那期间队列与席位读的是<b>实时状态</b>
+    /// 而不是链，不受影响。
+    /// </para>
+    /// <para>
+    /// 攒过头（<see cref="MaxRepublish"/>）就丢掉多的：那说明两边已经在互相让位地打架，
+    /// 再多推几百个块只会烧得更快，让 <see cref="CatchUpAsync"/> 去兜底。
+    /// </para>
+    /// </remarks>
+    private readonly ConcurrentDictionary<string, Block> _republish = new(StringComparer.Ordinal);
+
+    /// <summary>一个心跳周期最多补推几个重挂的块。</summary>
+    private const int RepublishPerTick = 16;
+
+    /// <summary>待补推队列的上限。超了说明在打架，不是在收敛。</summary>
+    private const int MaxRepublish = 256;
+
+    /// <summary>补链一次要几块。对端还会按自己的上限再夹一次。</summary>
+    private const int ChainPage = MeshHttpServer.MaxChainPage;
+
+    /// <summary>一个对端最多翻几页。防的是「对面一直给得出块、但一块都补不进去」那种死循环。</summary>
+    private const int MaxCatchUpPages = 64;
+
+    /// <summary>
+    /// 待确认的指派请求最多留多久。
+    /// </summary>
+    /// <remarks>
+    /// 这个列表原先<b>只增不减</b>：收到就 append，只有人在界面上点了同意/拒绝才移除。
+    /// 没人点就永远挂着，而且随<b>每一次</b> <c>GET /state</c> 全量序列化广播出去。
+    /// 一小时足够人看见那条通知了；过期的自己消失，请求方那边本来也早就不等了
+    /// （界面上的锁只有 60 秒）。
+    /// </remarks>
+    private static readonly TimeSpan PendingTtl = TimeSpan.FromHours(1);
+
+    /// <summary>同时最多挂几条待确认。满了挤掉最老的。</summary>
+    private const int MaxPending = 32;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -100,6 +151,9 @@ public sealed class MeshService(
                 await beacon.SendAsync(
                     new Beacon(self, version, identity.Sign(Beacon.SigningPayload(self, version))), ct)
                     .ConfigureAwait(false);
+
+                await DrainRepublishAsync(ct).ConfigureAwait(false);
+                PrunePending(now);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -111,6 +165,53 @@ public sealed class MeshService(
             }
         }
         while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false));
+    }
+
+    /// <summary>还没过期的待确认指派，按时间升序。</summary>
+    private static IEnumerable<AssignmentRequest> Fresh(
+        IEnumerable<AssignmentRequest> pending, DateTimeOffset now)
+        => pending.Where(p => now - p.At < PendingTtl).OrderBy(p => p.At);
+
+    /// <summary>
+    /// 清掉过期的待确认指派。
+    /// </summary>
+    /// <remarks>
+    /// 挂在心跳循环上而不是只在收到新请求时清 —— 否则一条没人理的请求会一直挂在界面上、
+    /// 也一直跟着 <c>GET /state</c> 广播，直到<b>下一条</b>请求到来才被顺手带走。
+    /// </remarks>
+    private void PrunePending(DateTimeOffset now)
+        => mesh.UpdateState(s =>
+        {
+            var fresh = Fresh(s.Pending, now).ToList();
+            return fresh.Count == s.Pending.Count ? s : s with { Pending = [.. fresh] };
+        });
+
+    /// <summary>补推一批让位重挂的块。挂在心跳循环上，所以天然限速。</summary>
+    private async Task DrainRepublishAsync(CancellationToken ct)
+    {
+        if (_republish.IsEmpty)
+        {
+            return;
+        }
+
+        var sent = 0;
+
+        foreach (var hash in _republish.Keys.Take(RepublishPerTick))
+        {
+            if (!_republish.TryRemove(hash, out var block))
+            {
+                continue;
+            }
+
+            await mesh.BroadcastAsync(block, ct).ConfigureAwait(false);
+            sent++;
+        }
+
+        if (sent > 0)
+        {
+            logger.LogDebug(
+                "补推 {Sent} 个重挂的块，还剩 {Left} 个", sent, _republish.Count);
+        }
     }
 
     private async Task ReceiveLoopAsync(MeshBeaconSocket beacon, CancellationToken ct)
@@ -189,10 +290,18 @@ public sealed class MeshService(
             }
 
             // 让位后重挂的块换了索引，必须也发出去 —— 否则对端不知道它们搬了家，
-            // 两边的链就收敛不了。
+            // 两边的链就收敛不了。但<b>不在这条路上直接发</b>：理由见 _republish。
             foreach (var moved in result.Rebased)
             {
-                await mesh.BroadcastAsync(moved, ct).ConfigureAwait(false);
+                if (_republish.Count >= MaxRepublish)
+                {
+                    logger.LogWarning(
+                        "待补推的重挂块已达 {Max} 个，丢弃其余的（两边在互相让位，交给补链兜底）",
+                        MaxRepublish);
+                    break;
+                }
+
+                _republish[moved.Hash()] = moved;
             }
 
             return;
@@ -294,9 +403,10 @@ public sealed class MeshService(
             return Task.FromResult(false);
         }
 
+        var now = DateTimeOffset.UtcNow;
         mesh.UpdateState(s => s.Pending.Any(x => x.Id == request.Id)
             ? s
-            : s with { Pending = [.. s.Pending, request] });
+            : s with { Pending = [.. Fresh(s.Pending, now).TakeLast(MaxPending - 1), request] });
 
         logger.LogInformation(
             "收到 {Elector} 的评审指派请求：{Revision}（{Note}）",
@@ -330,18 +440,36 @@ public sealed class MeshService(
         foreach (var peer in mesh.Members.Where(
             p => p.Id != mesh.Self.Id && p.Endpoint.Length > 0 && p.IsAlive(now)))
         {
-            var remote = await mesh.PullChainAsync(peer, fromIndex, ct).ConfigureAwait(false);
-            if (remote.Count == 0)
-            {
-                continue;
-            }
-
+            var next = fromIndex;
             var applied = 0;
-            foreach (var b in remote.OrderBy(x => x.Index))
+
+            // 分页往前挪。整段一次性要回来的话，对端要把那一段链同时以 List<Block>
+            // 和一个完整 byte[] 的形态驻留 —— 而链是永远在长的。
+            for (var page = 0; page < MaxCatchUpPages; page++)
             {
-                if ((await acta.TryApplyAsync(b, ct).ConfigureAwait(false)).Applied)
+                var remote = await mesh.PullChainAsync(peer, next, ChainPage, ct).ConfigureAwait(false);
+                if (remote.Count == 0)
                 {
-                    applied++;
+                    break;
+                }
+
+                var before = applied;
+                foreach (var b in remote.OrderBy(x => x.Index))
+                {
+                    if ((await acta.TryApplyAsync(b, ct).ConfigureAwait(false)).Applied)
+                    {
+                        applied++;
+                    }
+
+                    // 按拿到的实际索引往前挪，不按页号算 —— 对端的页大小可能比我们要的小。
+                    next = Math.Max(next, b.Index + 1);
+                }
+
+                // 这一页一块都落不进去，再往后翻也只会是同样的结果（缺的那块在更前面，
+                // 或者这条链根本对不上）。让下一个对端试。
+                if (applied == before)
+                {
+                    break;
                 }
             }
 

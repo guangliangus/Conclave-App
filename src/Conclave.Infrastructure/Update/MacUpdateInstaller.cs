@@ -40,6 +40,16 @@ public sealed class MacUpdateInstaller(
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
 
+    /// <summary>
+    /// 确认空闲之后再等一下复查，用来收掉一个竞态：编排循环在 tick 开头才读
+    /// <c>UpdateInProgress</c>，所以「它读到 false 并起了一次评审」和「这里看到手上没活」
+    /// 有可能撞在同一瞬间。一个 tick 的 I/O（读链、读账本）远不到这个时长，
+    /// 所以复查一次一定看得到那个刚起来的评审。
+    /// </summary>
+    private static readonly TimeSpan IdleRecheck = TimeSpan.FromSeconds(3);
+
+    public bool CanInstall => OperatingSystem.IsMacOS() && TryResolveBundle() is not null;
+
     public async Task InstallAsync(ReleaseInfo release, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -60,7 +70,7 @@ public sealed class MacUpdateInstaller(
             await VerifyAsync(zip, release.Sha256, ct).ConfigureAwait(false);
 
             state.SetUpdateProgress(true, "已下载并校验，等本节点评完手上的 PR…");
-            await orchestrator.WhenIdleAsync().WaitAsync(ct).ConfigureAwait(false);
+            await WaitForIdleAsync(ct).ConfigureAwait(false);
 
             state.SetUpdateProgress(true, "正在替换 Conclave.app…");
             var staged = await UnpackAsync(zip, updates, release.Version, ct).ConfigureAwait(false);
@@ -88,17 +98,44 @@ public sealed class MacUpdateInstaller(
     /// <c>dotnet run</c> 起的开发进程不在任何 .app 里 —— 那时候明确报出来，
     /// 别去猜 <c>/Applications/Conclave.app</c>：开发机上那里装的可能是另一版。
     /// </remarks>
-    private string ResolveBundle()
-    {
-        if (!string.IsNullOrWhiteSpace(options.Update.BundlePath))
-        {
-            return options.Update.BundlePath;
-        }
+    private string ResolveBundle() => TryResolveBundle()
+        ?? throw new InvalidOperationException(
+            "当前进程不在 .app 里（开发模式），没有可替换的目标。装好的 .app 才能就地更新");
 
-        var dir = Path.GetDirectoryName(Environment.ProcessPath);
+    private string? TryResolveBundle() =>
+        string.IsNullOrWhiteSpace(options.Update.BundlePath)
+            ? FindBundle(Environment.ProcessPath)
+            : options.Update.BundlePath;
+
+    /// <summary>
+    /// 从可执行文件往上找它所在的 <c>.app</c>；不在任何 <c>.app</c> 里就是 null。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 认一个目录是 bundle 要同时满足两条，两条都是被真事故逼出来的 —— 这个返回值
+    /// 会被 <see cref="SwapAsync"/> 整个 <c>mv</c> 走，认错等于删掉一棵目录树。
+    /// </para>
+    /// <list type="number">
+    /// <item>
+    /// 后缀<b>区分大小写</b>地比。<c>.app</c> 是 Apple 定死的小写后缀，而本仓库的项目目录
+    /// 偏偏叫 <c>src/Conclave.App</c>：用 <c>OrdinalIgnoreCase</c> 的话，开发态进程
+    /// （<c>src/Conclave.App/bin/Debug/net10.0/conclave</c>）往上找会把<b>源码目录</b>
+    /// 当成要替换的 bundle。实测后果是整个 <c>src/Conclave.App</c> 被改名成
+    /// <c>.previous</c>、原地换成下载来的发布包。
+    /// </item>
+    /// <item>
+    /// 还要求 <c>Contents/MacOS</c> 真的在。光看名字不够：正好叫 <c>*.app</c> 的普通目录
+    /// 到处都可能有，而它们里面没有可替换的东西。
+    /// </item>
+    /// </list>
+    /// </remarks>
+    internal static string? FindBundle(string? executablePath)
+    {
+        var dir = Path.GetDirectoryName(executablePath);
         while (!string.IsNullOrEmpty(dir))
         {
-            if (dir.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
+            if (Path.GetFileName(dir).EndsWith(".app", StringComparison.Ordinal)
+                && Directory.Exists(Path.Combine(dir, "Contents", "MacOS")))
             {
                 return dir;
             }
@@ -106,8 +143,33 @@ public sealed class MacUpdateInstaller(
             dir = Path.GetDirectoryName(dir);
         }
 
-        throw new InvalidOperationException(
-            "当前进程不在 .app 里（开发模式），没有可替换的目标。装好的 .app 才能就地更新");
+        return null;
+    }
+
+    /// <summary>
+    /// 等到本节点真的没在评审。
+    /// </summary>
+    /// <remarks>
+    /// 两段：先等当前在跑的那些收尾，再隔 <see cref="IdleRecheck"/> 复查一次 ——
+    /// <c>WhenIdleAsync</c> 返回的是调用那一刻的快照，不复查就可能在
+    /// 「刚好又起了一次评审」的瞬间替换二进制并重启，把那次评审白烧掉。
+    /// 这里不设总上限：<b>宁可一直等，也不能打断评审</b>。人随时能退出，
+    /// 而下次起来时新版已经下载校验好了。
+    /// </remarks>
+    private async Task WaitForIdleAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            await orchestrator.WhenIdleAsync().WaitAsync(ct).ConfigureAwait(false);
+            await Task.Delay(IdleRecheck, ct).ConfigureAwait(false);
+
+            if (orchestrator.IsIdle)
+            {
+                return;
+            }
+
+            logger.LogDebug("刚要替换又起了一次评审，继续等");
+        }
     }
 
     private async Task DownloadAsync(ReleaseInfo release, string zip, CancellationToken ct)

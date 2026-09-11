@@ -32,6 +32,17 @@ public sealed record PrView(
     /// <summary>认领了但还没开跑的节点。</summary>
     public string? ClaimedBy { get; init; }
 
+    /// <summary>
+    /// 这一条允不允许作者评自己的 PR，随队列项而来（见 <c>QueuedRevision.AllowSelfReview</c>）。
+    /// </summary>
+    /// <remarks>
+    /// 界面判定「能不能指派给某个节点」要跟领域层用<b>同一个</b>谓词
+    /// （<c>SeatAssignment.Eligible</c>），而那个谓词要这个值。
+    /// 刻意随队列项传过来而不是让界面读本机配置：一台允许、一台不允许，
+    /// 两边算出的合格节点集就不同 —— 那正是这个字段一路挂在队列项上的原因。
+    /// </remarks>
+    public bool AllowSelfReview { get; init; }
+
     /// <summary>开始评的时刻，用于显示「评了多久」。</summary>
     public DateTimeOffset? StartedAt { get; init; }
 

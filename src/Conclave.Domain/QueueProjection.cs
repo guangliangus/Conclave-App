@@ -50,6 +50,44 @@ public sealed record QueueEntry(
 public static class QueueProjection
 {
     /// <summary>
+    /// <see cref="Build"/> 会考虑到的那些 revision id。
+    /// </summary>
+    /// <remarks>
+    /// 存在的理由只有一个：<c>ballots</c> 与 <c>finished</c> 是调用方从链上读来传进来的，
+    /// 而链上「已经评过的」会一直积累下去。先问清楚「这一轮到底要查哪几个」，
+    /// 读账本那一步的开销就跟队列长度挂钩，而不是跟链长挂钩
+    /// （见 <c>IActaStore.ReadSummaryAsync</c>）。
+    /// <para>
+    /// 筛选口径必须跟 <see cref="Build"/> 里那一段<b>逐字一致</b>：只看存活节点上报的
+    /// <see cref="LiveState.Discovered"/>。少算一个就会让那个 PR 的票数凭空变成 0、
+    /// 于是被重复评审。
+    /// </para>
+    /// </remarks>
+    public static IReadOnlySet<string> RevisionIds(
+        IReadOnlyDictionary<string, LiveState> states, IReadOnlySet<string> alive)
+    {
+        ArgumentNullException.ThrowIfNull(states);
+        ArgumentNullException.ThrowIfNull(alive);
+
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (electorId, state) in states)
+        {
+            if (!alive.Contains(electorId))
+            {
+                continue;
+            }
+
+            foreach (var item in state.Discovered)
+            {
+                _ = ids.Add(item.Revision.Id);
+            }
+        }
+
+        return ids;
+    }
+
+    /// <summary>
     /// 合并视图。
     /// </summary>
     /// <param name="states">electorId → 该节点上报的实时状态（含自己）。</param>

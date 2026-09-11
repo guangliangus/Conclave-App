@@ -24,11 +24,9 @@ public sealed class RebaseTests : IDisposable
             _home = Path.Combine(Path.GetTempPath(), $"conclave-rebase-{tag}-{Guid.NewGuid():N}");
             Identity = ElectorIdentity.Create();
             AllowList = new MutableAllowList(Identity.Id);
-            Acta = new SqliteActa(
-                new ConclaveOptions { HomeDirectory = _home },
-                Identity,
-                AllowList,
-                NullLogger<SqliteActa>.Instance);
+            var options = new ConclaveOptions { HomeDirectory = _home };
+            Acta = new SqliteActa(options, Identity, AllowList, NullLogger<SqliteActa>.Instance);
+            Log = new SqliteReviewLog(options);
         }
 
         internal ElectorIdentity Identity { get; }
@@ -37,8 +35,11 @@ public sealed class RebaseTests : IDisposable
 
         internal SqliteActa Acta { get; }
 
+        /// <summary>跟 <see cref="Acta"/> 同一个 home，所以读的是同一份投影表。</summary>
+        internal SqliteReviewLog Log { get; }
+
         internal Task<IReadOnlyList<Block>> ChainAsync()
-            => Acta.ReadChainAsync(0, CancellationToken.None);
+            => Acta.ReadChainAsync(0, int.MaxValue, CancellationToken.None);
 
         public void Dispose()
         {
@@ -265,6 +266,63 @@ public sealed class RebaseTests : IDisposable
 
         // 删掉一块会让它后面每一块的 PrevHash 断链，所以必须整段重挂 —— 这里验证链仍然完整。
         AssertValidChain(after);
+    }
+
+    [Fact]
+    public async Task Rebasing_moves_the_projection_instead_of_duplicating_it()
+    {
+        var ct = CancellationToken.None;
+
+        var genesis = await _a.Acta.AppendAsync(Rev.Id, BlockKind.Summons, Summons(), ct);
+
+        // 本地这一票已经投影进 reviews 了。
+        var ballot = await _a.Acta.AppendAsync(
+            Rev.Id, BlockKind.Ballot,
+            new BallotPayload(
+                Rev.Id, 0, ReviewDecision.Reject, [], "m", 1,
+                new ReviewUsage(10, 20, 0, 0, 0, 0.5m, "list", 1, [])) with
+            {
+                Pr = TestElectors.Pr(),
+            },
+            ct);
+
+        Assert.Equal(ballot.Hash(), Assert.Single(await _a.Log.ReadRecentAsync(10, ct)).BlockHash);
+
+        // 造一个哈希一定更小的远端块顶掉它 —— 这条用例要的正是「本地让位」那一支。
+        var intruder = Smaller(genesis.Hash(), ballot.Hash());
+        var result = await _a.Acta.TryApplyAsync(intruder, ct);
+
+        Assert.True(result.Applied);
+        var moved = Assert.Single(result.Rebased);
+        Assert.Equal(ballot.PayloadJson, moved.PayloadJson);
+        Assert.NotEqual(ballot.Hash(), moved.Hash());   // 换了索引就得重签，哈希跟着变
+
+        // 投影必须<b>跟着搬</b>：旧哈希那行是幽灵（它指向的块已经不在链上了），
+        // 新哈希那行必须在。多一行就是金额重复计，少一行就是账单凭空少一次评审。
+        var rows = await _a.Log.ReadRecentAsync(10, ct);
+        Assert.Equal(moved.Hash(), Assert.Single(rows).BlockHash);
+
+        var total = await _a.Log.ReadTotalAsync(null, null, ct);
+        Assert.Equal(1, total.Reviews);
+        Assert.Equal(0.5m, total.CostUsd);
+    }
+
+    /// <summary>造一个哈希比 <paramref name="loser"/> 小、挂在同一个前驱上的 index 1 区块。</summary>
+    private Block Smaller(string prevHash, string loser)
+    {
+        for (var salt = 0; salt < 1000; salt++)
+        {
+            var candidate = SignAt(
+                _b.Identity, 1, prevHash, BlockKind.Seating,
+                new SeatingPayload(Rev.Id, salt, _b.Identity.Id));
+
+            if (string.CompareOrdinal(candidate.Hash(), loser) < 0)
+            {
+                return candidate;
+            }
+        }
+
+        throw new InvalidOperationException("造不出哈希更小的块 —— 一千次都没撞上，该怀疑哈希实现");
     }
 
     [Fact]

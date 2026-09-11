@@ -25,7 +25,16 @@ public sealed record AssignTarget(
     string RevisionId, string ElectorId, string Label, ICommand Command);
 
 /// <summary>mesh 里的一个对端节点，界面上怎么称呼它。</summary>
-/// <param name="Id">公钥指纹全长。</param>
+/// <param name="Node">
+/// 节点本身。
+/// <para>
+/// 带着整个 <see cref="Elector"/> 而不只是几个字符串，是为了让「能不能指派给它」
+/// 直接问 <see cref="SeatAssignment.Eligible"/> —— 那是领域层判定合格节点的<b>同一个</b>
+/// 谓词。菜单要是自己另算一套，就会出现「菜单里能选、选了对方立刻拒绝」这种
+/// 自相矛盾（实际踩到的形状：同一个 az 身份的第二台机器被列了出来，
+/// 而作者不能评自己的 PR）。
+/// </para>
+/// </param>
 /// <param name="Name">人读的名字：az 身份短名，取不到时退回指纹前 8 位。</param>
 /// <param name="Label">指派菜单里的说法，名字后面还带着对方的额度。</param>
 /// <param name="IsIdle">
@@ -39,7 +48,11 @@ public sealed record AssignTarget(
 /// 两个称呼分开，是因为它们回答的是两个问题：菜单要「指派给谁划算」，所以带额度；
 /// 而「我的 PR 被谁评了」只要一个名字 —— 那一格里塞进 <c>（额度 12%）</c> 反而读不出重点。
 /// </remarks>
-public sealed record PeerInfo(string Id, string Name, string Label, bool IsIdle = true);
+public sealed record PeerInfo(Elector Node, string Name, string Label, bool IsIdle = true)
+{
+    /// <summary>公钥指纹全长。</summary>
+    public string Id => Node.Id;
+}
 
 /// <summary>队列一行上的四个动作。</summary>
 /// <remarks>
@@ -253,27 +266,48 @@ public sealed class PrRow
         // 硬规则的死角：作者自己的 PR 没有任何合格节点，席位表为空、永远没人评，
         // 指派给别人是它唯一的出路。别人的 PR 有 HRW 自动分席位，替它挑评审者
         // 既没必要、也是在替 mesh 做决定。
-        // 只列空闲的节点。一个节点一次只评一个 PR，指给忙着的那台只是排进它的队列。
-        AssignTargets = [.. peers
-            .Where(p => p.Id != selfId && p.IsIdle)
+        //
+        // 候选人过两道闸：
+        //   · SeatAssignment.Eligible —— 领域层判定合格节点的同一个谓词。指派绕开的是
+        //     「席位怎么分」，不是「谁有资格评」，所以<b>同一个人不能收自己的 PR</b>
+        //     （同一个 az 身份的第二台机器也是自己）、没有这个 project 权限的不能收、
+        //     额度满的和离线的不能收。菜单自己另算一套的下场是「能选、选了对方立刻拒绝」。
+        //   · IsIdle —— 比 Eligible 更严一档：一个节点一次只评一个 PR，
+        //     指给忙着的那台只是排进它的队列，而请求方并不知道要等多久。
+        var others = peers.Where(p => p.Id != selfId).ToList();
+        var qualified = others
+            .Where(p => SeatAssignment.Eligible(p.Node, view.Pr, DateTimeOffset.UtcNow, view.AllowSelfReview))
+            .ToList();
+
+        AssignTargets = [.. qualified
+            .Where(p => p.IsIdle)
             .Select(p => new AssignTarget(RevisionId, p.Id, p.Label, commands.Assign))];
 
         // 按钮画不画，只看「这是不是一个能指派的 PR」；有没有对象可指是「能不能点」。
         // 没对象就整段消失的话，这个功能看起来就像不存在。
         ShowAssign = open && IsMine && view.ReviewingBy is null;
 
-        // 灰掉时那句解释。分清「没有别的节点」和「都在忙」：前者要去开 mesh，
-        // 后者只要等一会儿 —— 两种完全不同的处置。
-        var others = peers.Count(p => p.Id != selfId);
+        // 灰掉时那句解释。四种处置完全不同，不能糊成一句「不能指派」：
+        //   没有别的节点   → 去把 mesh 开起来 / 等同事开机
+        //   都是同一个人   → 这台机器上换不出评审者，得找别人
+        //   没有一个合格   → 去开 project 权限，或者等额度回落
+        //   合格但都在忙   → 等一会儿
+        var samePerson = others.Count > 0 && others.All(
+            p => AzIdentity.SamePerson(p.Node.AzIdentity, view.Pr.Author));
+
         AssignHint = !ShowAssign
             ? string.Empty
             : busy
                 ? busyTip
                 : AssignTargets.Count > 0
                     ? string.Empty
-                    : others == 0
+                    : others.Count == 0
                         ? "mesh 里还没有别的节点"
-                        : "其他节点都在忙，等它们评完再指派";
+                        : qualified.Count == 0
+                            ? samePerson
+                                ? $"别的节点都是同一个 az 身份（{view.Pr.Author}）—— 不能把自己的 PR 指派给自己"
+                                : "别的节点都不合格：没有这个 project 的权限、额度用满，或者已经离线"
+                            : "能评这个 PR 的节点都在忙，等它们评完再指派";
 
         HasAssignHint = AssignHint.Length > 0;
 

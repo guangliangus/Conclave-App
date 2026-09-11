@@ -33,6 +33,16 @@ public interface IUpdateSource
 public interface IUpdateInstaller
 {
     /// <summary>
+    /// 这台机器上能不能就地替换。
+    /// </summary>
+    /// <remarks>
+    /// 为 false 的典型情形是<b>进程不在 .app 里</b>（<c>dotnet run</c> 的开发态）——
+    /// 没有可替换的目标。自动更新必须先问这一句：不问就会每小时试一次、每次失败一条
+    /// 通知，把开发机的通知列表灌满，而那根本不是「更新出问题了」。
+    /// </remarks>
+    bool CanInstall { get; }
+
+    /// <summary>
     /// 下载 → 校验 → 等本节点空闲 → 替换 .app → 重启进程。进度写进 <see cref="NodeState"/>。
     /// </summary>
     /// <remarks>

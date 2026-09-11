@@ -84,6 +84,32 @@ public sealed class ProcessRunnerTests : IDisposable
         Assert.Contains("b", result.StdOut, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Huge_output_is_capped_and_keeps_the_tail()
+    {
+        // claude --output-format stream-json --verbose 会把每个工具返回体的全文都打出来，
+        // 一次十五分钟的评审能吐几百 MB —— 原先全攒在一个没有上限的 StringBuilder 里。
+        // 这里造一份稳超上限的输出，验证三件事：不爆、Truncated 报出来、留的是尾巴。
+        var lines = (ProcessRunner.MaxCapturedChars / 1000) + 2000;
+        var script = Write(
+            "#!/bin/sh\n"
+            + $"awk 'BEGIN{{p=sprintf(\"%*s\",998,\"\");for(i=0;i<{lines};i++)print i p}}'\n"
+            + "echo 最后一行\n");
+
+        var result = await ProcessRunner.RunAsync(script, [], ct: CancellationToken.None)
+            .ConfigureAwait(true);
+
+        Assert.True(result.Success);
+        Assert.True(result.Truncated, "超过上限时必须报出来 —— 否则 az 那边会把截断的前缀当 JSON 解析");
+        Assert.True(
+            result.StdOut.Length <= ProcessRunner.MaxCapturedChars,
+            $"实际留了 {result.StdOut.Length} 个字符，上限是 {ProcessRunner.MaxCapturedChars}");
+
+        // 丢开头留结尾：出票要的那行 type=result 在末尾。
+        Assert.EndsWith("最后一行", result.StdOut, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n0 ", result.StdOut, StringComparison.Ordinal);
+    }
+
     private string Write(string body)
     {
         _ = Directory.CreateDirectory(_dir);

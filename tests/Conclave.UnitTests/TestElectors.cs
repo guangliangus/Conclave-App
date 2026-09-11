@@ -15,7 +15,8 @@ internal static class TestElectors
         int reviews24h = 0,
         int maxConcurrent = 2,
         double utilization = 0,
-        DateTimeOffset? heartbeat = null) => new()
+        DateTimeOffset? heartbeat = null,
+        string appVersion = "1.0.0-test") => new()
         {
             Id = id,
             PublicKey = "pk-" + id,
@@ -27,7 +28,7 @@ internal static class TestElectors
             Utilization = utilization,
             LastHeartbeat = heartbeat ?? Now,
             ProtocolVersion = Beacon.ProtocolVersion,
-            AppVersion = "1.0.0-test",
+            AppVersion = appVersion,
         };
 
     internal static PrMeta Pr(

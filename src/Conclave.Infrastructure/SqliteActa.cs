@@ -249,8 +249,16 @@ public sealed class SqliteActa : IActaStore
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
 
-        // 块哈希变了，投影必须重建，否则报表里留下幽灵行。
-        await ReprojectAsync(conn, ct).ConfigureAwait(false);
+        // 块哈希变了，投影必须跟着动，否则报表里留下指向已不存在区块的幽灵行。
+        // 只动<b>真正搬了家的那几块</b>：摘下来的那一段全部撤掉投影，重挂的那些重新投影。
+        // 原先是整链重放（清空 reviews + 把所有 Ballot 块读进内存再投一遍）——
+        // 而让位在多节点下是常态不是异常，开销随链长无限增长。
+        await UnprojectAsync(conn, displaced.Select(b => b.Hash()), ct).ConfigureAwait(false);
+        await ProjectBallotAsync(conn, winner, ct).ConfigureAwait(false);
+        foreach (var moved in reattached)
+        {
+            await ProjectBallotAsync(conn, moved, ct).ConfigureAwait(false);
+        }
 
         _logger.LogWarning(
             "索引冲突 #{Index}：远端块胜出，本地重挂 {Reattached} 块、丢弃 {Dropped} 块（待其作者重推）",
@@ -284,19 +292,54 @@ public sealed class SqliteActa : IActaStore
     /// 量级远小于原先（原先每个活跃 PR 都要写 Summons + Seating）。
     /// </para>
     /// </remarks>
-    public async Task<ChainSummary> ReadSummaryAsync(CancellationToken ct)
+    /// <summary>一次 <c>IN (...)</c> 里最多塞几个 revision。SQLite 的参数上限是 999。</summary>
+    private const int SummaryBatch = 400;
+
+    public async Task<ChainSummary> ReadSummaryAsync(
+        IReadOnlyCollection<string> revisionIds, CancellationToken ct)
     {
-        await using var conn = Open();
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT revision_id, kind, payload
-            FROM blocks
-            WHERE kind IN ('Ballot', 'Promulgation')
-            ORDER BY block_index
-            """;
+        ArgumentNullException.ThrowIfNull(revisionIds);
 
         var ballots = new Dictionary<string, int>(StringComparer.Ordinal);
         var verdicts = new Dictionary<string, Verdict>(StringComparer.Ordinal);
+
+        if (revisionIds.Count == 0)
+        {
+            return new ChainSummary(ballots, verdicts);
+        }
+
+        await using var conn = Open();
+
+        foreach (var batch in revisionIds.Distinct(StringComparer.Ordinal).Chunk(SummaryBatch))
+        {
+            await ReadSummaryBatchAsync(conn, batch, ballots, verdicts, ct).ConfigureAwait(false);
+        }
+
+        return new ChainSummary(ballots, verdicts);
+    }
+
+    private static async Task ReadSummaryBatchAsync(
+        SqliteConnection conn,
+        string[] revisionIds,
+        Dictionary<string, int> ballots,
+        Dictionary<string, Verdict> verdicts,
+        CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+
+        // 占位符是这里现生成的 $r0…$rN，值一律走参数 —— 拼进 SQL 的只有我们自己造的名字。
+        var names = new string[revisionIds.Length];
+        for (var i = 0; i < revisionIds.Length; i++)
+        {
+            names[i] = "$r" + i.ToString(CultureInfo.InvariantCulture);
+            _ = cmd.Parameters.AddWithValue(names[i], revisionIds[i]);
+        }
+
+        cmd.CommandText =
+            "SELECT revision_id, kind, payload FROM blocks "
+            + "WHERE kind IN ('Ballot', 'Promulgation') "
+            + $"AND revision_id IN ({string.Join(", ", names)}) "
+            + "ORDER BY block_index";
 
         await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -339,16 +382,17 @@ public sealed class SqliteActa : IActaStore
                 ballots[revisionId] = ballots.GetValueOrDefault(revisionId) + 1;
             }
         }
-
-        return new ChainSummary(ballots, verdicts);
     }
 
-    public async Task<IReadOnlyList<Block>> ReadChainAsync(long fromIndex, CancellationToken ct)
+    public async Task<IReadOnlyList<Block>> ReadChainAsync(
+        long fromIndex, int limit, CancellationToken ct)
     {
         await using var conn = Open();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"{BlockColumns} WHERE block_index >= $from ORDER BY block_index";
+        cmd.CommandText =
+            $"{BlockColumns} WHERE block_index >= $from ORDER BY block_index LIMIT $limit";
         _ = cmd.Parameters.AddWithValue("$from", fromIndex);
+        _ = cmd.Parameters.AddWithValue("$limit", Math.Max(1, limit));
         return await ReadAllAsync(cmd, ct).ConfigureAwait(false);
     }
 
@@ -543,28 +587,44 @@ public sealed class SqliteActa : IActaStore
         }
     }
 
+    /// <summary>一次 <c>IN (...)</c> 里最多塞几个块哈希。</summary>
+    private const int UnprojectBatch = 400;
+
     /// <summary>
-    /// 从链上整体重建评审投影。
+    /// 撤掉这些块的评审投影。
     /// </summary>
     /// <remarks>
-    /// 让位重挂会改块哈希，而投影行是按 <c>block_hash</c> 唯一的 —— 不重建就会留下
-    /// 指向已不存在区块的幽灵行，报表里的金额会重复计。链是唯一真相，重建总是安全的。
+    /// <para>
+    /// 让位重挂会改块哈希，而投影行是按 <c>block_hash</c> 唯一的 —— 摘下来那一段的旧行
+    /// 不撤掉就变成指向已不存在区块的幽灵行，报表里的金额会重复计。
+    /// </para>
+    /// <para>
+    /// 被丢弃的（别人签的、我们重签不了的）块也在这一批里，它们的投影一并撤掉是对的：
+    /// 那些块确实已经不在本地链上了，等其作者重推之后会重新落链、重新投影。
+    /// </para>
     /// </remarks>
-    private static async Task ReprojectAsync(SqliteConnection conn, CancellationToken ct)
+    private static async Task UnprojectAsync(
+        SqliteConnection conn, IEnumerable<string> blockHashes, CancellationToken ct)
     {
-        await using (var wipe = conn.CreateCommand())
+        foreach (var batch in blockHashes.Chunk(UnprojectBatch))
         {
-            wipe.CommandText = "DELETE FROM review_model_usages; DELETE FROM reviews;";
-            _ = await wipe.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
+            await using var cmd = conn.CreateCommand();
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"{BlockColumns} WHERE kind = 'Ballot' ORDER BY block_index";
-        var ballots = await ReadAllAsync(cmd, ct).ConfigureAwait(false);
+            // 占位符是这里现生成的 $h0…$hN，值一律走参数。
+            var names = new string[batch.Length];
+            for (var i = 0; i < batch.Length; i++)
+            {
+                names[i] = "$h" + i.ToString(CultureInfo.InvariantCulture);
+                _ = cmd.Parameters.AddWithValue(names[i], batch[i]);
+            }
 
-        foreach (var block in ballots)
-        {
-            await ProjectBallotAsync(conn, block, ct).ConfigureAwait(false);
+            var placeholders = string.Join(", ", names);
+            cmd.CommandText =
+                "DELETE FROM review_model_usages WHERE review_id IN "
+                + $"(SELECT id FROM reviews WHERE block_hash IN ({placeholders}));"
+                + $"DELETE FROM reviews WHERE block_hash IN ({placeholders});";
+
+            _ = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
     }
 

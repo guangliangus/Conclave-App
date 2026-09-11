@@ -14,6 +14,7 @@ public sealed class ReviewRow
 
         Layout = layout ?? new TableLayout();
 
+        BlockHash = record.BlockHash;
         At = record.ReviewedAt.ToLocalTime().ToString("MM-dd HH:mm", CultureInfo.InvariantCulture);
         Reviewer = record.ReviewerAz.Length > 0
             ? Labels.ShortAccount(record.ReviewerAz)
@@ -58,6 +59,15 @@ public sealed class ReviewRow
 
     /// <summary>三张表共用的「该显示几列」。</summary>
     public TableLayout Layout { get; }
+
+    /// <summary>
+    /// 这一票所在区块的哈希 —— <c>reviews</c> 投影表的主键，所以天然唯一且稳定。
+    /// </summary>
+    /// <remarks>
+    /// 界面上不显示，只给 <see cref="RowSync"/> 当身份用：账单表 200 行、每 30 秒刷一次，
+    /// 没有身份就只能整张表拆了重建。
+    /// </remarks>
+    public string BlockHash { get; }
 
     public string At { get; }
 
