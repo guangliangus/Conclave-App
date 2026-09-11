@@ -638,14 +638,17 @@ public sealed partial class MainViewModel : ViewModelBase
     /// 那台机器还是会走到当初那一步。
     /// </para>
     /// <para>
-    /// 触发点<b>至今没定位</b>。堆里的签名很整齐（每套
-    /// <c>TBaseFont</c> / <c>TFPInMemoryFont</c> / <c>TTrueTypeMemoryFont</c> 配一个
-    /// 624KB 的字体全文块加 7 个 96KB 的块），一度据此怀疑是嵌入字体那条路，
-    /// 但隔离工程复现不出来 —— 见 <c>Program.UiFontFamily</c> 的注释。
-    /// 下一步得 <c>MallocStackLogging=1</c> 起一次再 <c>malloc_history</c>。
-    /// 菜单栏图标那条路<b>不受影响</b> —— 它订的是 <see cref="NodeState.Changed"/>
-    /// 而不是这个 ViewModel（见 <c>App.WatchReviewingState</c>），
-    /// 所以窗口没开时图标照样跟着评审状态换脸。
+    /// 触发点后来定位到了，是<b>非默认 FontFamily</b>：只要界面上有一处设了自己的字体，
+    /// 每刷新一轮 Avalonia 就经 <c>SKTypeface.FromStream</c> 造一份不释放也不复用的
+    /// typeface（约 1.3MB）。这个项目里只有 <c>.mono</c> 那一处，去掉它之后
+    /// 那几个计数全程是 0。完整的三档实测数据与上游 issue 在
+    /// <c>Styles/Controls.axaml</c> 的 <c>.mono</c> 注释里。
+    /// </para>
+    /// <para>
+    /// 所以这道闸现在仍然有价值，但不再是唯一防线：它省掉「没人看的时候白刷」，
+    /// 而漏本身已经在源头上没了。菜单栏图标那条路<b>不受影响</b> —— 它订的是
+    /// <see cref="NodeState.Changed"/> 而不是这个 ViewModel（见
+    /// <c>App.WatchReviewingState</c>），所以窗口没开时图标照样跟着评审状态换脸。
     /// </para>
     /// </remarks>
     public void SetVisible(bool visible)

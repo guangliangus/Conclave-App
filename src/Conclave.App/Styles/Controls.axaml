@@ -132,11 +132,12 @@
   <!--
     字重上限是 SemiBold(600)，不要写 Bold。
     默认字体是 PingFang SC（见 Program.UiFontFamily），而它只到 Semibold ——
-    请求 700 的时候 Avalonia 匹配不到，会走「把字体字节读出来再造一份带模拟效果的」
-    那条路（FontManagerImpl.TryCreateGlyphTypeface(Stream, FontSimulations)
-    → SKTypeface.FromStream），而那条路在 Avalonia 12.1.2 / SkiaSharp 上每走一次
-    漏约 1.3MB 原生内存（624KB 字体全文 + 7×96KB 字形表），不释放。
-    600 是原生字重，精确命中，不进模拟。
+    请求 700 匹配不到，Avalonia 会做字重模拟（读出字节再造一份带假粗体的 typeface），
+    画出来的是合成粗体，不是这个字体真正的粗。
+
+    它走的也是 .mono 那段注释里说的那条 FromStream 路径，但模拟的结果是<b>被缓存
+    的</b>（实测只建一次就不再增长），所以它不是那个泄漏的主因 —— 主因是非默认
+    FontFamily。这里限死 600 是为了字形本身，顺带少建一个 typeface。
   -->
   <Style Selector="TextBlock.wordmark">
     <Setter Property="FontSize" Value="14" />
@@ -191,16 +192,32 @@
   </Style>
 
   <!--
-    等宽。原先写的是 "Menlo,Monaco,Consolas,monospace" —— 这个进程只打 macOS 的包，
-    而后三个名字在 macOS 上一个都不存在（Consolas 是 Windows 的，monospace 是 CSS 的
-    通用名，Avalonia 不认），于是每一次文字布局都要把这串名字从头解析一遍才落到 Menlo。
+    等宽<b>暂时关着</b> —— 这里刻意不设 FontFamily。
 
-    第二个名字是必需的而不是保险：Menlo 没有任何 CJK 字形，而挂 .mono 的地方有中文
-    （最密的是日志面板）。不写出来就得每段中文再向平台要一次回退字体，正是
-    Program.UiFontFamily 那段注释里说的那条会漏原生内存的路。
+    Avalonia 12.1.2 的 macOS 后端上，只要用了<b>非默认字体</b>，每轮界面刷新就会经
+    SkiaTypeface.TryGetStream → FontManagerImpl.TryCreateGlyphTypeface(Stream, …)
+    → SKTypeface.FromStream 造一份新的 typeface，而它既不释放也不复用，每份约 1.3MB
+    （624KB 字体全文 + 7 个 96KB 的字形表块）。底层是 Skia macOS 字体管理器不接管
+    字体数据所有权（mono/SkiaSharp#2446，2023 年报的，3.119.4 上仍复现），
+    上游已报 AvaloniaUI/Avalonia#22214。
+
+    三档实测（同一 commit、同一份真实链数据 31 个 PR、面板开着、mesh 关、各 5 分钟）：
+
+      "Menlo,PingFang SC"   启动 44 块，之后 +8/分    footprint 323→393MB 一直涨
+      "Menlo"（单名）        启动 42 块，之后 +0.7/分  footprint 312→328MB
+      不设（现在这样）        0 块         0            footprint 250→266MB 平
+
+    多个名字要糟一个数量级，但单名也照漏 —— 跟名字写得对不对无关，跟「用了非默认
+    字体」有关。+8/分 正好是这个界面每分钟的刷新次数（_refreshTimer 2 + _liveTimer 2
+    + NodeState.Changed 4），也就是每刷新一轮漏一套。
+
+    代价是 commit 哈希、PR 号、token 数、金额不再等宽。这几列本来就是定宽加
+    Classes="num" 右对齐的，丢的是观感不是可读性。
+
+    class 名和 FontSize 留着：上游修好之后把那一行 Setter 加回来就行，
+    调用点（二十来处 Classes="… mono …"）一个都不用动。
   -->
   <Style Selector="TextBlock.mono">
-    <Setter Property="FontFamily" Value="Menlo,PingFang SC" />
     <Setter Property="FontSize" Value="11" />
   </Style>
 
