@@ -494,6 +494,9 @@ scripts/package-macos.sh                             # 打成 dist/Conclave.app
 平时只有菜单栏右上角一个图标，**不占 Dock、不进 Cmd+Tab**（`LSUIElement` + 运行时
 `MacOSPlatformOptions.ShowInDock=false`）。后台的轮询与编排一直在跑。
 
+图标本身就是状态：**空闲闭眼打盹，评审中睁眼，而且一秒一次一张一合地呼吸**
+（定时换图，macOS 的 `NSStatusItem` 没有别的做法；空闲时定时器是停的，不占 CPU）。
+
 **点一下图标就是主面板**（`MainWindow`，1280×840），没有中间那一跳；再点一下收起。
 面板**失焦即隐藏** —— 它是「看一眼就走」的东西，切去别的应用就自己收起来。
 行内动作菜单（「⋯」）开着时不收，否则点开菜单的那一刻面板会连着菜单一起消失。

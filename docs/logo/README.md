@@ -26,16 +26,59 @@ GitHub Octocat 那种做法：一枚近黑的圆徽，里面一个白色剪影�
 
 ## 应用里的图标
 
-`scripts/make-icon.py` 按同一份几何生成 `src/Conclave.App/Assets/` 下的三个文件
+`scripts/make-icon.py` 按同一份几何生成 `src/Conclave.App/Assets/` 下的全部图标
 （纯标准库、无依赖，CI 上能重现）：
 
 | 文件 | 说明 |
 |---|---|
 | `conclave.png` | 1024×1024 App 图标。squircle 底板（近黑渐变）+ 白剪影 + 四层材质；`.icns` 由打包脚本从它缩出来 |
 | `conclave.ico` | 256 的 PNG 负载，Windows / Avalonia 窗口图标 |
-| `conclave-tray-idle.png` / `conclave-tray-busy.png` | 36px 菜单栏模板图（纯黑 + alpha）。App 按 `NodeState.Reviewing` 换：闲着闭眼，评着睁眼 |
+| `conclave-tray-idle.png` / `conclave-tray-busy.png` | 36px 菜单栏模板图（纯黑 + alpha，带纵向渐隐）。App 按 `NodeState.Reviewing` 换：闲着闭眼，评着睁眼 |
+| `conclave-tray-busy-0.png` … `-6.png` | 评审中的呼吸帧，见下。第 0 张跟 `conclave-tray-busy.png` 逐字节相同 |
+
+### 渐变只能做在 alpha 上
+
+菜单栏图标**没有颜色**可言：`setTemplate:YES` 之后 macOS 只拿 alpha 当蒙版，按浅色/深色
+菜单栏用标签色自己染，PNG 里的 RGB 全部被丢掉。所以「彩色渐变」在这里不成立 ——
+但 alpha 是被尊重的（抗锯齿边缘就是证明），于是能做的是**浓淡**渐变：
+菜单栏用它自己的颜色画出深浅。
+
+做法是一道纵向渐隐（`vertical_fade`），从头顶的 1.0 走到脚下的 0.65：
+
+- **上实下虚**，不是反过来。头就是那对眼睛，整个标志的身份在那里，得最实；脚下那根横杆虚下去。
+- **0.65 是下限。** 再淡菜单栏上就读成「图标没画完」，而不是「渐变」。
+- **起止取字形的真实上下沿**（SVG `y=52` 的耳羽尖 → `y=234` 的横杆底），不是画布边 ——
+  否则渐变两端浪费在空白上，中间那截反而看不出变化。
+
+要**真彩**渐变就得放弃模板图：`setTemplate:NO` 之后系统不再管你，深色栏一套颜色、
+浅色栏另一套，得自己读 `NSApp.effectiveAppearance`、订 `AppleInterfaceThemeChangedNotification`
+重新换图，帧数也翻倍。为一道 20px 高的渐变，不值。
+
+### 评审中会呼吸
+
+评审中那张不是静止的：眼睑一张一合，一秒一次，就是「它正在看」。macOS 没有「会动的
+状态栏图标」这回事 —— `NSStatusItem` 只认一张 `NSImage`（animated GIF 塞进去也不会动，
+`NSStatusBarButton` 只画静态帧），所以动画就是定时换图，由 `TrayAnimator` 驱动。
+
+几个数都是有来由的：
+
+- **只有 7 张，是半个周期**（全睁 → 最眯）。呼吸是对称的，回程由 `TrayAnimator` 倒着放，
+  一轮 `2*(7-1)=12` 拍；存满一圈就是 5 张逐字节重复的 PNG。
+- **开度从 1.00 到 0.45**，按余弦取点（两端慢中间快，线性插值看着像机械百叶窗）。
+  再眯下去就跟空闲那张闭眼图撞了 —— 那会让人分不清「在评」还是「闲着」。
+- **80ms 一拍**，12 拍≈一秒一次呼吸。再快只是白烧电：18pt 上眼睑总共也就动两三个像素。
+- **横轴不动、只压纵轴**（`ellipse` 而不是缩小 `circle`）：压下来的是眼睑，不是眼珠变瘦。
+
+没有对应的 SVG：这几帧不是新几何，只是把睁眼那张的 `aperture` 参数调小重渲一遍。
+改帧数改 `TRAY_FRAMES`，同时要跟 `App.TrayBusyFrameCount` 对齐：生成的比 App 要的少，
+`tray-selftest` 会红（帧解不出来）；多出来的那几张会被悄悄忽略，没人告诉你。
 
 改图案的顺序：**先改 SVG，再把数字搬进脚本**，然后 `python3 scripts/make-icon.py src/Conclave.App/Assets`（约一分钟）。
+
+菜单栏那几张改完**必须看一眼深浅两底**（脚本顶上第 5 条）—— 模板图在图片查看器里是一团黑，
+跟它上栏之后的样子没关系。`python3 scripts/preview-tray.py /tmp/tray.png` 做的就是 macOS
+那一步染色：放大若干倍，上下两行分别压在浅色栏和深色栏底色上。它是模拟不是截图，
+真机上还有壁纸透上来那类因素，最后仍要在真菜单栏上看一眼。
 App 图标用 squircle 而不是 SVG 里的圆徽：Dock 里别的图标都是 squircle，一枚圆的会显得矮一截。
 
 ## 对比候选：啄木鸟（`conclave-woodpecker-*`）

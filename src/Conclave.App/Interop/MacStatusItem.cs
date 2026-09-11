@@ -68,6 +68,17 @@ internal sealed class MacStatusItem : IDisposable
 
     private static IntPtr _targetClass;
 
+    /// <summary>
+    /// 图片缓存：路径 → 已经配置好（模板图 + 尺寸）的 <c>NSImage</c>，我们持有它一份引用。
+    /// </summary>
+    /// <remarks>
+    /// 原先每次 <see cref="SetIcon"/> 都 <c>initWithContentsOfFile:</c> 重读一张。空闲 /
+    /// 评审那种几分钟一次的切换无所谓，<see cref="TrayAnimator"/> 的呼吸帧是 12fps ——
+    /// 每 80ms 一次读盘加一次 native alloc/release，而「per-tick 建 native 对象」正是
+    /// 字体那次泄出 40GB 的形状。键是我们自己解到磁盘的那几个固定路径，不会无限长。
+    /// </remarks>
+    private readonly Dictionary<string, IntPtr> _images = new(StringComparer.Ordinal);
+
     private readonly IntPtr _item;
     private readonly IntPtr _button;
     private bool _disposed;
@@ -113,9 +124,39 @@ internal sealed class MacStatusItem : IDisposable
         _current = this;
     }
 
-    /// <summary>换图。空闲 / 评审中两张模板图靠它切换，必须在 UI 线程上调。</summary>
-    internal void SetIcon(string path)
+    /// <summary>
+    /// 换图。空闲 / 评审中两张模板图与呼吸帧都靠它切换，必须在 UI 线程上调。
+    /// </summary>
+    /// <remarks>图按路径缓存（见 <see cref="_images"/>），命中之后只剩一次 <c>setImage:</c>。</remarks>
+    internal void SetIcon(string path) => _ = MsgSend(_button, Sel("setImage:"), Image(path));
+
+    /// <summary>
+    /// 预热若干张图。
+    /// </summary>
+    /// <remarks>
+    /// 动画一旦跑起来，读盘失败就发生在定时器回调里 —— 那里没有能接住它的调用栈。
+    /// 提前在<b>还有人接异常的地方</b>把每一帧都读一遍，顺带免掉第一轮的逐帧卡顿。
+    /// </remarks>
+    internal void PreloadIcons(IEnumerable<string> paths)
     {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        foreach (var path in paths)
+        {
+            _ = Image(path);
+        }
+    }
+
+    /// <summary>读图并配置好，同一路径只做一次。</summary>
+    private IntPtr Image(string path)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_images.TryGetValue(path, out var cached))
+        {
+            return cached;
+        }
+
         var image = MsgSend(
             MsgSend(objc_getClass("NSImage"), Sel("alloc")),
             Sel("initWithContentsOfFile:"),
@@ -127,18 +168,18 @@ internal sealed class MacStatusItem : IDisposable
         }
 
         // 模板图：macOS 只用 alpha 当蒙版，按浅色/深色菜单栏自己染色。
-        // 不设的话深色菜单栏上就是一团黑。
+        // 不设的话深色菜单栏上就是一团黑。也正因为 RGB 会被丢掉，图上那道渐变是
+        // 做在 alpha 上的浓淡渐隐（见 docs/logo/README.md），不是颜色渐变。
         MsgSendBool(image, Sel("setTemplate:"), true);
 
-        // 必须显式设尺寸。NSImage 的 size 来自 PNG 的像素尺寸（44x44），
-        // 直接塞进 22pt 高的菜单栏会顶满甚至被裁。
+        // 必须显式设尺寸。NSImage 的 size 来自 PNG 的像素尺寸（36x36 = 18pt @2x），
+        // 不设的话它按像素当点算，塞进 22pt 高的菜单栏会顶满甚至被裁。
         MsgSendSize(image, Sel("setSize:"), new CGSize(IconPoints, IconPoints));
 
-        _ = MsgSend(_button, Sel("setImage:"), image);
-
-        // 没有 ARC：alloc/init 出来的那一份归我们，setImage: 已经自己 retain 了一份，
-        // 我们这份得还回去 —— 换图是常态之后不还就是每次泄一张。
-        _ = MsgSend(image, Sel("release"));
+        // 没有 ARC：alloc/init 出来的这一份归我们，一直留到 Dispose —— 所以这里不 release。
+        // setImage: 会自己再 retain 一份，两边各管各的。
+        _images[path] = image;
+        return image;
     }
 
     internal void SetToolTip(string toolTip)
@@ -219,6 +260,15 @@ internal sealed class MacStatusItem : IDisposable
         {
             _ = MsgSend(bar, Sel("removeStatusItem:"), _item);
         }
+
+        // 缓存的那些 NSImage 各自欠着一次 release（见 Image）。button 自己 retain 的那份
+        // 跟着 status item 一起走，跟这里无关。
+        foreach (var image in _images.Values)
+        {
+            _ = MsgSend(image, Sel("release"));
+        }
+
+        _images.Clear();
 
         if (ReferenceEquals(_current, this))
         {

@@ -634,16 +634,15 @@ public sealed partial class MainViewModel : ViewModelBase
     /// <b>这道闸只挡住了「没人在看的时候」，漏本身还在。</b> 后来又量了一轮：
     /// 面板收着时确实持平（2.7 分钟 +0.2MB），一打开就回到每分钟 10–15MB ——
     /// 光打开那一下的全量 <see cref="Refresh"/> 就是 33 秒 +48MB，一个进程跑了
-    /// 五十几分钟就到 1.0GB。所以这里挡的是<b>放大系数</b>，不是原因。
+    /// 五十几分钟就到 1.0GB。所以这里挡的是<b>放大系数</b>，不是原因；面板长开的时候
+    /// 那台机器还是会走到当初那一步。
     /// </para>
     /// <para>
-    /// 真正的原因后来定位到了：字体缺少请求的字重时，Avalonia 会把字体字节读出来
-    /// 再造一份带模拟效果的 typeface（<c>SkiaTypeface.TryGetStream</c> →
-    /// <c>FontManagerImpl.TryCreateGlyphTypeface(Stream, FontSimulations)</c> →
-    /// <c>SKTypeface.FromStream</c>），而那个 typeface 不释放也不复用，每次约 1.3MB。
-    /// 修法是让默认字体同时覆盖用到的文字和请求的字重，见
-    /// <c>Program.UiFontFamily</c> 与 <c>Controls.axaml</c> 里那段「字重上限」的注释；
-    /// 上游已报 AvaloniaUI/Avalonia#22214。
+    /// 触发点<b>至今没定位</b>。堆里的签名很整齐（每套
+    /// <c>TBaseFont</c> / <c>TFPInMemoryFont</c> / <c>TTrueTypeMemoryFont</c> 配一个
+    /// 624KB 的字体全文块加 7 个 96KB 的块），一度据此怀疑是嵌入字体那条路，
+    /// 但隔离工程复现不出来 —— 见 <c>Program.UiFontFamily</c> 的注释。
+    /// 下一步得 <c>MallocStackLogging=1</c> 起一次再 <c>malloc_history</c>。
     /// 菜单栏图标那条路<b>不受影响</b> —— 它订的是 <see cref="NodeState.Changed"/>
     /// 而不是这个 ViewModel（见 <c>App.WatchReviewingState</c>），
     /// 所以窗口没开时图标照样跟着评审状态换脸。
@@ -1202,6 +1201,11 @@ public sealed partial class MainViewModel : ViewModelBase
             .GroupBy(v => v.ReviewingBy!)
             .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)[.. g.Select(v => v.Revision.Id)]);
 
+        // 本节点的额度窗口明细。跟额度卡读的是同一份 NodeState.Usage —— 两处各读一次探针
+        // 的话，界面上会出现两个时刻的读数，而「到底哪个决定了入席」就说不清了。
+        // 对端没有：心跳里只有一个标量（Beacon.SigningPayload）。
+        IReadOnlyList<UsageWindow> selfQuotas = _state.Usage?.Windows ?? [];
+
         RowSync.Apply(
             Nodes,
             [.. _mesh.Members
@@ -1213,6 +1217,7 @@ public sealed partial class MainViewModel : ViewModelBase
                     m.Id == self.Id,
                     now,
                     reviewing.TryGetValue(m.Id, out var ids) ? ids : [],
+                    m.Id == self.Id ? selfQuotas : null,
                     Layout))],
             static r => r.Id);
 

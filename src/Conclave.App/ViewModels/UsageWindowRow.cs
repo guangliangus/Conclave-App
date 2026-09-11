@@ -8,10 +8,19 @@ namespace Conclave.App.ViewModels;
 /// 额度面板里的一条：一个窗口的用量、重置时刻与进度条。
 /// </summary>
 /// <remarks>
+/// <para>
 /// 颜色阈值直接引 <see cref="Elector.MaxUtilization"/>（0.8）—— 那是「不再入席」的那条线，
 /// 界面上变红的时刻必须跟真实行为改变的时刻是同一刻，另写一个 0.9 只会骗自己。
+/// </para>
+/// <para>
+/// <b>是 record 而不是 class</b>：它现在既是额度卡自己的一行，也<b>嵌在</b>
+/// <see cref="NodeRow.Quotas"/> 里。<see cref="RowSync"/> 的内容指纹用反射遍历公开属性，
+/// 嵌套对象走的是 <c>Convert.ToString</c> 那一支 —— class 只会给出类型名，
+/// 于是节点表那一列的百分比变了也不会重画。record 的 <c>ToString</c> 带全部属性，
+/// 指纹才跟得上。同 <see cref="AssignTarget"/>。
+/// </para>
 /// </remarks>
-public sealed class UsageWindowRow
+public sealed record UsageWindowRow
 {
     /// <summary>接近上限：还能接活，但值得看一眼。</summary>
     private const double WarnAt = 0.6;
@@ -21,6 +30,7 @@ public sealed class UsageWindowRow
         ArgumentNullException.ThrowIfNull(window);
 
         Label = Labels.UsageWindow(window.Key);
+        Short = Labels.UsageWindowShort(window.Key);
         Percent = window.Utilization * 100;
         PercentText = Format.Percent(window.Utilization);
         ResetText = Reset(window.ResetsAt, now);
@@ -47,6 +57,7 @@ public sealed class UsageWindowRow
     public UsageWindowRow(string label, double utilization, string detail)
     {
         Label = label;
+        Short = label;
         Percent = utilization * 100;
         PercentText = Format.Percent(utilization);
         ResetText = detail;
@@ -56,6 +67,9 @@ public sealed class UsageWindowRow
     }
 
     public string Label { get; }
+
+    /// <summary>窄列里用的短名（<c>5h</c> / <c>7d</c>）。</summary>
+    public string Short { get; }
 
     /// <summary>0–100，喂给进度条。</summary>
     public double Percent { get; }
