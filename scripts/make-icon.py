@@ -25,7 +25,9 @@
 
 纯标准库（zlib + struct），不引任何图像库 —— 图标要能在 CI 上无依赖重现。
 用 2x 超采样做抗锯齿；颜色可以是 (px, py) -> rgb/rgba 的函数，渐变与材质就是这么来的；
-颜色为 None 表示把已画上的抹回透明（挖洞用，模板图不能拿底色去盖）。
+颜色为 None 表示把已画上的抹回透明（挖洞用，模板图不能拿底色去盖）；
+rgba 落在空白上就按那个 alpha 直接画上去（菜单栏模板图的纵向渐隐靠这个），
+落在已有颜色上则混上去（App 图标那四层材质）。
 贝塞尔轮廓先拍平成多边形，再按扫描行缓存交点做 even-odd 填充 —— render 是逐行扫的，
 同一个 py 会被问 n 次，缓存之后每个子像素只剩一次二分查找。
 """
@@ -42,6 +44,18 @@ SS = 2                      # 超采样倍数
 # 白白多一次重采样把本来就细的线抹糊。
 TRAY_SIZE = 36
 TRAY_SS = 8                 # 小图必须高倍超采样，否则边缘全是锯齿
+# 「评审中」的呼吸帧：只渲半个周期（全睁 → 最眯），回程由 TrayAnimator 倒着放 ——
+# 呼吸是对称的，存满一圈就是 5 张逐字节重复的 PNG。改这里要同步 App.TrayBusyFrameCount。
+TRAY_FRAMES = 7
+TRAY_APERTURE_MIN = 0.45    # 最眯那一帧的眼睑开度。再小就跟空闲那张闭眼图撞了
+# 纵向渐隐：上实下虚。头（也就是那对眼睛，整个标志的身份）最实，脚下那根横杆虚下去。
+# 只能做浓淡不能做彩色 —— 模板图的颜色被 macOS 整个丢掉，见 vertical_fade。
+# 0.65 是下限：再淡下去菜单栏上就读成「图标没画完」，而不是「渐变」。
+TRAY_FADE = (1.0, 0.65)
+# 渐隐的上下沿取字形的真实上下沿（SVG y=52 的耳羽尖 → y=234 的横杆底），不是画布边，
+# 否则渐变两端会浪费在空白上。式子跟 build_shapes 里的 at() 同一条（scale=1.2）。
+TRAY_GLYPH_TOP = 0.5 + ((52 - 8) / 256.0 - 0.5) * 1.2
+TRAY_GLYPH_BOTTOM = 0.5 + ((234 - 8) / 256.0 - 0.5) * 1.2
 GROUND = (0x1F, 0x23, 0x28)     # 近黑，SVG 里是平涂的 #24292F；这里上下各偏一点做成极弱的渐变
 GROUND_HI = (0x2C, 0x31, 0x39)  # 底板顶部
 GLYPH = (0xFF, 0xFF, 0xFF)      # 剪影：纯白，跟 Octocat 一样不带暖色
@@ -64,6 +78,14 @@ def capsule(x0, y0, x1, y1, w):
 def circle(cx, cy, r):
     def inside(px, py):
         return (px - cx) ** 2 + (py - cy) ** 2 <= r * r
+
+    return inside
+
+
+def ellipse(cx, cy, rx, ry):
+    """椭圆。眨眼的中间态用它：横轴不动、只压纵轴 —— 压下来的是眼睑，不是眼珠变瘦。"""
+    def inside(px, py):
+        return ((px - cx) / rx) ** 2 + ((py - cy) / ry) ** 2 <= 1.0
 
     return inside
 
@@ -193,7 +215,8 @@ def rim_light(thickness, peak, radius):
 _PLATE = object()   # hole 的默认值哨兵：None 是「挖透」，不能拿它当「没传」
 
 
-def build_shapes(*, plate=True, scale=1.0, glyph=None, hole=_PLATE, tray=False, eyes="open"):
+def build_shapes(*, plate=True, scale=1.0, glyph=None, hole=_PLATE, tray=False, eyes="open",
+                 aperture=1.0):
     """
     近黑底板 + 白色猫头鹰 + 脚下一把钥匙。
 
@@ -206,6 +229,8 @@ def build_shapes(*, plate=True, scale=1.0, glyph=None, hole=_PLATE, tray=False, 
     和钥匙的环与齿 —— 18pt 上它们只会变成一圈灰毛边，脚下只留一根横杆。
     eyes="closed" 是空闲那张：眼睛不是两个洞，而是两道向下弯的弧缝（闭着的眼睑）。
     菜单栏里状态一变，最先动的就是这一对眼；缝宽 12，缩到 18px 约 2px，再细就抹成灰了。
+    aperture 是睁眼那张的眼睑开度（1 = 全睁，0.45 = 眯着），菜单栏「评审中」的呼吸动画
+    就是同一份几何按不同开度渲出来的一串帧。
     """
     # 坐标 = SVG 路径的 (x, y - 8) / 256，再绕画布中心按 scale 缩放
     def at(x, y):
@@ -220,6 +245,9 @@ def build_shapes(*, plate=True, scale=1.0, glyph=None, hole=_PLATE, tray=False, 
 
     def circ(cx, cy, r):
         return circle(*at(cx, cy), d(r))
+
+    def ell(cx, cy, rx, ry):
+        return ellipse(*at(cx, cy), d(rx), d(ry))
 
     def path(*cmds):
         """M 起点，随后每项是 3 个点（两个控制点 + 终点，三次贝塞尔）或 1 个点（直线），闭合成多边形。"""
@@ -263,7 +291,14 @@ def build_shapes(*, plate=True, scale=1.0, glyph=None, hole=_PLATE, tray=False, 
             shapes += [(seg, hole) for seg in stroke(pts, d(12))]
     else:
         eye_r = 25 if tray else 24
-        shapes += [(circ(100, 118, eye_r), hole), (circ(156, 118, eye_r), hole)]
+        if aperture >= 1.0:
+            # 全睁仍然走 circ 而不是 ell(r, r)：两者数学上等价，但「先除再平方」跟
+            # 「直接平方」末位可能差一点 —— 而这脚本的验收方式就是「重跑，已有的图逐字节不变」。
+            eyeballs = [circ(100, 118, eye_r), circ(156, 118, eye_r)]
+        else:
+            lid = eye_r * aperture
+            eyeballs = [ell(100, 118, eye_r, lid), ell(156, 118, eye_r, lid)]
+        shapes += [(e, hole) for e in eyeballs]
 
     if not tray:
         shapes += [(circ(102, 120, 9), glyph), (circ(154, 120, 9), glyph)]
@@ -301,6 +336,51 @@ def build_shapes(*, plate=True, scale=1.0, glyph=None, hole=_PLATE, tray=False, 
     return shapes
 
 
+def over(src, dst):
+    """source-over 合成。src 是 rgba，dst 是 (r, g, b, a) 或 None（透明）。
+
+    三条分支正好是这个脚本的三种用法，顺序按「必须逐位复现」排：
+
+    1. dst 不透明（材质层压在底板上）—— 走原来那行算式，一个字没改。通用公式在
+       dst 不透明时数学上等价，但 ra = sa + (1-sa) 在浮点里不保证正好是 1.0，
+       除一下就可能让某个 round() 翻个方向。App 图标要逐字节可复现，不赌这个。
+    2. dst 透明（alpha 画笔直接落在空白上）—— 原样画上去。新增的一种，模板图的渐隐靠它；
+       原先这种情况是**整片不画**（旧代码要求 hit is not None 才混）。
+    3. 两边都半透明 —— 正规 source-over。目前没人用，但写对了比留个坑好。
+    """
+    if dst is None:
+        return (src[0], src[1], src[2], src[3])
+
+    a = src[3] / 255.0
+    if dst[3] == 255:
+        return (*(int(round(src[i] * a + dst[i] * (1 - a))) for i in range(3)), 255)
+
+    da = dst[3] / 255.0
+    ra = a + da * (1 - a)
+    return (
+        *(int(round((src[i] * a + dst[i] * da * (1 - a)) / ra)) for i in range(3)),
+        int(round(255 * ra)),
+    )
+
+
+def vertical_fade(colour, top, bottom, y_top=0.0, y_bottom=1.0):
+    """
+    纵向渐隐：颜色不变，只有 alpha 从上到下从 top 走到 bottom（都是 0..1）。
+
+    菜单栏模板图唯一能做的「渐变」就是这个。模板图的颜色会被 macOS 整个丢掉（只拿 alpha
+    当蒙版按深浅色染色），所以彩色渐变在那里根本不成立 —— 但 alpha 是被尊重的，
+    于是「用菜单栏自己的颜色做的浓淡渐变」是可行的。y_top / y_bottom 是渐变的起止高度，
+    传字形的实际上下沿而不是画布边，否则渐变的两端会浪费在空白上。
+    """
+    span = y_bottom - y_top
+
+    def paint(px, py):
+        t = min(1.0, max(0.0, (py - y_top) / span))
+        return (*colour, int(round(255 * (top + (bottom - top) * t))))
+
+    return paint
+
+
 def render(size, ss, shapes=None):
     shapes = shapes or build_shapes()
     n = size * ss
@@ -315,7 +395,7 @@ def render(size, ss, shapes=None):
         row = []
         for sx in range(n):
             px = sx * step + half
-            hit = None
+            hit = None          # None = 透明，否则是 (r, g, b, a)
             # 从后往前叠加：带 alpha 的材质层要跟下面混合，不能「最后一个赢」
             for inside, colour in shapes:
                 if not inside(px, py):
@@ -329,10 +409,9 @@ def render(size, ss, shapes=None):
 
                 c = colour(px, py) if callable(colour) else colour
                 if len(c) == 3:
-                    hit = c
-                elif hit is not None and c[3]:
-                    a = c[3] / 255.0
-                    hit = tuple(int(round(c[i] * a + hit[i] * (1 - a))) for i in range(3))
+                    hit = (*c, 255)
+                elif c[3]:
+                    hit = over(c, hit)
             row.append(hit)
         rows.append(row)
 
@@ -344,15 +423,16 @@ def render(size, ss, shapes=None):
                 for dx in range(ss):
                     c = rows[y * ss + dy][x * ss + dx]
                     if c is not None:
-                        r += c[0]
-                        g += c[1]
-                        b += c[2]
-                        a += 255
+                        # rgb 按 alpha 加权：半透明的子像素不该跟不透明的一样重。
+                        # 全不透明时结果跟旧的「除以覆盖数」逐位相同（约掉同一个 255）。
+                        r += c[0] * c[3]
+                        g += c[1] * c[3]
+                        b += c[2] * c[3]
+                        a += c[3]
             if a == 0:
                 out += b"\x00\x00\x00\x00"
             else:
-                covered = a // 255
-                out += bytes((r // covered, g // covered, b // covered, a // samples))
+                out += bytes((r // a, g // a, b // a, a // samples))
     return bytes(out)
 
 
@@ -403,13 +483,32 @@ if __name__ == "__main__":
     # 菜单栏（NSStatusItem）用的模板图。三处跟 App 图标不同：
     #   1. 没有底板 —— 菜单栏图标一律只有字形，底透出菜单栏本身
     #   2. 纯黑 + alpha —— 模板图由 macOS 按浅色/深色菜单栏自己染色，自带颜色反而会错；
-    #      眼洞传 None 是真的挖透（render 里 None = 抹回透明），不能拿底色去盖
+    #      眼洞传 None 是真的挖透（render 里 None = 抹回透明），不能拿底色去盖。
+    #      「渐变」也只能做在 alpha 上（vertical_fade）：颜色会被丢掉，透明度不会 ——
+    #      于是菜单栏上看到的是一道用它自己的颜色画的浓淡渐变
     #   3. 简化 + 放大 —— tray=True 去掉瞳孔、翅膀刻线、钥匙的环与齿，眼洞放大一档；
     #      没有底板就没有 squircle 的视觉收边，scale 1.2 让它占满又不顶到栏的上下沿
     #
     # 两张：空闲闭眼、评审中睁眼。App 按 NodeState.Reviewing 在菜单栏里换图。
+    fade = vertical_fade(TEMPLATE, *TRAY_FADE, TRAY_GLYPH_TOP, TRAY_GLYPH_BOTTOM)
+
     for name, eyes in (("conclave-tray-idle.png", "closed"), ("conclave-tray-busy.png", "open")):
         tray = render(TRAY_SIZE, TRAY_SS, build_shapes(
-            plate=False, scale=1.2, glyph=TEMPLATE, hole=None, tray=True, eyes=eyes))
+            plate=False, scale=1.2, glyph=fade, hole=None, tray=True, eyes=eyes))
         n = write_png(out_dir / name, TRAY_SIZE, tray)
         print(f"  {name}  {n:,} 字节（{TRAY_SIZE}px 模板图，{eyes}）")
+
+    # 评审中的呼吸帧：眼睑一张一合，就是「它正在看」。
+    # 只渲半个周期（全睁 → 最眯），回程由 TrayAnimator 倒着放，合起来 2*(N-1)=12 拍一轮。
+    # 第 0 帧跟 conclave-tray-busy.png 逐字节相同（aperture=1 走的是同一条 circ 分支）——
+    # 多这一张是为了让 App 拿到一串编号连续的帧，不用把静态图特判成第一帧。
+    for i in range(TRAY_FRAMES):
+        # 余弦而不是线性：两端慢中间快，跟真眨眼一样；线性插值看着像机械百叶窗
+        aperture = TRAY_APERTURE_MIN + (1 - TRAY_APERTURE_MIN) * (
+            0.5 + 0.5 * math.cos(math.pi * i / (TRAY_FRAMES - 1)))
+        frame = render(TRAY_SIZE, TRAY_SS, build_shapes(
+            plate=False, scale=1.2, glyph=fade, hole=None, tray=True,
+            eyes="open", aperture=aperture))
+        name = f"conclave-tray-busy-{i}.png"
+        n = write_png(out_dir / name, TRAY_SIZE, frame)
+        print(f"  {name}  {n:,} 字节（呼吸帧 {i + 1}/{TRAY_FRAMES}，开度 {aperture:.2f}）")

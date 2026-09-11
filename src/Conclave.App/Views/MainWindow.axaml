@@ -241,10 +241,13 @@
           </StackPanel>
 
           <!--
-            描述吃掉剩下的宽度，同时也是最先让位的那一列：再长也只是一句话，
-            截断了信息还在（悬浮能看全），而 PR 号 / 作者 / 状态 少一个这张表就读不懂了。
+            描述吃掉剩下的宽度。它是这个 DockPanel 的 LastChildFill，所以<b>不能</b>跟着
+            断点隐藏 —— 藏起来之后那份剩余宽度不会分给别的列，中间直接空出一整片死区
+            （窗口最窄 700、Mid 断点 820，这一档里描述整列是空白的）。
+            要让位的只能是定宽的那几列（仓库 / 结论 / 操作），描述被压窄就行：
+            再长也只是一句话，截断了还剩半句，而空着的那片什么都不是。
           -->
-          <StackPanel Margin="0,0,16,0" Spacing="2" IsVisible="{Binding Layout.Mid}"
+          <StackPanel Margin="0,0,16,0" Spacing="2"
                       VerticalAlignment="Center" ToolTip.Tip="{Binding StageTip}">
             <TextBlock Classes="cell" Text="{Binding Title}" />
             <TextBlock Classes="cell muted mono" FontSize="10" Text="{Binding Subtitle}" />
@@ -683,7 +686,7 @@
                                IsVisible="{Binding Layout.Mid}" Text="结论" />
                     <TextBlock DockPanel.Dock="Right" Width="176" Classes="th" Margin="0,0,12,0"
                                Text="状态" />
-                    <TextBlock Classes="th" IsVisible="{Binding Layout.Mid}" Text="描述" />
+                    <TextBlock Classes="th" Text="描述" />
                   </DockPanel>
                 </Border>
 
@@ -715,7 +718,7 @@
                                IsVisible="{Binding Layout.Mid}" Text="结论" />
                     <TextBlock DockPanel.Dock="Right" Width="176" Classes="th" Margin="0,0,12,0"
                                Text="状态 · 谁在评" />
-                    <TextBlock Classes="th" IsVisible="{Binding Layout.Mid}" Text="描述" />
+                    <TextBlock Classes="th" Text="描述" />
                   </DockPanel>
                 </Border>
 
@@ -916,15 +919,62 @@
                                          Margin="0,0,12,0" IsVisible="{Binding Layout.Mid}"
                                          Text="{Binding LoadText}" />
 
-                              <!-- 百分比 + 条：条是用来横向对比几台机器的，光看数字对不齐 -->
-                              <StackPanel DockPanel.Dock="Right" Width="132" Margin="0,0,12,0"
-                                          Spacing="5" VerticalAlignment="Center">
-                                <TextBlock Classes="cell mono" FontWeight="SemiBold"
-                                           Classes.warn="{Binding IsWarn}" Classes.bad="{Binding IsBad}"
-                                           Text="{Binding QuotaText}" />
-                                <ProgressBar Classes="quota" Value="{Binding QuotaPercent}"
-                                             Classes.warn="{Binding IsWarn}" Classes.bad="{Binding IsBad}" />
-                              </StackPanel>
+                              <!--
+                                本节点画 Claude 自己报的原始读数，一行一个窗口（5h / 7d）；
+                                对端画心跳里那个压力标量，因为协议里就只有它。
+
+                                两种画法共用同一套 22 / * / 34 的三列，条的左右端才对得齐 ——
+                                这一列的条是用来横着比几台机器的，对不齐就白画了。
+                                左边那格的标签正好把两者区分开：写「5h」「7d」的是真实额度，
+                                写「压力」的是折算值。
+                              -->
+                              <Panel DockPanel.Dock="Right" Width="132" Margin="0,0,12,0"
+                                     VerticalAlignment="Center">
+                                <ItemsControl ItemsSource="{Binding Quotas}"
+                                              IsVisible="{Binding HasQuotas}">
+                                  <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                      <StackPanel Spacing="5" />
+                                    </ItemsPanelTemplate>
+                                  </ItemsControl.ItemsPanel>
+                                  <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:UsageWindowRow">
+                                      <Grid ColumnDefinitions="22,*,34" ToolTip.Tip="{Binding Tip}">
+                                        <TextBlock Grid.Column="0" Classes="cell mono muted"
+                                                   FontSize="10" VerticalAlignment="Center"
+                                                   Text="{Binding Short}" />
+                                        <ProgressBar Grid.Column="1" Classes="quota" Margin="6,0"
+                                                     VerticalAlignment="Center"
+                                                     Value="{Binding Percent}"
+                                                     Classes.warn="{Binding IsWarn}"
+                                                     Classes.bad="{Binding IsBad}" />
+                                        <TextBlock Grid.Column="2" Classes="cell mono"
+                                                   FontSize="11" FontWeight="SemiBold"
+                                                   TextAlignment="Right" VerticalAlignment="Center"
+                                                   Classes.warn="{Binding IsWarn}"
+                                                   Classes.bad="{Binding IsBad}"
+                                                   Text="{Binding PercentText}" />
+                                      </Grid>
+                                    </DataTemplate>
+                                  </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <Grid ColumnDefinitions="22,*,34" IsVisible="{Binding !HasQuotas}">
+                                  <TextBlock Grid.Column="0" Classes="cell mono muted"
+                                             FontSize="10" VerticalAlignment="Center" Text="压力" />
+                                  <ProgressBar Grid.Column="1" Classes="quota" Margin="6,0"
+                                               VerticalAlignment="Center"
+                                               Value="{Binding QuotaPercent}"
+                                               Classes.warn="{Binding IsWarn}"
+                                               Classes.bad="{Binding IsBad}" />
+                                  <TextBlock Grid.Column="2" Classes="cell mono"
+                                             FontSize="11" FontWeight="SemiBold"
+                                             TextAlignment="Right" VerticalAlignment="Center"
+                                             Classes.warn="{Binding IsWarn}"
+                                             Classes.bad="{Binding IsBad}"
+                                             Text="{Binding QuotaText}" />
+                                </Grid>
+                              </Panel>
 
                               <Panel DockPanel.Dock="Right" Width="92">
                                 <Border Classes="badge"

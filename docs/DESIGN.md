@@ -657,6 +657,27 @@ target 类，`class_addMethod` 挂上回调，再 `setTarget:` / `setAction:`。
   为一个互操作文件给整个 UI 项目放开 unsafe 不值；这些签名全是 blittable 的指针和 double，
   运行时 marshalling 与生成代码等价。
 
+### 评审中的图标在呼吸
+
+空闲闭眼、评审中睁眼，而睁着的那只眼还一秒一张一合 —— 一眼就能看出这台机器在干活。
+macOS 没有「会动的状态栏图标」：`NSStatusItem` 只认一张 `NSImage`（animated GIF 塞进去
+也不会动，`NSStatusBarButton` 只画静态帧），所以动画只能是定时换图（`TrayAnimator`）。
+
+| 取舍 | 为什么 |
+|---|---|
+| 定时换图，不用 `CABasicAnimation` | layer 动画更省（CoreAnimation 跑，主线程零开销），但要从 P/Invoke 过 `CATransform3D` 的结构体 ABI —— 正是这层最难验的东西。换图只用已经验过的签名 |
+| `NSImage` 按路径缓存在 `MacStatusItem` 里 | 原先每次换图都 `initWithContentsOfFile:` 重读。几分钟一次无所谓，12fps 就是每 80ms 一次读盘加一次 native alloc/release ——「per-tick 建 native 对象」正是字体那次泄出 40GB 的形状 |
+| 定时器用 `DispatcherPriority.Normal`，不是 `Background` | `Background` 排在 Input/Render 后面，UI 一忙就被饿着。实测（`tray-selftest` 会打拍数）主面板正在建的那 280ms 里 12fps 的定时器只响了 1 拍，看起来就是「评审一开始图标先卡住」。一拍的活就是一次 `setImage:`，抢不走任何东西 |
+| 空闲时定时器是停的 | 常驻动画会一直唤醒主线程，而菜单栏被全屏窗口盖住时还照跑。只在评审中动，回到空闲立刻停、落回静态那张 |
+| 渐变做在 alpha 上，不在颜色上 | 模板图的 RGB 会被 macOS 整个丢掉（只拿 alpha 当蒙版按深浅色染色），所以彩色渐变在菜单栏上不成立；alpha 是被尊重的，于是做成纵向渐隐（上实下虚 1.0→0.65），菜单栏用它自己的颜色画出浓淡。要真彩就得 `setTemplate:NO` 并自己接管深浅色（两套帧 + 订 `AppleInterfaceThemeChangedNotification`），为一道 20px 高的渐变不值 |
+
+帧是 `scripts/make-icon.py` 从同一份几何渲的半个周期（全睁 → 最眯 7 张），回程倒着放，
+一轮 12 拍。为什么是 7 张、为什么最眯只到 0.45，见 `docs/logo/README.md`。
+
+自检里加了一条：`tray-selftest` 会真的让动画跑几拍再看 `Ticks`。「帧都读得出来」跟
+「动画在动」是两回事 —— 定时器没 Start、优先级建错、回调里静默抛异常，三种都表现为
+图标停在第一帧，而那跟静态图标肉眼分不出来。
+
 ### 多屏：面板必须出现在点击的那块屏上
 
 两套坐标系要对齐，而它们的差别不只是原点：

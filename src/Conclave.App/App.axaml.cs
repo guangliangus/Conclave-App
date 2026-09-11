@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -25,6 +26,24 @@ public partial class App : global::Avalonia.Application
     private const string TrayBusyAsset = "avares://conclave/Assets/conclave-tray-busy.png";
 
     /// <summary>
+    /// 「评审中」那套呼吸帧的张数（<c>conclave-tray-busy-0..6.png</c>）。
+    /// </summary>
+    /// <remarks>
+    /// 只有半个周期（全睁 → 最眯），回程由 <see cref="TrayAnimator"/> 倒着放。
+    /// 跟 <c>scripts/make-icon.py</c> 里的 <c>TRAY_FRAMES</c> 对齐 —— 那边加减帧，这里要跟。
+    /// </remarks>
+    private const int TrayBusyFrameCount = 7;
+
+    /// <summary>
+    /// 呼吸动画的帧间隔。
+    /// </summary>
+    /// <remarks>
+    /// 80ms × 12 拍 ≈ 一秒一次呼吸，看着像在读东西而不是在抽搐。再快没有收益：
+    /// 18pt 上眼睑总共也就动两三个像素，只是白烧电。
+    /// </remarks>
+    private static readonly TimeSpan TrayFrameInterval = TimeSpan.FromMilliseconds(80);
+
+    /// <summary>
     /// 「点击之前面板还是前台窗口」的判定窗口。
     /// </summary>
     /// <remarks>
@@ -39,6 +58,7 @@ public partial class App : global::Avalonia.Application
     private static readonly TimeSpan ToggleGrace = TimeSpan.FromMilliseconds(350);
 
     private MacStatusItem? _statusItem;
+    private TrayAnimator? _trayAnimator;
     private TrayIcon? _tray;
 
     /// <summary>解到磁盘上的两张托盘图的路径（macOS 的 NSImage 走文件）。</summary>
@@ -111,6 +131,19 @@ public partial class App : global::Avalonia.Application
                     _trayBusyPath = ExtractTrayIcon(TrayBusyAsset, "tray-busy.png");
                     _statusItem = new MacStatusItem(_trayIdlePath, "Conclave · 空闲");
                     _statusItem.Clicked += ToggleDashboard;
+
+                    // 动画是锦上添花。帧解不出来就退回原来的静态两张 ——
+                    // 图标和点击照常，只是评审中不会眨眼。不值得为它把入口整个丢掉。
+                    try
+                    {
+                        _trayAnimator = new TrayAnimator(
+                            _statusItem, ExtractBusyFrames(), TrayFrameInterval);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                                  or InvalidOperationException or ArgumentException)
+                    {
+                        Console.Error.WriteLine("呼吸帧加载失败，评审中改用静态图标：" + ex.Message);
+                    }
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
                                               or InvalidOperationException or ExternalException)
@@ -360,6 +393,8 @@ public partial class App : global::Avalonia.Application
     /// 订的是 <see cref="NodeState.Changed"/> 而不是 ViewModel 的属性：面板可能一次都没打开过
     /// （ViewModel 是第一次点图标才建的），而菜单栏图标从进程起来就该是对的。
     /// 事件在后台线程上来，换图必须回 UI 线程；没变就不动 —— 每轮编排都会发一次 Changed。
+    /// 「评审中」在 macOS 上不是一张静态图而是一段呼吸动画（见 <see cref="TrayAnimator"/>），
+    /// 空闲时定时器是停的，不占 CPU。
     /// </remarks>
     private void WatchReviewingState()
     {
@@ -390,7 +425,19 @@ public partial class App : global::Avalonia.Application
         if (OperatingSystem.IsMacOS() && _statusItem is not null
             && _trayIdlePath is not null && _trayBusyPath is not null)
         {
-            _statusItem.SetIcon(busy ? _trayBusyPath : _trayIdlePath);
+            if (_trayAnimator is null)
+            {
+                _statusItem.SetIcon(busy ? _trayBusyPath : _trayIdlePath);
+            }
+            else if (busy)
+            {
+                _trayAnimator.Start();
+            }
+            else
+            {
+                _trayAnimator.Stop(_trayIdlePath);
+            }
+
             _statusItem.SetToolTip(tip);
         }
         else if (_tray is not null)
@@ -398,6 +445,25 @@ public partial class App : global::Avalonia.Application
             _tray.Icon = new WindowIcon(AssetLoader.Open(new Uri(busy ? TrayBusyAsset : TrayIdleAsset)));
             _tray.ToolTipText = tip;
         }
+    }
+
+    /// <summary>把评审中那套呼吸帧解到磁盘，按序返回路径。</summary>
+    /// <remarks>
+    /// 编号拼出来而不是写 7 个常量：这串帧是 <c>scripts/make-icon.py</c> 一次生成的一组，
+    /// 手写一遍只是多一处会忘记同步的地方。
+    /// </remarks>
+    private static List<string> ExtractBusyFrames()
+    {
+        var frames = new List<string>(TrayBusyFrameCount);
+
+        for (var i = 0; i < TrayBusyFrameCount; i++)
+        {
+            var n = i.ToString(CultureInfo.InvariantCulture);
+            frames.Add(ExtractTrayIcon(
+                $"avares://conclave/Assets/conclave-tray-busy-{n}.png", $"tray-busy-{n}.png"));
+        }
+
+        return frames;
     }
 
     private static string ExtractTrayIcon(string asset, string fileName)
@@ -518,39 +584,103 @@ public partial class App : global::Avalonia.Application
         return problems;
     }
 
-    private void RunSelfTest(IClassicDesktopStyleApplicationLifetime desktop)
+    /// <summary>
+    /// 让呼吸动画真的跑几拍。
+    /// </summary>
+    /// <remarks>
+    /// 「帧都读得出来」跟「动画在动」是两回事：定时器没 Start、优先级建错、
+    /// 回调里静默抛异常，三种都表现为图标停在第一帧 —— 而那跟静态图标肉眼分不出来。
+    /// 所以这里是等真实的 <c>DispatcherTimer</c> 响，不是调 <c>OnTick</c> 假装一下。
+    /// <para>
+    /// 跑三拍而不是一整轮：一轮 12 拍将近一秒，而「响了」跟「响了 12 次」验到的是同一件事。
+    /// </para>
+    /// </remarks>
+    [SupportedOSPlatform("macos")]
+    private static async Task<List<string>> CheckAnimationAsync(TrayAnimator animator, string restPath)
     {
-        _ = Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+        var problems = new List<string>();
+
+        try
         {
-            var problems = new List<string>();
+            animator.Start();
+            await Task.Delay(TrayFrameInterval * 3.5).ConfigureAwait(true);
+            animator.Stop(restPath);
 
-            // 平台守卫写成正向条件而不是 `if (_statusItem is null) … else`：
-            // CA1416 认 OperatingSystem.IsMacOS() 这种形式的收窄，认不出后者。
-            if (OperatingSystem.IsMacOS() && _statusItem is not null)
+            if (animator.Ticks == 0)
             {
-                _statusItem.PerformClick();
-
-                if (_dashboard is null)
-                {
-                    problems.Add("performClick: 之后主面板没被创建 —— target/action 没接上");
-                }
-                else if (!_dashboard.IsVisible)
-                {
-                    problems.Add("主面板建了但不可见");
-                }
+                problems.Add("呼吸动画的定时器一拍都没响 —— 评审中图标会一直停在第一帧");
             }
             else
             {
-                problems.Add("没建出 NSStatusItem —— 这个自检只在 macOS 上有意义");
+                Console.WriteLine($"  ✓ 呼吸动画跑了 {animator.Ticks} 拍");
             }
+        }
+        catch (InvalidOperationException ex)
+        {
+            problems.Add("呼吸动画跑不起来：" + ex.Message);
+        }
 
-            DumpGeometry();
+        return problems;
+    }
 
-            if (Avalonia.Application.Current?.ApplicationLifetime
-                is IClassicDesktopStyleApplicationLifetime { Windows.Count: > 0 } live)
+    private void RunSelfTest(IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        _ = Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(async () =>
+        {
+            var problems = new List<string>();
+
+            // 自检主体整个包住。lambda 是 async 的，里面漏出来的异常不会像同步版那样
+            // 走 Dispatcher 的未处理异常通道把进程带走，而是变成一个没人 await 的
+            // Task 故障 —— 表现是自检既不打结论也不退出，挂在那里等人 Ctrl+C。
+            try
             {
-                Console.WriteLine("每屏坐标往返：");
-                problems.AddRange(CheckEveryScreen(live.Windows[0].Screens));
+                // 平台守卫写成正向条件而不是 `if (_statusItem is null) … else`：
+                // CA1416 认 OperatingSystem.IsMacOS() 这种形式的收窄，认不出后者。
+                if (OperatingSystem.IsMacOS() && _statusItem is not null)
+                {
+                    _statusItem.PerformClick();
+
+                    if (_dashboard is null)
+                    {
+                        problems.Add("performClick: 之后主面板没被创建 —— target/action 没接上");
+                    }
+                    else if (!_dashboard.IsVisible)
+                    {
+                        problems.Add("主面板建了但不可见");
+                    }
+
+                    // TrayAnimator 的构造函数会把每一帧都读成 NSImage，所以它建起来了
+                    // 就等于「7 张呼吸帧都打进了 avares、也都解得出来」——
+                    // 这类错（漏打一张、改名没同步）平时只表现为评审中图标不动。
+                    if (_trayAnimator is null || _trayIdlePath is null)
+                    {
+                        problems.Add($"呼吸帧没加载出来（应有 {TrayBusyFrameCount} 张），评审中会是静态图标");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  ✓ 呼吸帧 {TrayBusyFrameCount} 张全部可读");
+                        problems.AddRange(
+                            await CheckAnimationAsync(_trayAnimator, _trayIdlePath).ConfigureAwait(true));
+                    }
+                }
+                else
+                {
+                    problems.Add("没建出 NSStatusItem —— 这个自检只在 macOS 上有意义");
+                }
+
+                DumpGeometry();
+
+                if (Avalonia.Application.Current?.ApplicationLifetime
+                    is IClassicDesktopStyleApplicationLifetime { Windows.Count: > 0 } live)
+                {
+                    Console.WriteLine("每屏坐标往返：");
+                    problems.AddRange(CheckEveryScreen(live.Windows[0].Screens));
+                }
+            }
+            // 兜底捕获所有异常：自检的任何一步炸了都该变成一条「失败」，然后正常退出
+            catch (Exception ex)
+            {
+                problems.Add("自检自己炸了：" + ex);
             }
 
             if (problems.Count == 0)

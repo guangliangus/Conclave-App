@@ -59,6 +59,26 @@ internal static class Labels
     };
 
     /// <summary>
+    /// 额度窗口的短名，给「在线节点」表那一列用。
+    /// </summary>
+    /// <remarks>
+    /// 那一列只有 132px，「会话额度（5h）」放不下。短名跟 <see cref="UsageWindow"/> 的长名
+    /// 一一对应、不另起一套说法：括号里那截本来就是这个窗口最有信息量的部分。
+    /// 认不出的键原样返回，理由同长名。
+    /// </remarks>
+    internal static string UsageWindowShort(string key) => key switch
+    {
+        "five_hour" or "Current session" => "5h",
+        "seven_day" or "Current week" => "7d",
+        "spend_limit" => "消费",
+
+        _ when key.StartsWith(Application.Ports.UsageWindow.ScopedSevenDayPrefix, StringComparison.Ordinal)
+            => key[Application.Ports.UsageWindow.ScopedSevenDayPrefix.Length..],
+
+        _ => key,
+    };
+
+    /// <summary>
     /// <c>LIONMAIL\youngsun</c> → <c>youngsun</c>。
     /// </summary>
     /// <remarks>
