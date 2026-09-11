@@ -37,8 +37,15 @@ public sealed record LogChunk(
 /// </remarks>
 public sealed class ReviewProgressLog
 {
-    /// <summary>单个 revision 最多留几行。超了从头挤掉。</summary>
-    private const int MaxLines = 600;
+    /// <summary>
+    /// 单个 revision 最多留几行。超了从头挤掉。
+    /// </summary>
+    /// <remarks>
+    /// 公开是因为<b>取日志的那一头必须用同一个数</b>：这里是环形缓冲，而
+    /// <see cref="Read"/> 给的是增量，于是读的人要是只加不减，它手上的行数会一路涨到
+    /// 「这次评审总共出过多少行」，而不是「现在还留着多少行」。
+    /// </remarks>
+    public const int MaxLines = 600;
 
     /// <summary>最多留几个 revision 的日志。评完不立刻丢 —— 人常常是评完才想看。</summary>
     private const int MaxRevisions = 8;

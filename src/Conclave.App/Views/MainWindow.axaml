@@ -410,7 +410,8 @@
             <Grid ColumnDefinitions="Auto,*">
               <Border Width="18" Height="18" CornerRadius="9" VerticalAlignment="Top"
                       Background="{DynamicResource WarnBrush}">
-                <TextBlock Text="!" FontSize="12" FontWeight="Bold"
+                <!-- 字重上限 SemiBold，理由见 Controls.axaml 的 .wordmark -->
+                <TextBlock Text="!" FontSize="12" FontWeight="SemiBold"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
                            Foreground="{DynamicResource SurfaceBrush}" />
               </Border>
@@ -1065,6 +1066,22 @@
             <Panel Grid.Row="1">
               <ScrollViewer Name="LogScroll" Padding="12,8">
                 <ItemsControl ItemsSource="{Binding Log.Lines}">
+                  <!--
+                    虚拟化。这张表是全窗口里唯一<b>一边看一边长</b>的：评审期间每两秒
+                    追一次增量，上限 600 行，而默认的 StackPanel 会把 600 个 TextBlock
+                    连同各自的字形排版一直留在树上。
+
+                    这里<b>破了</b>另外两张表定的那条规矩（行高齐才虚拟化）：日志是
+                    TextWrapping="Wrap" 的，行高不齐，所以滚动条的长度是按已实现行的
+                    平均高度估出来的，往回翻的时候会有轻微跳动。换来的是行数封顶之后
+                    常驻的排版对象只剩视口里那十几行。取舍成立的前提是这张表几乎总是
+                    钉在底部看（见 OnLogLinesChanged 的粘底逻辑），往回翻是少数情况。
+                  -->
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                      <VirtualizingStackPanel />
+                    </ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
                   <ItemsControl.ItemTemplate>
                     <DataTemplate x:DataType="x:String">
                       <TextBlock Classes="cell mono dim" TextWrapping="Wrap" Margin="0,0,0,2"
