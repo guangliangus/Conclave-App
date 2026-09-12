@@ -602,6 +602,17 @@
                   </RadioButton>
 
                   <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowBoard}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="积分" />
+                      <Border Classes="tabcount"
+                              IsVisible="{Binding BoardCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding BoardCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
                                IsChecked="{Binding ShowActa}">
                     <StackPanel Orientation="Horizontal" Spacing="3">
                       <TextBlock Text="Acta" />
@@ -649,6 +660,10 @@
                 <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
                            IsVisible="{Binding ShowReviews}"
                            Text="投影表，可由链重建。悬浮任意一行看 token 拆解与分模型明细" />
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowBoard}"
+                           Text="分数由账本现算，不落盘 —— 改了权重历史会一起重算。Error 票不计分" />
+
                 <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
                            IsVisible="{Binding ShowActa}"
                            Text="全局唯一一条链，每块含前块哈希与签名。索引冲突时哈希小者胜出，输的一段重挂到链尾" />
@@ -813,6 +828,61 @@
 
                   <TextBlock Classes="empty" IsVisible="{Binding ReviewsEmpty}"
                              Text="账本里还没有评审记录&#10;跑完第一次评审后，谁评的、烧了多少 token、折合多少钱都会记在这里" />
+                </Panel>
+              </Grid>
+
+              <!--
+                积分排行榜。
+                名次、人、分数是骨架，其余三列按宽度让位（见 TableLayout）；
+                「人」是 LastChildFill 那一列，窄了被压窄而不是藏掉 ——
+                藏掉的话这张表就只剩几个数字，认不出是谁的。
+              -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowBoard}">
+                <Border Grid.Row="0" Classes="thead">
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Width="44" Classes="th num" Text="#" />
+                    <TextBlock DockPanel.Dock="Right" Width="86" Classes="th num" Text="分数" />
+                    <TextBlock DockPanel.Dock="Right" Width="72" Classes="th num" Margin="0,0,12,0"
+                               Text="评审" />
+                    <TextBlock DockPanel.Dock="Right" Width="88" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Mid}" Text="抓到" />
+                    <TextBlock DockPanel.Dock="Right" Width="88" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Wide}" Text="改动文件" />
+                    <TextBlock Classes="th" Text="人" />
+                  </DockPanel>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Board}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:BoardRow">
+                          <Border Classes="row" ToolTip.Tip="{Binding Tip}">
+                            <DockPanel LastChildFill="True">
+                              <TextBlock DockPanel.Dock="Left" Width="44" Classes="cell num dim"
+                                         Text="{Binding Rank}" />
+                              <TextBlock DockPanel.Dock="Right" Width="86" Classes="cell num"
+                                         FontWeight="SemiBold" Text="{Binding Points}" />
+                              <TextBlock DockPanel.Dock="Right" Width="72" Classes="cell num dim"
+                                         Margin="0,0,12,0" Text="{Binding Reviews}" />
+                              <TextBlock DockPanel.Dock="Right" Width="88" Classes="cell num dim"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Mid}"
+                                         Text="{Binding Catches}" />
+                              <TextBlock DockPanel.Dock="Right" Width="88" Classes="cell num muted"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Wide}"
+                                         Text="{Binding Files}" />
+                              <!-- 金色只留给「跟本节点有关」，见 Theme.axaml 顶部那三类颜色 -->
+                              <TextBlock Classes="cell" Classes.gold="{Binding IsSelf}"
+                                         Text="{Binding Person}" />
+                            </DockPanel>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding BoardEmpty}"
+                             Text="还没有人得分&#10;评完一个 PR 就会出现在这里。Error 票不计分" />
                 </Panel>
               </Grid>
 

@@ -310,6 +310,7 @@ public sealed partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(ShowActa))]
     [NotifyPropertyChangedFor(nameof(ShowNodes))]
     [NotifyPropertyChangedFor(nameof(ShowNotices))]
+    [NotifyPropertyChangedFor(nameof(ShowBoard))]
     public partial MainTab Tab { get; set; } = MainTab.Queue;
 
     /// <summary>
@@ -356,6 +357,12 @@ public sealed partial class MainViewModel : ViewModelBase
         set => Select(MainTab.Notices, value);
     }
 
+    public bool ShowBoard
+    {
+        get => Tab == MainTab.Board;
+        set => Select(MainTab.Board, value);
+    }
+
     /// <summary>
     /// tab 名字后面那个上标数字。
     /// </summary>
@@ -371,6 +378,17 @@ public sealed partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial string ReviewsCount { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string BoardCount { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 排行榜。分数由账本现算，不落盘 —— 见 <see cref="Conclave.Domain.PointsProjection"/>。
+    /// </summary>
+    public ObservableCollection<BoardRow> Board { get; } = [];
+
+    [ObservableProperty]
+    public partial bool BoardEmpty { get; set; } = true;
 
     [ObservableProperty]
     public partial string ActaCount { get; set; } = string.Empty;
@@ -777,6 +795,22 @@ public sealed partial class MainViewModel : ViewModelBase
                 static r => r.BlockHash);
 
             ReviewsEmpty = Reviews.Count == 0;
+
+            // 排行榜跟着账本一起刷：它读的是同一批行，分开一次查询只是多一次开库。
+            // 名次是「这一次排序里的位置」，所以在这里现编号而不是让行自己算。
+            var board = await _reviewLog.ReadLeaderboardAsync(null, null, CancellationToken.None)
+                .ConfigureAwait(true);
+            var self = _mesh.Self.AzIdentity;
+
+            RowSync.Apply(
+                Board,
+                [.. board.Select((r, i) => new BoardRow(
+                    r, i + 1,
+                    string.Equals(r.Person, self, StringComparison.OrdinalIgnoreCase),
+                    Layout))],
+                static r => r.PersonFull);
+
+            BoardEmpty = Board.Count == 0;
 
             TodayLine = string.Create(
                 CultureInfo.InvariantCulture,
@@ -1245,6 +1279,7 @@ public sealed partial class MainViewModel : ViewModelBase
         QueueCount = Count(Pipeline.Count);
         MineCount = Count(Mine.Count);
         ReviewsCount = Count(Reviews.Count);
+        BoardCount = Count(Board.Count);
         ActaCount = Count(Blocks.Count);
         NoticesCount = Count(_state.UnreadNotices);
 
@@ -1681,4 +1716,7 @@ public enum MainTab
 
     /// <summary>本机看到的事件收件箱。</summary>
     Notices,
+
+    /// <summary>评审积分排行榜。</summary>
+    Board,
 }
