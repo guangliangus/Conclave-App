@@ -40,8 +40,13 @@ internal static class ActaSchema
         AddContentIdColumn(conn, "blocks");
         AddContentIdColumn(conn, "reviews");
 
+        // 计分要的两样：难度（改动文件数）与严重度分布。reviews 原先只存了 findings 的
+        // <b>条数</b>，而一条 critical 和一条 minor 在排行榜上不该同权。
+        AddScoreColumns(conn);
+
         BackfillBlockContentIds(conn);
         BackfillReviewContentIds(conn);
+        BackfillScoreColumns(conn);
         DeduplicateReviews(conn);
 
         // 唯一索引必须建在去重之后：老库里同一票存着几十份，先建索引会直接失败。
@@ -67,6 +72,75 @@ internal static class ActaSchema
         }
 
         Execute(conn, $"ALTER TABLE {table} ADD COLUMN content_id TEXT NOT NULL DEFAULT ''");
+    }
+
+    /// <summary>
+    /// 补上计分要的几列：改动文件数与按严重度分开的 finding 条数。
+    /// </summary>
+    /// <remarks>
+    /// 存的是<b>分数的输入</b>而不是分数本身。存分数等于把公式冻在写入的那一刻 ——
+    /// 改一次权重，老记录就跟新记录不是一把尺子，而排行榜最不能容忍的就是两把尺子。
+    /// 分数由 <see cref="Conclave.Domain.PointsProjection"/> 在读取时现算。
+    /// </remarks>
+    private static void AddScoreColumns(SqliteConnection conn)
+    {
+        foreach (var column in ScoreColumns)
+        {
+            using var probe = conn.CreateCommand();
+            // 列名是下面那个数组里写死的字面量，不接受外部输入。
+            probe.CommandText =
+                $"SELECT COUNT(*) FROM pragma_table_info('reviews') WHERE name = '{column}'";
+            if (Convert.ToInt64(probe.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
+            {
+                continue;
+            }
+
+            Execute(conn, $"ALTER TABLE reviews ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0");
+        }
+    }
+
+    private static readonly string[] ScoreColumns =
+        ["files_changed", "findings_critical", "findings_major", "findings_minor"];
+
+    /// <summary>
+    /// 给老行从链上回填那几列。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 用 SQLite 的 JSON 函数直接从 <c>blocks.payload</c> 取，不把几百个块读进内存再回写 ——
+    /// 跟 <see cref="BackfillReviewContentIds"/> 同一个理由。严重度是
+    /// <c>JsonStringEnumConverter</c> 序列化的，所以链上是字符串而不是数字。
+    /// </para>
+    /// <para>
+    /// 只回填还是初值 0 的行。真的「0 个文件 / 0 条 finding」重算一遍也得 0，
+    /// 所以这个条件不会漏，只会白算一次。
+    /// </para>
+    /// </remarks>
+    private static void BackfillScoreColumns(SqliteConnection conn)
+    {
+        Execute(conn, """
+            UPDATE reviews
+            SET files_changed = COALESCE((
+                    SELECT json_extract(b.payload, '$.Pr.FilesChanged')
+                    FROM blocks b WHERE b.block_hash = reviews.block_hash), 0),
+                findings_critical = COALESCE((
+                    SELECT COUNT(*) FROM blocks b,
+                         json_each(json_extract(b.payload, '$.Findings'))
+                    WHERE b.block_hash = reviews.block_hash
+                      AND json_extract(value, '$.Severity') = 'Critical'), 0),
+                findings_major = COALESCE((
+                    SELECT COUNT(*) FROM blocks b,
+                         json_each(json_extract(b.payload, '$.Findings'))
+                    WHERE b.block_hash = reviews.block_hash
+                      AND json_extract(value, '$.Severity') = 'Major'), 0),
+                findings_minor = COALESCE((
+                    SELECT COUNT(*) FROM blocks b,
+                         json_each(json_extract(b.payload, '$.Findings'))
+                    WHERE b.block_hash = reviews.block_hash
+                      AND json_extract(value, '$.Severity') = 'Minor'), 0)
+            WHERE files_changed = 0
+              AND findings_critical = 0 AND findings_major = 0 AND findings_minor = 0
+            """);
     }
 
     /// <summary>

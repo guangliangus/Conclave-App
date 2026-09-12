@@ -169,6 +169,87 @@ public sealed class SqliteReviewLog : IReviewLog
     }
 
     /// <summary>
+    /// 排行榜。分数由 <see cref="PointsProjection"/> 现算，SQL 只负责把输入捞出来。
+    /// </summary>
+    /// <remarks>
+    /// 按 <c>reviewer_az</c>（人）分组而不是 <c>reviewer_id</c>（公钥指纹）：
+    /// 一个人可以跑两台机器，那是两个 elector 但同一个人。
+    /// ⚠️ 这个字段是节点<b>自报</b>的 —— 荣誉榜可以接受，
+    /// 一旦分数能兑换任何东西，它就得换成白名单里的 pubkey→人 映射。
+    /// </remarks>
+    public async Task<IReadOnlyList<ScoreRow>> ReadLeaderboardAsync(
+        DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+    {
+        await using var conn = Open();
+        await using var cmd = conn.CreateCommand();
+
+        var sql = new StringBuilder(
+            """
+            SELECT reviewer_az, status, files_changed,
+                   findings_critical, findings_major, findings_minor
+            FROM reviews
+            """);
+
+        if (from is not null)
+        {
+            _ = sql.Append(" WHERE reviewed_at >= $from");
+            _ = cmd.Parameters.AddWithValue(
+                "$from", from.Value.UtcDateTime.ToString(TimestampFormat, CultureInfo.InvariantCulture));
+        }
+
+        if (to is not null)
+        {
+            _ = sql.Append(from is null ? " WHERE" : " AND").Append(" reviewed_at < $to");
+            _ = cmd.Parameters.AddWithValue(
+                "$to", to.Value.UtcDateTime.ToString(TimestampFormat, CultureInfo.InvariantCulture));
+        }
+
+        cmd.CommandText = sql.ToString();
+
+        var tally = new Dictionary<string, (double Points, int Reviews, int Catches, int Files)>(
+            StringComparer.Ordinal);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            var person = reader.GetString(0);
+            if (person.Length == 0)
+            {
+                // 认不出是谁的票不进榜。挂在「未知」下面等于把几个人的分并成一行。
+                continue;
+            }
+
+            var decision = Enum.TryParse<ReviewDecision>(reader.GetString(1), out var d)
+                ? d
+                : ReviewDecision.Error;
+            var files = reader.GetInt32(2);
+            var critical = reader.GetInt32(3);
+            var major = reader.GetInt32(4);
+            var minor = reader.GetInt32(5);
+
+            var score = PointsProjection.Score(decision, files, critical, major, minor);
+            var prev = tally.TryGetValue(person, out var got) ? got : default;
+
+            tally[person] = (
+                prev.Points + score,
+                // Error 票不计入「评审次数」：它没评成，计进去会让失败看起来像产出。
+                prev.Reviews + (score > 0 ? 1 : 0),
+                prev.Catches + (score > 0 ? critical + major : 0),
+                prev.Files + (score > 0 ? files : 0));
+        }
+
+        return
+        [
+            .. tally
+                .Select(kv => new ScoreRow(
+                    kv.Key, Math.Round(kv.Value.Points, 1),
+                    kv.Value.Reviews, kv.Value.Catches, kv.Value.Files))
+                .OrderByDescending(r => r.Points)
+                .ThenBy(r => r.Person, StringComparer.Ordinal),
+        ];
+    }
+
+    /// <summary>
     /// 一个通用的分组汇总。
     /// </summary>
     /// <remarks>

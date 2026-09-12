@@ -524,12 +524,14 @@ public sealed class SqliteActa : IActaStore
                 (content_id, block_hash, revision_id, project, repo, pr_id, pr_title, pr_author,
                  reviewer_id, reviewer_az, seat_round, status, findings, reviewed_at,
                  duration_ms, model, turns, input_tokens, output_tokens,
-                 cache_read_tokens, cache_write_tokens, thinking_tokens, cost_usd, cost_basis)
+                 cache_read_tokens, cache_write_tokens, thinking_tokens, cost_usd, cost_basis,
+                 files_changed, findings_critical, findings_major, findings_minor)
             VALUES
                 ($content, $hash, $revision, $project, $repo, $pr, $title, $author,
                  $reviewer, $az, $round, $status, $findings, $at,
                  $duration, $model, $turns, $in, $out,
-                 $cacheRead, $cacheWrite, $thinking, $cost, $basis)
+                 $cacheRead, $cacheWrite, $thinking, $cost, $basis,
+                 $files, $critical, $major, $minor)
             RETURNING id
             """;
 
@@ -548,6 +550,16 @@ public sealed class SqliteActa : IActaStore
         _ = cmd.Parameters.AddWithValue("$round", ballot.Round);
         _ = cmd.Parameters.AddWithValue("$status", ballot.Decision.ToString());
         _ = cmd.Parameters.AddWithValue("$findings", ballot.Findings.Count);
+
+        // 计分的输入。分数本身不落盘 —— 存分数等于把公式冻在写入的那一刻，
+        // 而排行榜最不能容忍的就是新老记录用两把尺子。见 PointsProjection 的注释。
+        _ = cmd.Parameters.AddWithValue("$files", pr?.FilesChanged ?? 0);
+        _ = cmd.Parameters.AddWithValue(
+            "$critical", ballot.Findings.Count(f => f.Severity == Severity.Critical));
+        _ = cmd.Parameters.AddWithValue(
+            "$major", ballot.Findings.Count(f => f.Severity == Severity.Major));
+        _ = cmd.Parameters.AddWithValue(
+            "$minor", ballot.Findings.Count(f => f.Severity == Severity.Minor));
         _ = cmd.Parameters.AddWithValue(
             "$at", block.At.UtcDateTime.ToString(TimestampFormat, CultureInfo.InvariantCulture));
         _ = cmd.Parameters.AddWithValue("$duration", ballot.DurationMs);

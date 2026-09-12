@@ -328,6 +328,10 @@ public sealed class ClaudeUsageMeterTests : IDisposable
         public Task<IReadOnlyList<ReviewRecord>> ReadByRevisionAsync(string revisionId, CancellationToken ct)
             => throw new NotSupportedException();
 
+        public Task<IReadOnlyList<ScoreRow>> ReadLeaderboardAsync(
+            DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+            => throw new NotSupportedException();
+
         public Task<IReadOnlyList<UsageSummary>> SummariseByReviewerAsync(
             DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
             => throw new NotSupportedException();

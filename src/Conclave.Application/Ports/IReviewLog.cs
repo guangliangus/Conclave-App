@@ -92,6 +92,23 @@ public interface IReviewLog
     /// <summary>某个 PR 版本的全部评审记录。</summary>
     Task<IReadOnlyList<ReviewRecord>> ReadByRevisionAsync(string revisionId, CancellationToken ct);
 
+    /// <summary>
+    /// 评审积分排行榜，按总分倒序。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 分数<b>在这里现算</b>而不是从表里读：表存的是输入（难度、严重度分布），
+    /// 公式在 <see cref="Conclave.Domain.PointsProjection"/>。这样调一次权重，
+    /// 历史记录跟着一起重算 —— 排行榜上永远只有一把尺子。
+    /// </para>
+    /// <para>
+    /// <paramref name="from"/> 给 null 就是「有史以来」。滚动榜（比如最近 7 天）
+    /// 传时间窗即可，不需要另一个方法。
+    /// </para>
+    /// </remarks>
+    Task<IReadOnlyList<ScoreRow>> ReadLeaderboardAsync(
+        DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct);
+
     /// <summary>按评审者汇总。</summary>
     Task<IReadOnlyList<UsageSummary>> SummariseByReviewerAsync(
         DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct);
