@@ -90,12 +90,21 @@ public sealed class ClaudeCliTests : IDisposable
         Assert.Equal("/configured/claude", chosen.Path);
     }
 
-    /// <summary>事故本身：旧的排在前面，新的排在后面，必须挑到新的。</summary>
+    /// <summary>
+    /// 事故本身：旧的排在前面，新的排在后面，必须挑到新的。
+    /// </summary>
+    /// <remarks>
+    /// <b>版本号刻意取到 99.x</b>：<c>ExecutableResolver</c> 搜完 <c>ExtraToolPaths</c>
+    /// 还会搜进程 PATH 和兜底目录，所以跑测试这台机器上<b>真的那份 claude 也在候选里</b>。
+    /// 原先假的取 2.1.268，本机 claude 升到 2.1.269 之后就反过来赢了它，
+    /// 这条用例跟着环境红了 —— 挂的是环境，不是被测的那个规则。
+    /// 事故当年的数字是 2.1.104 / 2.1.268，但这条钉的是「谁新挑谁」，与具体数字无关。
+    /// </remarks>
     [Fact]
     public async Task Two_installs_on_one_machine_resolve_to_the_newer_one()
     {
-        var old = FakeClaude("old", "2.1.104");
-        var recent = FakeClaude("new", "2.1.268");
+        var old = FakeClaude("old", "99.0.104");
+        var recent = FakeClaude("new", "99.0.268");
 
         var options = new ConclaveOptions { HomeDirectory = Path.Combine(_dir, "home") };
         options.ExtraToolPaths.Add(old);        // 先被搜到的是旧的
@@ -106,7 +115,7 @@ public sealed class ClaudeCliTests : IDisposable
 
         var chosen = await cli.ResolveAsync(CancellationToken.None);
 
-        Assert.Equal(new Version(2, 1, 268), chosen.Version);
+        Assert.Equal(new Version(99, 0, 268), chosen.Version);
         Assert.StartsWith(recent, chosen.Path, StringComparison.Ordinal);
     }
 

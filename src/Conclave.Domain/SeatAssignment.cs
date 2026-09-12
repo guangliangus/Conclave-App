@@ -93,10 +93,27 @@ public static class SeatAssignment
         ArgumentNullException.ThrowIfNull(elector);
         ArgumentNullException.ThrowIfNull(pr);
 
+        return CouldEverReview(elector, pr, now, allowSelfReview)
+            && elector.RunningJobs < elector.MaxConcurrent
+            && elector.HasHeadroom;
+    }
+
+    /// <summary>
+    /// 这个节点<b>原则上</b>能评这个 PR —— 不看它此刻忙不忙、额度还剩多少。
+    /// </summary>
+    /// <remarks>
+    /// 拿来回答「还有没有没试过的机器」。<see cref="Eligible"/> 不行：它把「正在评别的
+    /// PR」和「额度过线」也算进去了，而那两样几分钟后就会变 —— 用它判断会得出
+    /// 「没人可试了」然后把一个其实还有救的 PR 提前收成失败。
+    /// </remarks>
+    public static bool CouldEverReview(
+        Elector elector, PrMeta pr, DateTimeOffset now, bool allowSelfReview = false)
+    {
+        ArgumentNullException.ThrowIfNull(elector);
+        ArgumentNullException.ThrowIfNull(pr);
+
         return elector.HasProject(pr.Project)
             && (allowSelfReview || !AzIdentity.SamePerson(elector.AzIdentity, pr.Author))
-            && elector.RunningJobs < elector.MaxConcurrent
-            && elector.HasHeadroom
             && elector.IsAlive(now);
     }
 
@@ -109,6 +126,10 @@ public static class SeatAssignment
     /// <param name="quorum">应有席位数，取自 Summons 块 —— 不在这里重算。</param>
     /// <param name="now">存活判定用的「现在」，由调用方传入以保证各节点一致。</param>
     /// <param name="extraRounds">失败/超时后追加的重试轮次数。</param>
+    /// <param name="retryOnSameNode">
+    /// 候选人用完时重新蓄池，允许把后续轮次再给一个已经坐过的节点。
+    /// 默认关 —— 执行失败要的是换一台机器，见 <c>ConclaveOptions.RetryOnSameNode</c>。
+    /// </param>
     /// <param name="allowSelfReview">
     /// 允许作者评自己的 PR，取自队列项（<see cref="QueuedRevision.AllowSelfReview"/>）——
     /// 不能各节点各读本机配置，否则合格节点集不同、席位表分叉。
@@ -155,7 +176,8 @@ public static class SeatAssignment
         DateTimeOffset now,
         int extraRounds = 0,
         string? incumbent = null,
-        bool allowSelfReview = false)
+        bool allowSelfReview = false,
+        bool retryOnSameNode = false)
     {
         ArgumentNullException.ThrowIfNull(revision);
         ArgumentNullException.ThrowIfNull(pr);
@@ -198,7 +220,17 @@ public static class SeatAssignment
                     break;
                 }
 
-                // 重试轮次才重新蓄池，允许再抽到同一个节点（单节点 mesh 上必然如此）。
+                // 重试轮次重新蓄池，允许再抽到同一个节点。
+                //
+                // 默认<b>关着</b>：出错的原因大多不在这份代码上 —— claude 没额度、
+                // 用户退出登录、az 连不上、token 到期 —— 在同一台机器上再跑一遍
+                // 只会原样再错一次，而每一轮都是完整的账单。换台机器才有意义，
+                // 所以池子空了就让这一版留在队列里等新节点，而不是塞回给刚失败的那台。
+                if (!retryOnSameNode)
+                {
+                    break;
+                }
+
                 pool.AddRange(eligible);
             }
 

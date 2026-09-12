@@ -34,6 +34,15 @@ namespace Conclave.Infrastructure;
 /// 解析不到就出 <see cref="ReviewDecision.Error"/> 票 —— 刻意不去猜结论：
 /// 猜错方向会让一个该拦的 PR 被放过，而 Error 票只会让这一轮不计入多数决。
 /// </para>
+/// <para>
+/// 这份契约在两个地方说：<see cref="CollectPrompt"/> 里的那句 prompt，和 skill 的第 7 步。
+/// 刻意重复 —— 解析它的是本类，把「出票能不能成」整个押在一个一万多字的外部文档的末尾
+/// 几行上，失败起来是静默的：评审做完了、结论也有，就是没围栏，而每一轮都是完整的账单。
+/// </para>
+/// <para>
+/// 缺围栏与输出不是合法 JSON 这两种失败出的是<b>不可重试</b>的 Error 票
+/// （<see cref="BallotPayload.Retryable"/>）：同一份输入再跑只会原样再失败一次。
+/// </para>
 /// </remarks>
 public sealed class ClaudeReviewRunner(
     IPrSource prSource,
@@ -111,7 +120,7 @@ public sealed class ClaudeReviewRunner(
         // 所以出票的解析路径一点没变（见 ResultLine）。
         var args = new List<string>
         {
-            "-p", $"/az-pr-review {pr.PrId.ToString(CultureInfo.InvariantCulture)}",
+            "-p", CollectPrompt(pr),
             "--output-format", "stream-json",
             "--verbose",
             "--session-id", sessionId.ToString(),
@@ -162,7 +171,7 @@ public sealed class ClaudeReviewRunner(
             progress.Append(revision.Id, "⚠️ 输出过大，日志开头已被丢弃");
         }
 
-        var ballot = Parse(revision, round, ResultLine(result.StdOut), sw.ElapsedMilliseconds);
+        var ballot = Parse(revision, round, ResultLine(result.StdOut), sw.ElapsedMilliseconds, logger);
         progress.End(
             revision.Id,
             string.Create(
@@ -409,7 +418,50 @@ public sealed class ClaudeReviewRunner(
         return string.Empty;
     }
 
-    private BallotPayload Parse(Revision revision, int round, string stdout, long elapsedMs)
+    /// <summary>
+    /// 起评审的那句 prompt：调 skill，并把出票契约再说一遍。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>为什么不只写 <c>/az-pr-review &lt;id&gt;</c>。</b> 契约（回复末尾一个
+    /// <c>```json</c> 围栏）原先只写在 skill 文件里，而那是个一万多字的文档，
+    /// 这一条在最末尾。实测连着两轮都是「评审做完了、结论也有，就是没出围栏」——
+    /// 每一轮都是完整的账单。
+    /// </para>
+    /// <para>
+    /// 解析这个契约的是<b>这里</b>，所以这里就该把它说出来，而不是把「出票能不能成」
+    /// 整个押在一个外部文件的末尾几行上。skill 仍然是评审方法论的来源，
+    /// 两处说的是同一件事 —— 真要改契约，<c>ExtractJsonBlock</c>、这句 prompt
+    /// 和 skill 的第 7 步得一起改。
+    /// </para>
+    /// </remarks>
+    internal static string CollectPrompt(PrMeta pr)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+
+        return $"/az-pr-review {pr.PrId.ToString(CultureInfo.InvariantCulture)}\n\n"
+            + "REVIEW_MODE=collect：不要发评论、不要投票。\n"
+            + "回复的最后必须是一个 ```json 围栏，且它是整条回复里的最后一个围栏，"
+            + "内容形如 {\"decision\":\"approve|approve-with-suggestions|wait-for-author|reject\","
+            + "\"comment\":\"要发到 PR 上的评论原文（markdown）\","
+            + "\"findings\":[{\"file\":\"...\",\"line\":12,\"severity\":\"critical|major|minor|info\","
+            + "\"title\":\"...\",\"detail\":\"...\"}]}。\n"
+            + "findings 没有就写 []，不要省掉这个键。\n"
+            + "拿不到足够信息下结论（diff 读不全、检查跑不了）也要出这个围栏，"
+            + "decision 用 wait-for-author，并在 detail 里写清为什么 —— "
+            + "缺围栏这一票就作废，整轮额度白烧。";
+    }
+
+    /// <summary>
+    /// 把 claude 那一行 <c>type=result</c> 解析成一张票。
+    /// </summary>
+    /// <remarks>
+    /// <b>internal static + 显式传 logger</b>，同 <see cref="ResultLine"/>：出票的分类
+    /// （尤其是「这张 Error 票还值不值得重试」）要能单测到，而那些分支的代价是每轮一份
+    /// 完整账单，靠跑真子进程去覆盖不现实。
+    /// </remarks>
+    internal static BallotPayload Parse(
+        Revision revision, int round, string stdout, long elapsedMs, ILogger logger)
     {
         string text;
         var model = "unknown";
@@ -437,23 +489,38 @@ public sealed class ClaudeReviewRunner(
         }
         catch (JsonException ex)
         {
+            // Retryable=false：claude 已经跑完、token 已经烧掉，它吐的不是 JSON 这件事
+            // 再跑一遍还是一样。理由见 BallotPayload.Retryable。
             logger.LogError(ex, "claude 的 --output-format json 输出解析失败");
             return new BallotPayload(
                 revision.Id, round, ReviewDecision.Error, [], model, elapsedMs, usage,
-                Error: "claude 输出不是合法 JSON：" + Truncate(stdout, 500));
+                Error: "claude 输出不是合法 JSON：" + Truncate(stdout, 500))
+            {
+                Retryable = false,
+            };
         }
 
         var contract = ExtractJsonBlock(text);
         if (contract is null)
         {
             // 刻意不从自然语言里猜结论：猜错方向会放过该拦的 PR。
+            //
+            // Retryable=false：这一轮的评审其实<b>做完了</b>（原文里结论、finding、行号
+            // 往往都在），只是最后那个 ```json 围栏没出来。同一份输入再抽一个席位跑，
+            // 得到的是同一份缺围栏的输出 —— 实测一个 PR 连烧两轮 121 万 token、$2.79，
+            // 产出为零。理由见 BallotPayload.Retryable。
             logger.LogWarning(
-                "{Revision} round={Round} 没有输出 collect 契约的 JSON 块 —— skill 需要加 REVIEW_MODE 分支",
+                "{Revision} round={Round} 没有输出 collect 契约的 JSON 块 —— "
+                    + "评审本身可能是好的，但拿不到机器可读的结论；不再重试",
                 revision.Id, round);
             return new BallotPayload(
                 revision.Id, round, ReviewDecision.Error, [], model, elapsedMs, usage,
-                Error: "未找到 collect 契约的 JSON 块（skill 需要 REVIEW_MODE=collect 分支）。原文：\n"
-                    + Truncate(text, 1500));
+                Error: "未找到 collect 契约的 JSON 块（回复末尾要有且只有一个 ```json 围栏）。"
+                    + "重试不会改变结果，已跳过剩余轮次。原文：\n"
+                    + Truncate(text, 1500))
+            {
+                Retryable = false,
+            };
         }
 
         return contract with
@@ -565,7 +632,7 @@ public sealed class ClaudeReviewRunner(
     /// 从回复正文里抠出 collect 契约。优先找最后一个 <c>```json</c> 围栏，
     /// 找不到再看整段是否本身就是 JSON。
     /// </summary>
-    private BallotPayload? ExtractJsonBlock(string text)
+    private static BallotPayload? ExtractJsonBlock(string text)
     {
         foreach (var candidate in JsonCandidates(text))
         {
@@ -587,7 +654,11 @@ public sealed class ClaudeReviewRunner(
                     .ToList();
 
                 return new BallotPayload(
-                    string.Empty, 0, ParseDecision(dto.Decision), findings, "unknown", 0);
+                    string.Empty, 0, ParseDecision(dto.Decision), findings, "unknown", 0)
+                {
+                    // 长度在 Parse 里由 CapComment 收口，这里只管如实带出来。
+                    Comment = dto.Comment,
+                };
             }
             catch (JsonException)
             {
@@ -598,41 +669,71 @@ public sealed class ClaudeReviewRunner(
         return null;
     }
 
-    /// <summary>从后往前扫围栏块，最后再拿整段兜底。</summary>
+    /// <summary>
+    /// 候选片段，从最可能的往后退：末尾的围栏块 → 花括号配平出来的对象 → 整段。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>围栏按行判定，不能拿 <c>IndexOf("```")</c> 一路配对。</b> 契约里的
+    /// <c>comment</c> 是要发到 PR 上的评论原文，而一条像样的评审评论几乎必然带
+    /// <c>```go</c> 这样的示例代码块 —— 那些反引号在 JSON 字符串<b>里面</b>，
+    /// 原先的扫法会把其中第一个当成收尾围栏，于是抠出来的是一段从中间截断的 JSON，
+    /// 三个候选全解不出，整轮作废。实测 PR 2916 就死在这里：评审做完了、
+    /// 结论和 18 条 finding 都在，$1.31 全烧掉，PR 上只留下一句「评审没有跑出结论」。
+    /// </para>
+    /// <para>
+    /// 按行判定能彻底分开这两者，靠的是一条硬性质：<b>JSON 字符串里不可能有真换行</b>
+    /// （只能是 <c>\n</c> 两个字符），所以字符串里的 ``` 一定在行中间；
+    /// 而 markdown 的围栏一定独占一行。收尾围栏不带 info string（CommonMark），
+    /// 带了的按块内内容算。
+    /// </para>
+    /// <para>
+    /// 开了却没收尾的再补一次花括号配平兜底：模型漏写收尾围栏、或者输出被
+    /// max-tokens 截在半截时还能救回来 —— 这一轮的账单反正已经烧掉了。
+    /// </para>
+    /// </remarks>
     private static IEnumerable<string> JsonCandidates(string text)
     {
         const string Fence = "```";
         var blocks = new List<string>();
-        var i = 0;
+
+        var openBody = -1;          // 当前开着的围栏，正文起点；-1 = 没开着
+        var openIsJson = false;
+        var pos = 0;
 
         while (true)
         {
-            var open = text.IndexOf(Fence, i, StringComparison.Ordinal);
-            if (open < 0)
+            var nl = text.IndexOf('\n', pos);
+            var lineEnd = nl < 0 ? text.Length : nl;
+            var line = text.AsSpan(pos, lineEnd - pos).Trim();
+
+            if (line.StartsWith(Fence, StringComparison.Ordinal))
+            {
+                var info = line[Fence.Length..].Trim();
+
+                if (openBody < 0)
+                {
+                    openBody = Math.Min(lineEnd + 1, text.Length);
+                    openIsJson = info.Length == 0
+                        || info.Equals("json", StringComparison.OrdinalIgnoreCase);
+                }
+                else if (info.Length == 0)
+                {
+                    if (openIsJson)
+                    {
+                        blocks.Add(text[openBody..pos]);
+                    }
+
+                    openBody = -1;
+                }
+            }
+
+            if (nl < 0)
             {
                 break;
             }
 
-            var afterFence = open + Fence.Length;
-            var lineEnd = text.IndexOf('\n', afterFence);
-            if (lineEnd < 0)
-            {
-                break;
-            }
-
-            var close = text.IndexOf(Fence, lineEnd, StringComparison.Ordinal);
-            if (close < 0)
-            {
-                break;
-            }
-
-            var lang = text[afterFence..lineEnd].Trim();
-            if (lang.Length == 0 || lang.Equals("json", StringComparison.OrdinalIgnoreCase))
-            {
-                blocks.Add(text[(lineEnd + 1)..close]);
-            }
-
-            i = close + Fence.Length;
+            pos = nl + 1;
         }
 
         for (var b = blocks.Count - 1; b >= 0; b--)
@@ -640,7 +741,81 @@ public sealed class ClaudeReviewRunner(
             yield return blocks[b];
         }
 
+        if (openBody >= 0 && openIsJson && BalancedObject(text, openBody) is { } salvaged)
+        {
+            yield return salvaged;
+        }
+
         yield return text;
+    }
+
+    /// <summary>
+    /// 从 <paramref name="from"/> 起，第一个花括号配平的 JSON 对象；配不平返回 null。
+    /// </summary>
+    /// <remarks>
+    /// 必须认字符串与转义：评论原文里带 <c>{</c> <c>}</c> 是常事，光数括号会提前收口。
+    /// 只在围栏没收尾时用 —— 有收尾围栏时围栏本身就是更准的边界。
+    /// </remarks>
+    internal static string? BalancedObject(string text, int from)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        var start = from >= text.Length ? -1 : text.IndexOf('{', from);
+        if (start < 0)
+        {
+            return null;
+        }
+
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+
+        for (var i = start; i < text.Length; i++)
+        {
+            var c = text[i];
+
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (c == '\\')
+                {
+                    escaped = true;
+                }
+                else if (c == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            switch (c)
+            {
+                case '"':
+                    inString = true;
+                    break;
+
+                case '{':
+                    depth++;
+                    break;
+
+                case '}':
+                    if (--depth == 0)
+                    {
+                        return text[start..(i + 1)];
+                    }
+
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        return null;
     }
 
     private static readonly JsonSerializerOptions ContractJson = new()
@@ -691,7 +866,18 @@ public sealed class ClaudeReviewRunner(
         return new Guid(bytes, bigEndian: true);
     }
 
-    private sealed record CollectContract(string? Decision, List<ContractFinding>? Findings);
+    /// <summary>
+    /// skill 在 <c>REVIEW_MODE=collect</c> 下输出的那个 JSON 契约。
+    /// </summary>
+    /// <remarks>
+    /// <c>Comment</c> 是起草好的评论原文。它<b>必须</b>在这里列出来 —— 漏了这个字段的那段
+    /// 时间里，<see cref="BallotPayload.Comment"/> 永远是 null，于是每个 PR 收到的都是
+    /// 由 <c>findings</c> 现渲染的一张裸表格（<c>AzCliPrSource.CommentBody</c> 的兜底分支），
+    /// 评审里最有价值的部分（为什么是问题、该怎么改、查过哪些地方是干净的）全都丢掉了，
+    /// 而且没有任何报错。
+    /// </remarks>
+    private sealed record CollectContract(
+        string? Decision, string? Comment, List<ContractFinding>? Findings);
 
     private sealed record ContractFinding(
         string? File, int Line, string? Severity, string? Title, string? Detail);

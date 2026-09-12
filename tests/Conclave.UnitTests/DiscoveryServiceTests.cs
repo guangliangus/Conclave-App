@@ -156,6 +156,122 @@ public class DiscoveryServiceTests
         Assert.True(self.IsAlive(DateTimeOffset.UtcNow));
     }
 
+    /// <summary>
+    /// 队列没变的那一轮不能递增状态版本。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="LiveState.Version"/> 一涨，mesh 里每个节点都要来拉一次 <c>GET /state</c>。
+    /// 而 <c>Publish</c> 原先每轮都 <c>[.. discovered]</c> 无条件重写，引用每轮都是新的 ——
+    /// 于是队列一动没动也每 30 秒全网拉一遍，「稳态下零额外流量」一直是句空话。
+    /// 这是 N² 的：20 台就是每 30 秒 380 个请求。
+    /// </para>
+    /// <para>
+    /// 判据是<b>幂等键</b>（<see cref="Revision.Id"/> = <c>PR 号@srcCommit</c>），
+    /// 跟这套东西判断「PR 变了没有」用的是同一个标准：作者一 push 键就变。
+    /// 刻意不深比较 <see cref="QueuedRevision"/> —— <see cref="PrMeta.ChangedPaths"/>
+    /// 是 <c>IReadOnlyList</c>，record 自动生成的相等对它用引用比较，
+    /// 内容相同的两份 PrMeta 会判成不等。<c>FakePrSource</c> 每轮递的是新构造的 PrMeta
+    /// （跟真实的 az 路径一致），所以这条要是改回深比较就会红。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_unchanged_queue_does_not_bump_the_state_version()
+    {
+        using var h = new Harness();
+        _ = h.Publish(Pr());
+
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+        var settled = h.Mesh.State.Version;
+
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(settled, h.Mesh.State.Version);
+
+        // 队列真变了当然要涨，否则对端永远看不到新 PR。
+        _ = h.Publish(Pr(id: 3001));
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+        Assert.True(h.Mesh.State.Version > settled);
+    }
+
+    /// <summary>
+    /// 窗口明细要上实时状态，别的节点那一行才画得出 5h / 7d。
+    /// </summary>
+    /// <remarks>
+    /// 只带参与判定的那些：按模型细分的子额度（<c>seven_day:Fable</c>）在节点表里本来就不画。
+    /// 见 <see cref="LiveState.UsageWindows"/>。
+    /// </remarks>
+    [Fact]
+    public async Task Polling_puts_the_gating_window_detail_on_the_live_state()
+    {
+        using var h = new Harness();
+        h.Usage.Utilization = 0.26;
+        h.Usage.Windows =
+        [
+            new UsageWindow("five_hour", 0.26, TestElectors.Now.AddHours(3)),
+            new UsageWindow("seven_day", 0.41, TestElectors.Now.AddDays(4)),
+            new UsageWindow("seven_day:Fable", 0.9, TestElectors.Now.AddDays(4)) { Gates = false },
+        ];
+        _ = h.Publish(Pr());
+
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+
+        Assert.Equal(
+            ["five_hour", "seven_day"], h.Mesh.State.UsageWindows.Select(w => w.Key));
+        Assert.Equal(0.26, h.Mesh.State.UsageWindows[0].Utilization);
+    }
+
+    /// <summary>
+    /// 读数没变的那一轮，窗口明细不能递增状态版本。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 版本一变，mesh 里每个节点都要来拉一次 <c>GET /state</c>。额度读数每轮都会被重新
+    /// 算一遍，不比一比再写就等于每轮都在改 —— 一个纯展示字段不该有这种代价。
+    /// </para>
+    /// <para>
+    /// 断言的是<b>版本增量</b>而不是「没涨」：<c>Publish</c> 每轮都无条件写一次
+    /// <see cref="LiveState.Discovered"/>（<c>s with { Discovered = [.. discovered] }</c>，
+    /// 引用每轮都是新的），所以版本本来就每轮都在涨。这里要钉的是窗口明细<b>额外</b>
+    /// 贡献的那一次。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Window_detail_only_bumps_the_state_version_when_it_actually_changes()
+    {
+        using var h = new Harness();
+        h.Usage.Windows = [new UsageWindow("five_hour", 0.26, TestElectors.Now.AddHours(3))];
+        _ = h.Publish(Pr());
+
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+        var settled = h.Mesh.State.Version;
+
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+        var unchanged = h.Mesh.State.Version - settled;
+
+        // 真变了当然要涨，否则对端永远看不到新读数。
+        h.Usage.Windows = [new UsageWindow("five_hour", 0.55, TestElectors.Now.AddHours(3))];
+        var before = h.Mesh.State.Version;
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+        var changed = h.Mesh.State.Version - before;
+
+        Assert.True(
+            changed > unchanged,
+            $"读数变了那轮应当比没变那轮多涨一次版本（没变 {unchanged}，变了 {changed}）");
+    }
+
+    [Fact]
+    public async Task A_budget_derived_reading_reports_no_window_detail()
+    {
+        using var h = new Harness();
+        h.Usage.Utilization = 0.4;
+        _ = h.Publish(Pr());
+
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+
+        // 折算兜底没有窗口可拆。硬凑一条假的会让别人那一行画出一个不存在的「5h」。
+        Assert.Empty(h.Mesh.State.UsageWindows);
+    }
+
     [Fact]
     public async Task A_failed_usage_read_keeps_the_previous_value_instead_of_zeroing_it()
     {
@@ -170,6 +286,22 @@ public class DiscoveryServiceTests
         await h.Discovery.PollOnceAsync(CancellationToken.None);
 
         Assert.Equal(0.9, h.Mesh.Self.Utilization);
+    }
+
+    [Fact]
+    public async Task A_failed_usage_read_also_keeps_the_previous_window_detail()
+    {
+        using var h = new Harness();
+        h.Usage.Windows = [new UsageWindow("five_hour", 0.26, TestElectors.Now.AddHours(3))];
+        _ = h.Publish(Pr());
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+
+        // 清空跟清零同一个道理：别人那一行会从「5h 26%」突然退回画压力值，
+        // 看起来像那台机器出了问题，而实际上只是本机这一轮探针没读到。
+        h.Usage.Throw = new InvalidOperationException("探针挂了");
+        await h.Discovery.PollOnceAsync(CancellationToken.None);
+
+        Assert.Equal("five_hour", Assert.Single(h.Mesh.State.UsageWindows).Key);
     }
 
     [Fact]

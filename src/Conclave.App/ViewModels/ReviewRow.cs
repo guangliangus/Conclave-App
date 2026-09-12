@@ -57,7 +57,7 @@ public sealed class ReviewRow
         Subtitle = string.Join("  ·  ", new[] { Repo, Reviewer }.Where(x => x.Length > 0));
     }
 
-    /// <summary>三张表共用的「该显示几列」。</summary>
+    /// <summary>四张表共用的「该显示几列」。</summary>
     public TableLayout Layout { get; }
 
     /// <summary>

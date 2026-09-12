@@ -310,6 +310,7 @@ public sealed partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(ShowActa))]
     [NotifyPropertyChangedFor(nameof(ShowNodes))]
     [NotifyPropertyChangedFor(nameof(ShowNotices))]
+    [NotifyPropertyChangedFor(nameof(ShowBoard))]
     public partial MainTab Tab { get; set; } = MainTab.Queue;
 
     /// <summary>
@@ -356,6 +357,12 @@ public sealed partial class MainViewModel : ViewModelBase
         set => Select(MainTab.Notices, value);
     }
 
+    public bool ShowBoard
+    {
+        get => Tab == MainTab.Board;
+        set => Select(MainTab.Board, value);
+    }
+
     /// <summary>
     /// tab 名字后面那个上标数字。
     /// </summary>
@@ -371,6 +378,17 @@ public sealed partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial string ReviewsCount { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string BoardCount { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 排行榜。分数由账本现算，不落盘 —— 见 <see cref="Conclave.Domain.PointsProjection"/>。
+    /// </summary>
+    public ObservableCollection<BoardRow> Board { get; } = [];
+
+    [ObservableProperty]
+    public partial bool BoardEmpty { get; set; } = true;
 
     [ObservableProperty]
     public partial string ActaCount { get; set; } = string.Empty;
@@ -778,6 +796,22 @@ public sealed partial class MainViewModel : ViewModelBase
 
             ReviewsEmpty = Reviews.Count == 0;
 
+            // 排行榜跟着账本一起刷：它读的是同一批行，分开一次查询只是多一次开库。
+            // 名次是「这一次排序里的位置」，所以在这里现编号而不是让行自己算。
+            var board = await _reviewLog.ReadLeaderboardAsync(null, null, CancellationToken.None)
+                .ConfigureAwait(true);
+            var self = _mesh.Self.AzIdentity;
+
+            RowSync.Apply(
+                Board,
+                [.. board.Select((r, i) => new BoardRow(
+                    r, i + 1,
+                    string.Equals(r.Person, self, StringComparison.OrdinalIgnoreCase),
+                    Layout))],
+                static r => r.PersonFull);
+
+            BoardEmpty = Board.Count == 0;
+
             TodayLine = string.Create(
                 CultureInfo.InvariantCulture,
                 $"今日 {today.Reviews} 次 · {Format.Money(today.CostUsd)}");
@@ -1034,7 +1068,7 @@ public sealed partial class MainViewModel : ViewModelBase
         // 区块哈希天然唯一，而且链是 append-only —— 稳态下这张表一个事件都不会发。
         RowSync.Apply(
             Blocks,
-            [.. _state.RecentBlocks.Select(b => new BlockRow(b))],
+            [.. _state.RecentBlocks.Select(b => new BlockRow(b, Layout))],
             static r => r.Hash);
 
         BlocksEmpty = Blocks.Count == 0;
@@ -1206,8 +1240,11 @@ public sealed partial class MainViewModel : ViewModelBase
 
         // 本节点的额度窗口明细。跟额度卡读的是同一份 NodeState.Usage —— 两处各读一次探针
         // 的话，界面上会出现两个时刻的读数，而「到底哪个决定了入席」就说不清了。
-        // 对端没有：心跳里只有一个标量（Beacon.SigningPayload）。
         IReadOnlyList<UsageWindow> selfQuotas = _state.Usage?.Windows ?? [];
+
+        // 对端的那一份来自它上报的实时状态（LiveState.UsageWindows）。没拉到状态、
+        // 或者对端还是不上报明细的旧版本时取不到，那一行退回画压力标量。
+        var peerStates = _mesh.PeerStates;
 
         RowSync.Apply(
             Nodes,
@@ -1220,7 +1257,9 @@ public sealed partial class MainViewModel : ViewModelBase
                     m.Id == self.Id,
                     now,
                     reviewing.TryGetValue(m.Id, out var ids) ? ids : [],
-                    m.Id == self.Id ? selfQuotas : null,
+                    m.Id == self.Id
+                        ? selfQuotas
+                        : peerStates.TryGetValue(m.Id, out var st) ? st.UsageWindows : [],
                     Layout))],
             static r => r.Id);
 
@@ -1245,6 +1284,7 @@ public sealed partial class MainViewModel : ViewModelBase
         QueueCount = Count(Pipeline.Count);
         MineCount = Count(Mine.Count);
         ReviewsCount = Count(Reviews.Count);
+        BoardCount = Count(Board.Count);
         ActaCount = Count(Blocks.Count);
         NoticesCount = Count(_state.UnreadNotices);
 
@@ -1681,4 +1721,7 @@ public enum MainTab
 
     /// <summary>本机看到的事件收件箱。</summary>
     Notices,
+
+    /// <summary>评审积分排行榜。</summary>
+    Board,
 }

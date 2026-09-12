@@ -317,7 +317,11 @@ public sealed class ReviewOrchestrator : BackgroundService
 
         // ── 第一遍：读每个 entry 的链上上下文（轮次、出过票的人、复审归属）。
         // 这些都要 I/O，所以必须先收集齐，才能整队做一次席位分配。
-        var prepared = new List<(QueueEntry Entry, ChainState Chain, QueueProjection.SeatCandidate Seat)>(queue.Count);
+        var prepared = new List<(
+            QueueEntry Entry,
+            ChainState Chain,
+            QueueProjection.SeatCandidate Seat,
+            bool Untried)>(queue.Count);
 
         foreach (var entry in queue)
         {
@@ -347,18 +351,27 @@ public sealed class ReviewOrchestrator : BackgroundService
 
             var used = chain.SpentRounds.Count;
 
+            // 还有没有「原则上能评、而且这一版没试过」的机器。出错的节点不再被抽到，
+            // 所以这就是「还换得动吗」—— 换不动了就该收尾，否则 PR 永远挂在队列上。
+            var untried = _options.RetryOnSameNode
+                || members.Any(m =>
+                    SeatAssignment.CouldEverReview(m, entry.Pr, now, entry.AllowSelfReview)
+                    && !voted.Contains(m.Id));
+
             // 席位只给还需要有人评的：票收够了（等公布）、这一轮已经出过票、
-            // 或者重试到顶了，都不该再占一个席位 —— 一个节点只有一个席位，
-            // 占着不评就把后面真正等着的 PR 全堵住了。
+            // 重试到顶了、或者已经没机器可换了，都不该再占一个席位 ——
+            // 一个节点只有一个席位，占着不评就把后面真正等着的 PR 全堵住了。
             var needsReviewer = !entry.Finished
-                && !chain.CanPromulgate(entry.Quorum, _options.MaxReviewAttempts)
+                && !chain.CanPromulgate(entry.Quorum, _options.MaxReviewAttempts, !untried)
                 && !chain.IsRoundSettled(used)
                 && used < Math.Max(1, _options.MaxReviewAttempts);
 
             prepared.Add((
                 entry,
                 chain,
-                new QueueProjection.SeatCandidate(entry, incumbent, used, voted, needsReviewer)));
+                new QueueProjection.SeatCandidate(
+                    entry, incumbent, used, voted, needsReviewer, _options.RetryOnSameNode),
+                untried));
         }
 
         // ── 一次全局分配：每个节点最多一个席位。逐个 PR 独立算的话，
@@ -369,7 +382,7 @@ public sealed class ReviewOrchestrator : BackgroundService
         LogAssignment(assignment, prepared, self.Id);
 
         // ── 第二遍：按分配结果建视图、公布、起评审。
-        foreach (var (entry, chain, seat) in prepared)
+        foreach (var (entry, chain, seat, untried) in prepared)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -388,7 +401,12 @@ public sealed class ReviewOrchestrator : BackgroundService
                 entry,
                 mySeat,
                 !eligible,
-                summary.Verdicts.GetValueOrDefault(entry.Revision.Id)));
+                summary.Verdicts.GetValueOrDefault(entry.Revision.Id),
+
+                // 出错次数 = 链上这一版的 Error 票数。每一票来自一台不同的机器
+                // （见 ConclaveOptions.RetryOnSameNode），所以它就是「换了几台都没成」。
+                chain.Ballots.Values.Count(b => b.Decision == ReviewDecision.Error),
+                untried));
 
             if (entry.Finished)
             {
@@ -396,7 +414,7 @@ public sealed class ReviewOrchestrator : BackgroundService
                 continue;
             }
 
-            if (chain.CanPromulgate(entry.Quorum, _options.MaxReviewAttempts)
+            if (chain.CanPromulgate(entry.Quorum, _options.MaxReviewAttempts, !untried)
                 && IsPromulgator(entry, self.Id, members, now, incumbent))
             {
                 await PromulgateAsync(entry, chain, ct).ConfigureAwait(false);
@@ -600,7 +618,11 @@ public sealed class ReviewOrchestrator : BackgroundService
     /// </remarks>
     private void LogAssignment(
         IReadOnlyDictionary<string, string> assignment,
-        IReadOnlyList<(QueueEntry Entry, ChainState Chain, QueueProjection.SeatCandidate Seat)> prepared,
+        IReadOnlyList<(
+            QueueEntry Entry,
+            ChainState Chain,
+            QueueProjection.SeatCandidate Seat,
+            bool Untried)> prepared,
         string selfId)
     {
         var seats = assignment
@@ -633,6 +655,24 @@ public sealed class ReviewOrchestrator : BackgroundService
 
         static string Short(string electorId)
             => electorId.Length > 8 ? electorId[..8] : electorId;
+    }
+
+    /// <summary>
+    /// 失败原因摆进通知和日志时的长度上限。
+    /// </summary>
+    /// <remarks>
+    /// 缺契约块那条路会把 claude 的整段回复塞进 <see cref="BallotPayload.Error"/>
+    /// （原文最长 1500 字），完整的那份留在链上；这里只要开头够人认出「是哪一类失败」。
+    /// </remarks>
+    private static string Truncate(string? text, int max)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "(没有原因)";
+        }
+
+        var t = text.Trim();
+        return t.Length <= max ? t : string.Concat(t.AsSpan(0, max), "…");
     }
 
     private static string SlotKey(string revisionId, int round) => $"{revisionId}#{round}";
@@ -693,11 +733,31 @@ public sealed class ReviewOrchestrator : BackgroundService
                     revision.Id, BlockKind.Ballot, stamped, CancellationToken.None).ConfigureAwait(false);
                 await _mesh.BroadcastAsync(block, CancellationToken.None).ConfigureAwait(false);
 
-                // 一次评审要跑好几分钟，跑完人大概已经在干别的了 —— 结论必须留下来
+                // 一次评审要跑好几分钟，跑完人大概已经在干别的了 —— 结论必须留下来。
+                //
+                // 确定性失败（拿不到契约块）单独说：它是「评审跑完了、结论却取不出来」，
+                // 跟子进程挂掉是两回事，而且它<b>不会重试</b>——「执行失败」后面没有下一轮，
+                // 不写清楚的话人只会看到一个 PR 无声无息地停在那里。原因带上，
+                // 那句话才指得出该去修什么。
                 _state.Notify(
                     ballot.Decision == ReviewDecision.Error ? NoticeKind.Bad : NoticeKind.Ok,
-                    $"评审完 {revision.Id}：{ballot.Decision}，{ballot.Findings.Count} 条 finding",
-                    $"{pr.Repo}「{pr.Title}」· 耗时 {ballot.DurationMs / 1000} 秒");
+                    ballot.IsFatal
+                        ? $"评审 {revision.Id} 没出结论，且不会重试"
+                        : $"评审完 {revision.Id}：{ballot.Decision}，{ballot.Findings.Count} 条 finding",
+                    ballot.IsFatal
+                        ? $"{pr.Repo}「{pr.Title}」· 耗时 {ballot.DurationMs / 1000} 秒 · "
+                            + Truncate(ballot.Error, 200)
+                        : $"{pr.Repo}「{pr.Title}」· 耗时 {ballot.DurationMs / 1000} 秒");
+
+                if (ballot.IsFatal)
+                {
+                    // Warning 而不是 Information：这一轮烧掉了完整的一份额度却没有产出，
+                    // 而且不会有下一轮来补 —— 默认日志级别下必须看得见。
+                    _logger.LogWarning(
+                        "评审 {Revision} round={Round} 跑完了但取不出结论，判为确定性失败、"
+                            + "跳过剩余轮次：{Reason}",
+                        revision.Id, round, Truncate(ballot.Error, 500));
+                }
 
                 _logger.LogInformation(
                     "投票 {Revision} round={Round} → {Decision}，{Count} 条 finding，"
@@ -834,10 +894,28 @@ public sealed class ReviewOrchestrator : BackgroundService
         // 只把有效票交给合并器；Error 票已经在 SpentRounds 里让出过席位了，
         // 再计入分母会让 Promulgation 上的 actualQuorum 把失败次数也算成「评审次数」。
         var ballots = chain.ValidBallots;
-        var merged = QuorumEngine.Merge(revision.Id, ballots, entry.Quorum);
+
+        // PR 快照与评审者名单由<b>公布者</b>填，不在合并器里填：合并器只拿得到有效票，
+        // 而三轮全挂的降级结论一张有效票都没有 —— 那种块反倒最需要说清「哪个 PR、谁试过」。
+        var merged = QuorumEngine.Merge(revision.Id, ballots, entry.Quorum) with
+        {
+            Pr = pr,
+            Reviewers = chain.Reviewers,
+        };
+
+        // 执行失败不往 PR 上发。
+        //
+        // 一个 degraded 的 Error 结论对作者<b>没有任何可行动信息</b>：「评审没跑出结论」
+        // 是这边的运维问题（skill 不出契约块、claude 起不来、工作区拉不下来），
+        // 不是他代码的问题。发过去只会在每个 PR 上留一条看了也没法处理的噪音，
+        // 而且投票本来就是 none（AzCliPrSource.AzVote），发了也不改变 PR 状态。
+        //
+        // 留痕一点没少：链上照常写 Promulgation，本地照常出通知（NoticeKind.Bad），
+        // 日志照常记 —— 「这个 PR 评过、但没评出来」在本机是查得到的。
+        var deliverable = merged.Decision != ReviewDecision.Error;
 
         int? threadId = null;
-        if (_options.PostToAzureDevOps)
+        if (_options.PostToAzureDevOps && deliverable)
         {
             try
             {
@@ -859,12 +937,22 @@ public sealed class ReviewOrchestrator : BackgroundService
         await _mesh.BroadcastAsync(block, ct).ConfigureAwait(false);
         _ = _requested.TryRemove(revision.Id, out _);
 
+        // 失败那条要说清楚「试了几台、为什么停」。原先写的是 ActualQuorum ——
+        // 而那个数只数有效票，全失败时恒为 0，于是通知上永远是「0 轮都失败了」。
+        var failures = chain.Ballots.Count;
+
         _state.Notify(
-            NoticeKind.Ok,
-            $"已公布 {revision.Id}：{merged.Decision}，{merged.Findings.Count} 条合并 finding",
-            _options.PostToAzureDevOps
-                ? $"已发到 AzDO · {merged.ActualQuorum}/{merged.ExpectedQuorum} 票"
-                : $"未投递（投递开关关着）· {merged.ActualQuorum}/{merged.ExpectedQuorum} 票");
+            deliverable ? NoticeKind.Ok : NoticeKind.Bad,
+            deliverable
+                ? $"已公布 {revision.Id}：{merged.Decision}，{merged.Findings.Count} 条合并 finding"
+                : $"{revision.Id} 执行失败 {failures} 次，已停止分配席位",
+            (_options.PostToAzureDevOps, deliverable) switch
+            {
+                (_, false) => FailureReasons(chain)
+                    + " · 未投递：执行失败对作者没有可行动信息，只记在本地和链上",
+                (true, _) => $"已发到 AzDO · {merged.ActualQuorum}/{merged.ExpectedQuorum} 票",
+                (false, _) => $"未投递（投递开关关着）· {merged.ActualQuorum}/{merged.ExpectedQuorum} 票",
+            });
 
         _logger.LogInformation(
             "公布 {Revision} → {Decision}，{Count} 条合并 finding（{Actual}/{Expected} 票{Degraded}）",
@@ -885,6 +973,29 @@ public sealed class ReviewOrchestrator : BackgroundService
     }
 
     /// <summary>
+    /// 那几次到底错在哪 —— 去重后拼成一行。
+    /// </summary>
+    /// <remarks>
+    /// 失败的原因基本都不是代码问题（claude 没额度、用户退出登录、az 连不上、token 到期），
+    /// 而人看到通知后第一个要判断的就是「该去修哪台机器」。
+    /// 去重是因为换了几台机器往往错在同一件事上，列三遍没有信息量。
+    /// </remarks>
+    private static string FailureReasons(ChainState chain)
+    {
+        var reasons = chain.Ballots
+            .OrderBy(kv => kv.Key)
+            .Select(kv => kv.Value.Error)
+            .Where(e => !string.IsNullOrWhiteSpace(e))
+            .Select(e => Truncate(e!.Trim(), 120))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        return reasons.Count > 0
+            ? string.Join(" · ", reasons)
+            : "链上没留下原因；到 Acta 里按 revision 翻那几张 Error 票";
+    }
+
+    /// <summary>
     /// 把队列里的一项铺成界面上的一行。
     /// </summary>
     /// <remarks>
@@ -893,10 +1004,17 @@ public sealed class ReviewOrchestrator : BackgroundService
     /// 最后那种以前跟「待评审」长得一样，于是人会一直等一件不会发生的事。
     /// </remarks>
     private PrView BuildView(
-        QueueEntry entry, int mySeat, bool nobodyEligible, Verdict? verdict = null)
+        QueueEntry entry,
+        int mySeat,
+        bool nobodyEligible,
+        Verdict? verdict = null,
+        int failures = 0,
+        bool untried = true)
     {
         var running = _inFlight.Keys.Any(
             k => k.StartsWith(entry.Revision.Id + "#", StringComparison.Ordinal));
+
+        var ceiling = Math.Max(1, _options.MaxReviewAttempts);
 
         var stage = entry switch
         {
@@ -906,6 +1024,14 @@ public sealed class ReviewOrchestrator : BackgroundService
             _ when running => "评审中（本节点）",
             { ReviewingBy: not null } => "评审中",
             { ClaimedBy: not null } => "已认领",
+
+            // 执行失败<b>不是</b>「已评审」：一个字都还没评上。它分两档 ——
+            // 还有没试过的机器就回队列等它接手；换遍了（或到了上限）就停下来等人。
+            // 两档都必须跟「待评审」分得开，否则人会以为它排着队，其实它已经躺平了。
+            _ when failures > 0 && (failures >= ceiling || !untried)
+                => $"失败已停 {failures}/{ceiling}",
+            _ when failures > 0 => $"失败待接手 {failures}/{ceiling}",
+
             _ when nobodyEligible => "无人可评",
             { Ballots: > 0 } => $"已投票 {entry.Ballots}/{entry.Quorum}",
             _ => "待评审",

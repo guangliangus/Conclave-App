@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Conclave.Application;
-using Conclave.Application.Ports;
+using Conclave.Domain;
 using Microsoft.Extensions.Logging;
 
 namespace Conclave.Infrastructure;

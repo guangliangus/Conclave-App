@@ -519,10 +519,25 @@ public sealed class AzCliPrSource(
         _ = sb.AppendLine();
         _ = sb.Append(CultureInfo.InvariantCulture, $"评审版本 `{result.RevisionId}`，")
               .Append(CultureInfo.InvariantCulture, $"{result.ActualQuorum}/{result.ExpectedQuorum} 个节点独立评审");
+        // 降级的原因有两种，对作者的意义完全不同：合格节点凑不够 quorum（评审是好的，
+        // 只是票少），和这几轮压根没跑出结论。一律写「合格节点不足」会把后者说成前者。
         _ = result.Degraded
-            ? sb.AppendLine("（**降级：合格节点不足**）")
+            ? sb.AppendLine(result.Decision == ReviewDecision.Error
+                ? "（**降级：评审执行失败**）"
+                : "（**降级：合格节点不足**）")
             : sb.AppendLine();
         _ = sb.AppendLine();
+
+        // Error 结论 = 这几轮评审都没跑出结果，不是「看过了，没问题」。
+        // 两句话对作者的意义正好相反，而它们原先共用 Findings.Count == 0 这一个分支 ——
+        // 于是一次执行失败会在 PR 上变成一句「未发现问题。」。
+        if (result.Decision == ReviewDecision.Error)
+        {
+            _ = sb.AppendLine(
+                "评审没有跑出结论（节点执行失败）。**这不代表代码没有问题** —— "
+                    + "请人工复核，或在 Conclave 里重跑。");
+            return sb.ToString();
+        }
 
         if (result.Findings.Count == 0)
         {

@@ -1,7 +1,6 @@
 using System.Collections.ObjectModel;
 using Conclave.App.ViewModels;
 using Conclave.Application;
-using Conclave.Application.Ports;
 using Conclave.Domain;
 
 namespace Conclave.UnitTests;
@@ -10,10 +9,12 @@ namespace Conclave.UnitTests;
 /// 「在线节点」表里那一列额度。
 /// </summary>
 /// <remarks>
-/// 这一组钉的是<b>那一列画的是哪个数</b>。本节点画 Claude 自己报的窗口读数，
+/// 这一组钉的是<b>那一列画的是哪个数</b>。每一行画的都是 Claude 自己报的窗口读数，
 /// 而 <see cref="Elector.Utilization"/> 是 <see cref="Conclave.Application.UsagePressure"/>
 /// 折算过的压力值 —— 两者对不上是常态（7d 74% / 阈值 95% 折出来是 62%），
 /// 曾经就是因为表里画的是后者、额度卡画的是前者，同一个界面上两个「CLAUDE 额度」对不上。
+/// 对端那一份现在随实时状态过来（<see cref="LiveState.UsageWindows"/>），所以「本机画真值、
+/// 别人画折算值」这个不一致也没了；只有拆不出窗口时才退回画标量。
 /// </remarks>
 public sealed class NodeRowTests
 {
@@ -59,25 +60,40 @@ public sealed class NodeRowTests
     }
 
     [Fact]
-    public void Peer_falls_back_to_the_pressure_scalar()
+    public void A_peer_shows_the_same_5h_and_7d_rows_as_this_node()
     {
-        // 心跳里只有一个标量（Beacon.SigningPayload），对端的窗口明细拿不到。
-        var row = Row(0.62, quotas: null, isSelf: false);
+        // 明细现在随实时状态过来（LiveState.UsageWindows），所以别人那一行画的也是真实读数。
+        // 早先这里只有一个折算标量，于是同一张表上本机写「5h 31% / 7d 77%」、
+        // 别人写「压力 26%」—— 两个不是一回事的数并排摆着。
+        var row = Row(0.62, [Window("five_hour", 0.26), Window("seven_day", 0.41)], isSelf: false);
+
+        Assert.True(row.HasQuotas);
+        Assert.Equal(["5h", "7d"], row.Quotas.Select(q => q.Short));
+        Assert.Equal(["26%", "41%"], row.Quotas.Select(q => q.PercentText));
+    }
+
+    [Fact]
+    public void A_peer_that_broadcasts_no_window_detail_falls_back_to_the_pressure_scalar()
+    {
+        // 还没升级的节点上报的状态里没有这个字段，反序列化成空列表 —— 那一行退回画压力值，
+        // 而不是画出一列空白。tooltip 要说清是「没上报」，别让人以为是额度读数丢了。
+        var row = Row(0.62, [], isSelf: false);
 
         Assert.False(row.HasQuotas);
-        Assert.Empty(row.Quotas);
         Assert.Equal("62%", row.QuotaText);
+        Assert.Contains("没上报窗口明细", row.Tip, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Self_without_window_detail_also_falls_back()
     {
         // 真值读不到、退到「按预算折算」时没有窗口可拆 —— 那一行退回画压力值，
-        // 而不是画出一列空白。
+        // 而不是画出一列空白。本机的空跟对端的空原因不同，tooltip 分开说。
         var row = Row(0.4, []);
 
         Assert.False(row.HasQuotas);
         Assert.Equal("40%", row.QuotaText);
+        Assert.Contains("按预算折算", row.Tip, StringComparison.Ordinal);
     }
 
     [Fact]

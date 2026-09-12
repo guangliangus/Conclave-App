@@ -1,6 +1,5 @@
 using System.Globalization;
 using Conclave.Application;
-using Conclave.Application.Ports;
 using Conclave.Domain;
 
 namespace Conclave.App.ViewModels;
@@ -76,20 +75,24 @@ public sealed class NodeRow
             _ => new Badge("在线", BadgeTone.Ok),
         };
 
-        // 本节点画各个窗口的原始读数（会话 5h / 周 7d），不画折算过的那个标量：
+        // 每一行都画各个窗口的原始读数（会话 5h / 周 7d），不画折算过的那个标量：
         // 「额度用了多少」人只认 Claude 自己报的那个数，而 node.Utilization 是
         // UsagePressure 把最紧的窗口折回 0.8 那把尺子之后的结果 —— 两者对不上是常态
         // （实测 7d 74% / 阈值 95% 折出来是 62%），同一个界面上摆两个对不上的百分比
         // 只会让人以为有一处是坏的。折算值改进 tooltip，那里放得下一句解释。
         //
+        // 本节点的明细来自本机探针，对端的来自它上报的实时状态（LiveState.UsageWindows）——
+        // 调用方负责挑，这里只管画。
+        //
         // 只画参与入席判定的窗口：这张表回答的是「席位为什么落在它身上」，
         // 而 Fable 那种按模型细分的子额度压根不参与（UsageWindow.Gates）。
+        // 对端发来的已经筛过一遍，再筛一次是幂等的，省得依赖发信方的版本。
         Quotas = quotas is null
             ? []
             : [.. quotas.Where(w => w.Gates).Select(w => new UsageWindowRow(w, now))];
 
-        // 对端只有心跳里那一个标量 —— Beacon.SigningPayload 里就只有 Utilization，
-        // 窗口明细进不了协议。所以对端那一行仍然画压力值，并在标签上写明。
+        // 拆不出窗口时退回画那个标量，并在标签上写明是「压力」而不是额度：
+        // 真值读不到（退到按预算折算）、或者对端是还不广播明细的旧版本。
         QuotaPercent = node.Utilization * 100;
         QuotaText = Format.Percent(node.Utilization);
         IsBad = node.Utilization >= Elector.MaxUtilization;
@@ -128,7 +131,10 @@ public sealed class NodeRow
             HasQuotas
                 ? $"入席用的压力值 {QuotaText}（各窗口取「离自己那条线最近」的一个，"
                     + $"折回 {Format.Percent(Elector.MaxUtilization)} 这把尺子）"
-                : $"入席用的压力值 {QuotaText}（对端心跳里只有这一个标量，窗口明细拿不到）",
+                : isSelf
+                    ? $"入席用的压力值 {QuotaText}（拆不出窗口 —— 真值读不到，按预算折算的）"
+                    : $"入席用的压力值 {QuotaText}（这台机器没上报窗口明细 —— "
+                        + "要么版本太旧，要么它那边也只有折算值）",
             node.HasHeadroom
                 ? $"权重 = 1/(1+在跑) × 1/(1+近 24h×0.1) × (1-压力) = {node.Weight:F3}"
                 : $"压力已过 {Format.Percent(Elector.MaxUtilization)}，不参与席位分配",
@@ -136,7 +142,7 @@ public sealed class NodeRow
         });
     }
 
-    /// <summary>三张表共用的「该显示几列」。</summary>
+    /// <summary>四张表共用的「该显示几列」。</summary>
     public TableLayout Layout { get; }
 
     public bool IsSelf { get; }
@@ -154,11 +160,16 @@ public sealed class NodeRow
     public Badge Status { get; }
 
     /// <summary>
-    /// 本节点各个额度窗口的原始读数。对端为空。
+    /// 这个节点各个额度窗口的原始读数；拆不出窗口时为空。
     /// </summary>
+    /// <remarks>
+    /// 对端那份来自它上报的实时状态（<see cref="LiveState.UsageWindows"/>），随
+    /// <c>GET /state</c> 过来、连同整份状态一起验签。它<b>不</b>参与任何判定 ——
+    /// 决定入不入席的是心跳里那个签过名的 <see cref="Elector.Utilization"/> 标量。
+    /// </remarks>
     public IReadOnlyList<UsageWindowRow> Quotas { get; }
 
-    /// <summary>有逐窗口的真实读数可画（只有本节点有）。</summary>
+    /// <summary>有逐窗口的读数可画。</summary>
     public bool HasQuotas => Quotas.Count > 0;
 
     /// <summary>折算成入席尺度的压力值。<see cref="HasQuotas"/> 为假时才画在表里。</summary>

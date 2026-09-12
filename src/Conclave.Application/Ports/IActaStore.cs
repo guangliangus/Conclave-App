@@ -77,13 +77,24 @@ public sealed record ChainSummary(
         new Dictionary<string, int>(StringComparer.Ordinal),
         new Dictionary<string, Verdict>(StringComparer.Ordinal));
 
-    /// <summary>已有最终结论的 revisionId。</summary>
+    /// <summary>
+    /// 真的评完了的 revisionId。
+    /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>Error 结论不算完成</b>：那不是评审意见，是「试过的节点都没把 claude 跑起来」。
+    /// 那一版要回到队列让没试过的节点重新获取席位，所以它不能出现在这个集合里 ——
+    /// 队列、阶段文案、席位分配三处读的都是它（见 <see cref="Conclave.Domain.ChainState.IsProvisional"/>）。
+    /// </para>
+    /// <para>
     /// 从 <see cref="Verdicts"/> 现算，所以两者不可能对不上。<c>with</c> 拷贝出来的实例
     /// 会带着旧的这一份 —— 这份摘要是每轮重新读的，没有人对它做 <c>with</c>。
+    /// </para>
     /// </remarks>
-    public IReadOnlySet<string> Finished { get; } =
-        Verdicts.Keys.ToHashSet(StringComparer.Ordinal);
+    public IReadOnlySet<string> Finished { get; } = Verdicts
+        .Where(kv => kv.Value.Decision != Conclave.Domain.ReviewDecision.Error)
+        .Select(kv => kv.Key)
+        .ToHashSet(StringComparer.Ordinal);
 }
 
 /// <summary>账本的健康计数，供 UI 与报表展示。</summary>

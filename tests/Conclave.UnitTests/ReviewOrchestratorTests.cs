@@ -1,3 +1,4 @@
+using Conclave.Application;
 using Conclave.Domain;
 
 namespace Conclave.UnitTests;
@@ -388,13 +389,15 @@ public class ReviewOrchestratorTests
     {
         using var h = new Harness();
         h.Options.AutoReview = true;
+        h.Options.RetryOnSameNode = true;
         h.Runner.Throw = new InvalidOperationException("claude 挂了");
         var rev = await h.ReportAsync(Pr());
 
         await h.TickAsync();
         Assert.Equal([0], (await h.StateOfAsync(rev)).SpentRounds);
 
-        // 单节点上重试会再抽到自己 —— 这次让它成功。
+        // 开着开关，重试才会再抽到自己 —— 这次让它成功。多节点上这条路径是换台机器
+        // 接手，判定完全相同（见 ActaProjectionTests 里那条覆盖暂定结论的用例）。
         h.Runner.Throw = null;
         await h.TickAsync();
         await h.TickAsync();
@@ -405,11 +408,163 @@ public class ReviewOrchestratorTests
         Assert.False(done.Promulgation.Degraded);
     }
 
+    /// <summary>
+    /// 公布块自己说得出「哪个 PR、谁评的」。
+    /// </summary>
+    /// <remarks>
+    /// 原先它只有 revision id：账本浏览器里一条公布行，作者和评审者都得回头去翻同一
+    /// revision 的出票行，而那两块未必在同一屏里 —— 一次只列最近 60 块，中间还插着别的 PR。
+    /// </remarks>
+    [Fact]
+    public async Task The_verdict_carries_the_pr_snapshot_and_who_reviewed_it()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        var rev = await h.ReportAsync(Pr());
+
+        await h.TickAsync();          // 出票
+        await h.TickAsync();          // 公布
+
+        var verdict = (await h.StateOfAsync(rev)).Promulgation!;
+
+        Assert.Equal(Author, verdict.Pr!.Author);
+        Assert.Equal(2721, verdict.Pr.PrId);
+        Assert.Equal(["alan"], verdict.Reviewers);
+    }
+
+    /// <summary>
+    /// 一张有效票都没有的降级结论，照样说得出是谁跑的。
+    /// </summary>
+    /// <remarks>
+    /// 这条是那两个字段<b>不在 <see cref="QuorumEngine.Merge"/> 里填</b>的理由：合并器
+    /// 收到的是有效票，这种块的有效票是空列表（<c>ActualQuorum</c> 就是 0），它手上
+    /// 什么都没有。而这恰恰是最需要说清楚的一种块 —— 烧了额度、产出为零，
+    /// 人第一个要问的就是「哪个 PR、哪台机器」。
+    /// </remarks>
+    [Fact]
+    public async Task A_degraded_verdict_with_no_valid_ballot_still_names_the_pr_and_the_node()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Runner.FatalError = "未找到 collect 契约的 JSON 块";
+        var rev = await h.ReportAsync(Pr());
+
+        for (var i = 0; i < 4; i++)
+        {
+            await h.TickAsync();
+        }
+
+        var verdict = (await h.StateOfAsync(rev)).Promulgation!;
+
+        Assert.Equal(0, verdict.ActualQuorum);      // 有效票一张都没有
+        Assert.Equal(Author, verdict.Pr!.Author);   // 但这两样仍然填得出来
+        Assert.Equal(["alan"], verdict.Reviewers);
+    }
+
+    /// <summary>
+    /// 确定性失败一轮就收尾，不再把重试预算烧完。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 实测那次：PR 2912 连着两轮都是「没输出 collect 契约的 JSON 块」，两轮 claude 都把
+    /// 评审跑完了（原文里结论、finding、行号都在），只是最后那个围栏没出来。
+    /// 两轮 121 万 token、$2.79，产出为零，而按老规则它还会再跑第三轮。
+    /// </para>
+    /// <para>
+    /// 这条跟 <see cref="Retries_stop_at_the_configured_ceiling"/> 的区别就是预算还剩着 ——
+    /// 剩着也不再花，因为同一份输入跑出来的是同一个结果。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_deterministic_failure_stops_after_one_round()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.MaxReviewAttempts = 3;
+        h.Runner.FatalError = "未找到 collect 契约的 JSON 块";
+        var rev = await h.ReportAsync(Pr());
+
+        for (var i = 0; i < 8; i++)
+        {
+            await h.TickAsync();
+        }
+
+        var state = await h.StateOfAsync(rev);
+
+        // 预算是 3，只烧了 1 —— 剩下两轮省下来了。
+        Assert.Single(state.SpentRounds);
+        Assert.Equal(1, h.Runner.Calls);
+
+        // 但 PR 不能就这么挂着：收一个降级的 Error 结论，人看到原因去修。
+        Assert.Equal(ReviewDecision.Error, state.Promulgation!.Decision);
+        Assert.True(state.Promulgation.Degraded);
+    }
+
+    /// <summary>
+    /// 不重试这件事必须说出来，而且要带上原因。
+    /// </summary>
+    /// <remarks>
+    /// 「执行失败」后面没有下一轮了。不写清楚的话，人看到的就是一个 PR 无声无息地停住 ——
+    /// 而这次的原因（评审跑完了、只是取不出结论）恰恰是指向该修什么的那句话。
+    /// </remarks>
+    [Fact]
+    public async Task A_deterministic_failure_says_it_will_not_retry_and_why()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Runner.FatalError = "未找到 collect 契约的 JSON 块（回复末尾要有且只有一个 ```json 围栏）";
+        _ = await h.ReportAsync(Pr());
+
+        await h.TickAsync();
+
+        var notice = Assert.Single(h.State.Notices, n => n.Title.Contains("不会重试", StringComparison.Ordinal));
+
+        Assert.Equal(NoticeKind.Bad, notice.Kind);
+        Assert.Contains("collect 契约", notice.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 偶发失败也不在同一台机器上重试 —— 一次就够了，剩下的交给别的节点。
+    /// </summary>
+    /// <remarks>
+    /// 预算是 3 却只烧了 1：这台已经试过，而 mesh 里没有别人。多烧的那两轮除了账单
+    /// 什么都不会带来 —— claude 没额度、用户退出登录、az 连不上、token 到期，
+    /// 这些在同一台机器上一分钟内不会自己好。
+    /// </remarks>
+    [Fact]
+    public async Task An_ordinary_failure_does_not_retry_on_the_same_node()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.MaxReviewAttempts = 3;
+        h.Runner.Throw = new InvalidOperationException("claude 挂了");
+        var rev = await h.ReportAsync(Pr());
+
+        for (var i = 0; i < 8; i++)
+        {
+            await h.TickAsync();
+        }
+
+        var state = await h.StateOfAsync(rev);
+
+        Assert.Single(state.SpentRounds);
+        Assert.Equal(1, h.Runner.Calls);
+
+        // 收了个暂定结论，但这一版<b>没有</b>评完：换台机器上线还能接手。
+        Assert.Equal(ReviewDecision.Error, state.Promulgation!.Decision);
+        Assert.True(state.IsProvisional);
+        Assert.False(state.IsFinished);
+    }
+
+    /// <summary>
+    /// 打开开关就回到老行为，而上限仍然拦得住无限重试。
+    /// </summary>
     [Fact]
     public async Task Retries_stop_at_the_configured_ceiling()
     {
         using var h = new Harness();
         h.Options.AutoReview = true;
+        h.Options.RetryOnSameNode = true;
         h.Options.MaxReviewAttempts = 2;
         h.Runner.Throw = new InvalidOperationException("claude 每次都起不来");
         var rev = await h.ReportAsync(Pr());
@@ -425,6 +580,36 @@ public class ReviewOrchestratorTests
         Assert.Equal(2, state.SpentRounds.Count);
         Assert.Equal(ReviewDecision.Error, state.Promulgation!.Decision);
         Assert.True(state.Promulgation.Degraded);
+    }
+
+    /// <summary>
+    /// 停下来的时候要发通知，而且要说清楚试了几次、错在哪。
+    /// </summary>
+    /// <remarks>
+    /// 通知里那个次数原先取的是 <c>ActualQuorum</c> —— 而它只数有效票，全失败时恒为 0，
+    /// 于是面板上永远是「0 轮都失败了」。
+    /// </remarks>
+    [Fact]
+    public async Task Giving_up_says_how_many_times_and_why()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Runner.Throw = new InvalidOperationException("claude 没额度了");
+        var rev = await h.ReportAsync(Pr());
+
+        for (var i = 0; i < 4; i++)
+        {
+            await h.TickAsync();
+        }
+
+        var notice = Assert.Single(
+            h.State.Notices,
+            n => n.Title.Contains("已停止分配席位", StringComparison.Ordinal));
+
+        Assert.Equal(NoticeKind.Bad, notice.Kind);
+        Assert.Contains(rev.Id, notice.Title, StringComparison.Ordinal);
+        Assert.Contains("失败 1 次", notice.Title, StringComparison.Ordinal);
+        Assert.Contains("claude 没额度了", notice.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -610,6 +795,55 @@ public class ReviewOrchestratorTests
 
         Assert.Single(h.PrSource.Posted);
         Assert.Equal(8821, (await h.StateOfAsync(rev)).Promulgation!.ThreadId);
+    }
+
+    /// <summary>
+    /// 执行失败不往真 PR 上发。
+    /// </summary>
+    /// <remarks>
+    /// 一个 degraded 的 Error 结论对作者没有任何可行动信息 —— 「评审没跑出结论」是这边的
+    /// 运维问题，不是他代码的问题，而且投票本来就是 none。链上和本地通知照常留痕。
+    /// </remarks>
+    [Fact]
+    public async Task A_failed_review_is_not_posted_to_the_pull_request()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.PostToAzureDevOps = true;
+        h.Runner.FatalError = "未找到 collect 契约的 JSON 块";
+        var rev = await h.ReportAsync(Pr());
+
+        for (var i = 0; i < 4; i++)
+        {
+            await h.TickAsync();
+        }
+
+        var done = await h.StateOfAsync(rev);
+
+        // 结论上链了 —— 不投递不等于不留痕。
+        Assert.Equal(ReviewDecision.Error, done.Promulgation!.Decision);
+        Assert.Empty(h.PrSource.Posted);
+
+        // 本地必须看得见，否则这个 PR 就真的无声无息了。
+        Assert.Contains(
+            h.State.Notices,
+            n => n.Title.Contains("已停止分配席位", StringComparison.Ordinal));
+    }
+
+    /// <summary>正常结论照旧投递 —— 上一条不能把投递整个关掉。</summary>
+    [Fact]
+    public async Task A_real_verdict_is_still_posted()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.PostToAzureDevOps = true;
+        var rev = await h.ReportAsync(Pr());
+
+        await h.TickAsync();
+        await h.TickAsync();
+
+        Assert.Equal(ReviewDecision.Reject, (await h.StateOfAsync(rev)).Promulgation!.Decision);
+        Assert.Single(h.PrSource.Posted);
     }
 
     [Fact]

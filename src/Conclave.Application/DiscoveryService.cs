@@ -301,10 +301,47 @@ public sealed class DiscoveryService(
 
     /// <summary>把当前这批上报出去。</summary>
     /// <remarks>
+    /// <para>
     /// 全量覆盖语义，不做增量合并 —— 增量就得再想「什么时候删」，而那正是原先出僵尸的地方。
+    /// </para>
+    /// <para>
+    /// <b>没变就原样返回。</b> <c>[.. discovered]</c> 每轮都是个新列表，而
+    /// <see cref="Application.Ports.IMesh.UpdateState"/> 只看引用变没变 —— 于是
+    /// <see cref="LiveState.Version"/> 每轮都涨，mesh 里每个节点每
+    /// <see cref="ConclaveOptions.PollInterval"/>（30 秒）都要拉一次 <c>GET /state</c>，
+    /// 哪怕队列一动没动。这是 N² 的：20 台就是每 30 秒 380 个请求。
+    /// </para>
+    /// <para>
+    /// <b>比的是幂等键，不是 <see cref="QueuedRevision"/> 本身。</b>
+    /// <see cref="Revision.Id"/> 就是 <c>PR 号@srcCommit</c> —— 作者一 push，
+    /// 它就变；没变就说明这一项没变。这跟上面 ② 那步沿用旧条目用的是同一个判据，
+    /// 也是这套东西判断「PR 变了没有」的唯一标准。
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>刻意不拿 <c>SequenceEqual</c> 深比较。</b> <see cref="PrMeta.ChangedPaths"/>
+    /// 是 <c>IReadOnlyList</c>，而 record 自动生成的相等对列表成员用的是<b>引用</b>比较
+    /// （<c>EqualityComparer&lt;T&gt;.Default</c>）—— 内容一样的两份 <see cref="PrMeta"/>
+    /// 判出来是不等的。深比较在这里能碰巧成立，只因为 ② 那步把上一轮的对象原样搬了过来；
+    /// 那层沿用是为了省 az 调用写的，不是为了让相等性成立，改动它就会让这里静默失效。
+    /// 按键比较没有这个隐式依赖。
+    /// </para>
     /// </remarks>
     private void Publish(IReadOnlyList<QueuedRevision> discovered)
-        => mesh.UpdateState(s => s with { Discovered = [.. discovered] });
+        => mesh.UpdateState(s => SameQueue(s.Discovered, discovered)
+            ? s
+            : s with { Discovered = [.. discovered] });
+
+    /// <summary>两批上报是不是同一个队列 —— 按幂等键逐项比。</summary>
+    /// <remarks>
+    /// 顺序敏感，而顺序来自 az 的列举。真变了就多涨一次版本 —— 退化成原先的行为，
+    /// 不会错，所以不值得为此再排一次序。
+    /// </remarks>
+    private static bool SameQueue(
+        IReadOnlyList<QueuedRevision> a, IReadOnlyList<QueuedRevision> b)
+        => a.Count == b.Count
+        && !a.Where((x, i) => !string.Equals(
+                x.Revision.Id, b[i].Revision.Id, StringComparison.Ordinal))
+            .Any();
 
     /// <summary>
     /// 只给一个 PR 号，跨 project 找到它、上报并由本节点认领（插队）。
@@ -365,11 +402,16 @@ public sealed class DiscoveryService(
     }
 
     /// <summary>
-    /// 刷新本节点的动态字段：有权限的 project、近 24h 票数、Claude 额度用量。
+    /// 刷新本节点的动态字段：有权限的 project、近 24h 票数、Claude 额度用量与窗口明细。
     /// </summary>
     /// <remarks>
-    /// 这三个字段都会进签名心跳，别的节点靠它们算席位。刷新失败时刻意保留上一轮的值而不是
+    /// 前三个都会进签名心跳，别的节点靠它们算席位。刷新失败时刻意保留上一轮的值而不是
     /// 清零 —— 清零会让本节点看起来「又闲又有额度」，把席位全吸过来然后一个都干不了。
+    /// <para>
+    /// 窗口明细（<see cref="LiveState.UsageWindows"/>）不进心跳，改走实时状态那条 HTTP 通道；
+    /// 它跟 <see cref="Elector.Utilization"/> 在同一轮里由<b>同一份读数</b>算出来 ——
+    /// 分两处读的话，别人看到的百分比和判定用的标量会是两个时刻的。
+    /// </para>
     /// </remarks>
     private async Task RefreshSelfAsync(CancellationToken ct)
     {
@@ -380,6 +422,18 @@ public sealed class DiscoveryService(
         {
             var reading = await usage.ReadAsync(mesh.Self.Id, ct).ConfigureAwait(false);
             utilization = reading.Utilization;
+
+            // 窗口明细跟着实时状态上线，让别的节点那一行也能画「5h / 7d」而不是一个折算标量。
+            // 走 GET /state 而不是心跳，理由见 LiveState.UsageWindows（心跳的 MTU 没余量了）。
+            // 只带参与判定的那些：按模型细分的子额度在节点表里本来就不画。
+            // 折算兜底没有窗口可拆，那时这里就是空的，对端照旧退回画压力值。
+            IReadOnlyList<UsageWindow> windows = [.. reading.Windows.Where(w => w.Gates)];
+
+            // 一模一样就原样返回。UpdateState 只在引用变了时才递增版本，而版本一变
+            // mesh 里每个节点都要来拉一次 /state —— 一个纯展示字段不该有这种代价。
+            mesh.UpdateState(s => s.UsageWindows.SequenceEqual(windows)
+                ? s
+                : s with { UsageWindows = windows });
 
             // UI 的额度面板读这一份，不自己再起一次探针（见 NodeState.Usage）。
             state.SetUsage(reading);

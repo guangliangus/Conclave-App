@@ -20,7 +20,7 @@
       主卡片   五张平级的表，tab 切换
       状态栏   一行当前状态
 
-    五张表：PR 队列 / 我的 PR / 评审记录 / Acta / 在线节点。它们同级 ——
+    六张表：在线节点 / 我的 PR / PR 队列 / 评审记录 / Acta / 通知。它们同级 ——
     原先「队列」独占上半屏、账本挤在下半屏并用分段控件切换，于是「在线节点」这类
     同样重要的东西没地方放，而上下两块各自带滚动条，一屏里出现两条滚动条很难用。
 
@@ -190,8 +190,9 @@
             </Button>
           </Panel>
 
-          <Panel DockPanel.Dock="Right" Width="104" IsVisible="{Binding Layout.Mid}">
-            <Border Classes="badge"
+          <!-- 120 而不是 104：最长的「通过·有建议 13 条」在 104 里只剩 1px 余量 -->
+          <Panel DockPanel.Dock="Right" Width="120" IsVisible="{Binding Layout.Mid}">
+            <Border Classes="badge" ToolTip.Tip="{Binding OutcomeTip}"
                     Classes.ok="{Binding Outcome.IsOk}"
                     Classes.warn="{Binding Outcome.IsWarn}"
                     Classes.bad="{Binding Outcome.IsBad}"
@@ -567,13 +568,17 @@
                     每个 tab = 名字 + 一个上标计数。计数为空时整个角标不占位，
                     所以「Acta」在没有区块时就是干干净净两个字。
                   -->
+
+                  <!-- 有节点掉线就转橙：3/3 和 2/3 光看数字差别太小，而后者意味着有 PR 要重新分配 -->
                   <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
-                               IsChecked="{Binding ShowQueue}">
+                               IsChecked="{Binding ShowNodes}">
                     <StackPanel Orientation="Horizontal" Spacing="3">
-                      <TextBlock Text="PR 队列" />
+                      <TextBlock Text="在线节点" />
                       <Border Classes="tabcount"
-                              IsVisible="{Binding QueueCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
-                        <TextBlock Text="{Binding QueueCount}" />
+                              Classes.ok="{Binding NodesAllAlive}"
+                              Classes.warn="{Binding !NodesAllAlive}"
+                              IsVisible="{Binding NodesCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding NodesCount}" />
                       </Border>
                     </StackPanel>
                   </RadioButton>
@@ -591,6 +596,17 @@
                   </RadioButton>
 
                   <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowQueue}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="PR 队列" />
+                      <Border Classes="tabcount"
+                              IsVisible="{Binding QueueCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding QueueCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
                                IsChecked="{Binding ShowReviews}">
                     <StackPanel Orientation="Horizontal" Spacing="3">
                       <TextBlock Text="评审记录" />
@@ -602,26 +618,23 @@
                   </RadioButton>
 
                   <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
+                               IsChecked="{Binding ShowBoard}">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+                      <TextBlock Text="积分" />
+                      <Border Classes="tabcount"
+                              IsVisible="{Binding BoardCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding BoardCount}" />
+                      </Border>
+                    </StackPanel>
+                  </RadioButton>
+
+                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
                                IsChecked="{Binding ShowActa}">
                     <StackPanel Orientation="Horizontal" Spacing="3">
                       <TextBlock Text="Acta" />
                       <Border Classes="tabcount"
                               IsVisible="{Binding ActaCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
                         <TextBlock Text="{Binding ActaCount}" />
-                      </Border>
-                    </StackPanel>
-                  </RadioButton>
-
-                  <!-- 有节点掉线就转橙：3/3 和 2/3 光看数字差别太小，而后者意味着有 PR 要重新分配 -->
-                  <RadioButton Theme="{StaticResource TabButton}" GroupName="main"
-                               IsChecked="{Binding ShowNodes}">
-                    <StackPanel Orientation="Horizontal" Spacing="3">
-                      <TextBlock Text="在线节点" />
-                      <Border Classes="tabcount"
-                              Classes.ok="{Binding NodesAllAlive}"
-                              Classes.warn="{Binding !NodesAllAlive}"
-                              IsVisible="{Binding NodesCount, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
-                        <TextBlock Text="{Binding NodesCount}" />
                       </Border>
                     </StackPanel>
                   </RadioButton>
@@ -641,20 +654,24 @@
 
                 <!-- 每张表一句说明。同一格里叠六个、按 tab 显隐，比在每张表里各写一遍紧凑 -->
                 <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
-                           IsVisible="{Binding ShowQueue}"
-                           Text="一行 = 一个 PR 版本。作者一 push 就是新的一行，PR 号下面那串是源 commit" />
+                           IsVisible="{Binding ShowNodes}"
+                           Text="额度、在跑、近 24H 三列正好是权重的三个输入 —— 席位为什么落在某台机器上，看这一行就够" />
                 <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
                            IsVisible="{Binding ShowMine}"
                            Text="队列里作者是本机 az 身份的那些。「状态」列写明它在排队、还是被哪个节点评着" />
                 <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowQueue}"
+                           Text="一行 = 一个 PR 版本。作者一 push 就是新的一行，PR 号下面那串是源 commit" />
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
                            IsVisible="{Binding ShowReviews}"
                            Text="投影表，可由链重建。悬浮任意一行看 token 拆解与分模型明细" />
                 <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
+                           IsVisible="{Binding ShowBoard}"
+                           Text="分数由账本现算，不落盘 —— 改了权重历史会一起重算。Error 票不计分" />
+
+                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
                            IsVisible="{Binding ShowActa}"
                            Text="全局唯一一条链，每块含前块哈希与签名。索引冲突时哈希小者胜出，输的一段重挂到链尾" />
-                <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
-                           IsVisible="{Binding ShowNodes}"
-                           Text="额度、在跑、近 24H 三列正好是权重的三个输入 —— 席位为什么落在某台机器上，看这一行就够" />
                 <TextBlock Grid.Column="1" Classes="card-note" Margin="14,0,4,0"
                            IsVisible="{Binding ShowNotices}"
                            Text="本机看到的事，最近的在最上面。只在内存里，重启即清空 —— 事实本身在 Acta 与评审记录里" />
@@ -682,7 +699,7 @@
                                IsVisible="{Binding Layout.Wide}" Text="操作" />
                     <Panel DockPanel.Dock="Right" Width="34"
                            IsVisible="{Binding !Layout.Wide}" />
-                    <TextBlock DockPanel.Dock="Right" Width="104" Classes="th"
+                    <TextBlock DockPanel.Dock="Right" Width="120" Classes="th"
                                IsVisible="{Binding Layout.Mid}" Text="结论" />
                     <TextBlock DockPanel.Dock="Right" Width="176" Classes="th" Margin="0,0,12,0"
                                Text="状态" />
@@ -714,7 +731,7 @@
                                IsVisible="{Binding Layout.Wide}" Text="操作" />
                     <Panel DockPanel.Dock="Right" Width="34"
                            IsVisible="{Binding !Layout.Wide}" />
-                    <TextBlock DockPanel.Dock="Right" Width="104" Classes="th"
+                    <TextBlock DockPanel.Dock="Right" Width="120" Classes="th"
                                IsVisible="{Binding Layout.Mid}" Text="结论" />
                     <TextBlock DockPanel.Dock="Right" Width="176" Classes="th" Margin="0,0,12,0"
                                Text="状态 · 谁在评" />
@@ -816,17 +833,82 @@
                 </Panel>
               </Grid>
 
+              <!--
+                积分排行榜。
+                名次、人、分数是骨架，其余三列按宽度让位（见 TableLayout）；
+                「人」是 LastChildFill 那一列，窄了被压窄而不是藏掉 ——
+                藏掉的话这张表就只剩几个数字，认不出是谁的。
+              -->
+              <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowBoard}">
+                <Border Grid.Row="0" Classes="thead">
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Width="44" Classes="th num" Text="#" />
+                    <TextBlock DockPanel.Dock="Right" Width="86" Classes="th num" Text="分数" />
+                    <TextBlock DockPanel.Dock="Right" Width="72" Classes="th num" Margin="0,0,12,0"
+                               Text="评审" />
+                    <TextBlock DockPanel.Dock="Right" Width="88" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Mid}" Text="抓到" />
+                    <TextBlock DockPanel.Dock="Right" Width="88" Classes="th num" Margin="0,0,12,0"
+                               IsVisible="{Binding Layout.Wide}" Text="改动文件" />
+                    <TextBlock Classes="th" Text="人" />
+                  </DockPanel>
+                </Border>
+
+                <Panel Grid.Row="1">
+                  <ScrollViewer>
+                    <ItemsControl ItemsSource="{Binding Board}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:BoardRow">
+                          <Border Classes="row" ToolTip.Tip="{Binding Tip}">
+                            <DockPanel LastChildFill="True">
+                              <TextBlock DockPanel.Dock="Left" Width="44" Classes="cell num dim"
+                                         Text="{Binding Rank}" />
+                              <TextBlock DockPanel.Dock="Right" Width="86" Classes="cell num"
+                                         FontWeight="SemiBold" Text="{Binding Points}" />
+                              <TextBlock DockPanel.Dock="Right" Width="72" Classes="cell num dim"
+                                         Margin="0,0,12,0" Text="{Binding Reviews}" />
+                              <TextBlock DockPanel.Dock="Right" Width="88" Classes="cell num dim"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Mid}"
+                                         Text="{Binding Catches}" />
+                              <TextBlock DockPanel.Dock="Right" Width="88" Classes="cell num muted"
+                                         Margin="0,0,12,0" IsVisible="{Binding Layout.Wide}"
+                                         Text="{Binding Files}" />
+                              <!-- 金色只留给「跟本节点有关」，见 Theme.axaml 顶部那三类颜色 -->
+                              <TextBlock Classes="cell" Classes.gold="{Binding IsSelf}"
+                                         Text="{Binding Person}" />
+                            </DockPanel>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+
+                  <TextBlock Classes="empty" IsVisible="{Binding BoardEmpty}"
+                             Text="还没有人得分&#10;评完一个 PR 就会出现在这里。Error 票不计分" />
+                </Panel>
+              </Grid>
+
               <!-- Acta 会议录 -->
               <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowActa}">
+                <!--
+                  DockPanel 而不是原先那个定宽 Grid：作者与节点两列要按窗口宽度让位，
+                  而 Grid 的列宽是写死的像素，藏掉列里的内容并不会把那段宽度还给摘要，
+                  只会在中间留一片死区（见 TableLayout）。摘要是 LastChildFill 那一列。
+                -->
                 <Border Grid.Row="0" Classes="thead">
-                  <Grid ColumnDefinitions="102,48,132,74,116,*">
-                    <TextBlock Grid.Column="0" Classes="th" Text="时间" />
-                    <TextBlock Grid.Column="1" Classes="th num" Margin="0,0,12,0" Text="#" />
-                    <TextBlock Grid.Column="2" Classes="th" Text="REVISION" />
-                    <TextBlock Grid.Column="3" Classes="th" Text="类型" />
-                    <TextBlock Grid.Column="4" Classes="th" Text="HASH" />
-                    <TextBlock Grid.Column="5" Classes="th" Text="摘要" />
-                  </Grid>
+                  <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left" Width="102" Classes="th" Text="时间" />
+                    <TextBlock DockPanel.Dock="Left" Width="48" Classes="th num"
+                               Margin="0,0,12,0" Text="#" />
+                    <TextBlock DockPanel.Dock="Left" Width="132" Classes="th" Text="REVISION" />
+                    <TextBlock DockPanel.Dock="Left" Width="74" Classes="th" Text="类型" />
+                    <TextBlock DockPanel.Dock="Left" Width="88" Classes="th"
+                               IsVisible="{Binding Layout.Wide}" Text="作者" />
+                    <TextBlock DockPanel.Dock="Left" Width="88" Classes="th"
+                               IsVisible="{Binding Layout.Mid}" Text="评审" />
+                    <TextBlock DockPanel.Dock="Left" Width="116" Classes="th" Text="HASH" />
+                    <TextBlock Classes="th" Text="摘要" />
+                  </DockPanel>
                 </Border>
 
                 <Panel Grid.Row="1">
@@ -848,25 +930,36 @@
                       <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:BlockRow">
                           <Border Classes="row dense">
-                            <Grid ColumnDefinitions="102,48,132,74,116,*">
-                              <TextBlock Grid.Column="0" Classes="cell mono dim" Text="{Binding At}" />
-                              <TextBlock Grid.Column="1" Classes="cell mono num dim"
+                            <DockPanel LastChildFill="True">
+                              <TextBlock DockPanel.Dock="Left" Width="102" Classes="cell mono dim"
+                                         Text="{Binding At}" />
+                              <TextBlock DockPanel.Dock="Left" Width="48" Classes="cell mono num dim"
                                          Margin="0,0,12,0" Text="{Binding Index}" />
-                              <TextBlock Grid.Column="2" Classes="cell mono gold"
+                              <TextBlock DockPanel.Dock="Left" Width="132" Classes="cell mono gold"
                                          Text="{Binding Revision}" />
-                              <Border Grid.Column="3" Classes="badge"
-                                      Classes.ok="{Binding Kind.IsOk}"
-                                      Classes.warn="{Binding Kind.IsWarn}"
-                                      Classes.info="{Binding Kind.IsInfo}"
-                                      Classes.gold="{Binding Kind.IsGold}">
-                                <TextBlock Text="{Binding Kind.Text}" />
-                              </Border>
-                              <TextBlock Grid.Column="4" Classes="cell mono dim" Margin="0,0,12,0"
-                                         Text="{Binding Hash}"
-                                         ToolTip.Tip="{Binding ElectorFull, StringFormat='签名节点 {0}'}" />
-                              <TextBlock Grid.Column="5" Classes="cell mono muted"
-                                         Text="{Binding Summary}" />
-                            </Grid>
+
+                              <Panel DockPanel.Dock="Left" Width="74">
+                                <Border Classes="badge"
+                                        Classes.ok="{Binding Kind.IsOk}"
+                                        Classes.warn="{Binding Kind.IsWarn}"
+                                        Classes.info="{Binding Kind.IsInfo}"
+                                        Classes.gold="{Binding Kind.IsGold}">
+                                  <TextBlock Text="{Binding Kind.Text}" />
+                                </Border>
+                              </Panel>
+
+                              <!-- 谁提的 / 谁评的。签名节点原先只藏在 HASH 的 tooltip 里 -->
+                              <TextBlock DockPanel.Dock="Left" Width="88" Classes="cell dim"
+                                         IsVisible="{Binding Layout.Wide}"
+                                         Text="{Binding Author}" ToolTip.Tip="{Binding AuthorTip}" />
+                              <TextBlock DockPanel.Dock="Left" Width="88" Classes="cell"
+                                         IsVisible="{Binding Layout.Mid}"
+                                         Text="{Binding Reviewer}" ToolTip.Tip="{Binding ReviewerTip}" />
+
+                              <TextBlock DockPanel.Dock="Left" Width="116" Classes="cell mono dim"
+                                         Margin="0,0,12,0" Text="{Binding Hash}" />
+                              <TextBlock Classes="cell mono muted" Text="{Binding Summary}" />
+                            </DockPanel>
                           </Border>
                         </DataTemplate>
                       </ItemsControl.ItemTemplate>
@@ -920,8 +1013,11 @@
                                          Text="{Binding LoadText}" />
 
                               <!--
-                                本节点画 Claude 自己报的原始读数，一行一个窗口（5h / 7d）；
-                                对端画心跳里那个压力标量，因为协议里就只有它。
+                                每一行都画 Claude 自己报的原始读数，一行一个窗口（5h / 7d）：
+                                本节点的来自本机探针，对端的来自它上报的实时状态
+                                （LiveState.UsageWindows，随 GET /state 过来）。
+                                只有拆不出窗口时才退回画那个压力标量 —— 真值读不到（按预算折算），
+                                或者对端是还不上报明细的旧版本。
 
                                 两种画法共用同一套 22 / * / 34 的三列，条的左右端才对得齐 ——
                                 这一列的条是用来横着比几台机器的，对不齐就白画了。

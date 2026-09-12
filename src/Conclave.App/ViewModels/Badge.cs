@@ -58,6 +58,12 @@ public sealed record Badge(string Text, BadgeTone Tone)
     /// <summary>
     /// 评审结论 + 问题数，给没有单独「问题」列的 PR 队列用。
     /// </summary>
+    /// <remarks>
+    /// 带上量词「条」：光写「待作者 5」看不出这个 5 是问题数、票数还是轮次 ——
+    /// 这三样在这个界面上都存在，而且都是个位数，猜错了不会有任何提示。
+    /// 名词（「问题」）放不进那一格 —— 最长的「通过·有建议 13 条」已经占满 120px，
+    /// 所以名词由 <see cref="OutcomeTip"/> 在 tooltip 里补。
+    /// </remarks>
     /// <param name="decision">null 表示还没有结论。</param>
     /// <param name="findings">合并后的问题数；0 就不显示。</param>
     public static Badge Outcome(ReviewDecision? decision, int findings)
@@ -68,7 +74,32 @@ public sealed record Badge(string Text, BadgeTone Tone)
         }
 
         var badge = Status(decision.Value);
-        return findings > 0 ? badge with { Text = $"{badge.Text} {findings}" } : badge;
+        return findings > 0 ? badge with { Text = $"{badge.Text} {findings} 条" } : badge;
+    }
+
+    /// <summary>
+    /// 徽章上那几个字的展开说法，给 tooltip 用。
+    /// </summary>
+    /// <remarks>
+    /// 跟 <see cref="Outcome"/> 放在一起，理由同 <see cref="Labels"/>：两处各写一遍
+    /// 迟早漂移成「同一个状态两个说法」。
+    /// <para>
+    /// 「合并后」是要点 —— quorum≥2 时几个节点各报一份，这个数是聚成簇之后的条数，
+    /// 不是把各家的加起来（见 <see cref="Conclave.Domain.QuorumEngine"/>）。
+    /// </para>
+    /// </remarks>
+    public static string OutcomeTip(ReviewDecision? decision, int findings)
+    {
+        if (decision is null)
+        {
+            return "还没有结论";
+        }
+
+        var label = Labels.Decision(decision.Value);
+
+        return findings > 0
+            ? $"{label} · 合并后 {findings} 条问题"
+            : $"{label} · 没有报出问题";
     }
 
     /// <summary>只有结论，不带问题数 —— 评审记录那张表自己有「问题」列。</summary>

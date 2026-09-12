@@ -163,6 +163,7 @@ public sealed class PrRow
         NoteIsWarn = note?.Tone == BadgeTone.Warn;
         NoteIsBad = note?.Tone == BadgeTone.Bad;
         Outcome = Badge.Outcome(view.Decision, view.Findings);
+        OutcomeTip = Badge.OutcomeTip(view.Decision, view.Findings);
 
         IsSeated = view.MySeat >= 0;
         var reviewingByMe = view.ReviewingBy == selfId;
@@ -323,7 +324,7 @@ public sealed class PrRow
         HasActions = ShowReview || ShowClaim || ShowRelease || ShowAssign || CanShowLog;
     }
 
-    /// <summary>三张表共用的「该显示几列」。窄了就少显示几列，见 <see cref="TableLayout"/>。</summary>
+    /// <summary>四张表共用的「该显示几列」。窄了就少显示几列，见 <see cref="TableLayout"/>。</summary>
     public TableLayout Layout { get; }
 
     public PrView View { get; }
@@ -385,6 +386,9 @@ public sealed class PrRow
     public Badge Stage { get; }
 
     public Badge Outcome { get; }
+
+    /// <summary>徽章上那个数字是什么 —— 徽章只放得下量词，名词在这里。</summary>
+    public string OutcomeTip { get; }
 
     /// <summary>
     /// 徽章之外还需要补的那半句：处理它的节点名，或「席位归本节点」；没有就空着。
@@ -533,5 +537,14 @@ public sealed class PrRow
 /// <summary>把 <see cref="PrView"/> 上「已有结论」这件事读成一个名字。</summary>
 internal static class PrViewExtensions
 {
-    internal static bool Finished(this PrView view) => view.Decision is not null;
+    /// <summary>
+    /// 真的评完了 —— 有结论，而且不是执行失败的收尾。
+    /// </summary>
+    /// <remarks>
+    /// Error 结论<b>不算</b>：那一版一个字都还没被评过，所以行上的「评审」「认领」必须
+    /// 还能点 —— 自动分席位已经停了（能试的机器都失败了），人手动再来一次是唯一的出路。
+    /// 跟 <see cref="Conclave.Domain.ChainState.IsProvisional"/> 是同一条口径。
+    /// </remarks>
+    internal static bool Finished(this PrView view)
+        => view.Decision is not null and not ReviewDecision.Error;
 }

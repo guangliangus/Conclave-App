@@ -253,13 +253,100 @@ public class QueueProjectionTests
         // 这是踩过的坑：Error 票不计入有效票，所以拿 Ballots（有效票数）当下标会一直指向
         // round 0 —— 而 round 0 已经出过 Error 票、被判定为已定局，于是编排层既不重试
         // 也不公布，PR 永久卡住。下标必须按「已烧掉的轮次」算。
-        var mesh = new[] { TestElectors.Make("n1") };
+        var mesh = new[] { TestElectors.Make("n1"), TestElectors.Make("n2") };
         var item = Item();
 
-        // 有效票 0、已烧掉 1 轮（那一票是 Error）。
+        // 有效票 0、已烧掉 1 轮（那一票是 Error，出自 n1）。
         var entry = new QueueEntry(item, null, 0, null, null, Ballots: 0, false);
 
-        Assert.Equal(1, QueueProjection.SeatFor(entry, "n1", mesh, Now, roundsUsed: 1));
+        var seats = SeatAssignment.Seats(item.Revision, item.Pr, mesh, 1, Now, extraRounds: 1);
+
+        Assert.Equal(1, QueueProjection.SeatFor(entry, seats[1], mesh, Now, roundsUsed: 1));
+    }
+
+    /// <summary>
+    /// 出错的节点不再被分到这一版的席位 —— 换一台机器才是重试的意义。
+    /// </summary>
+    [Fact]
+    public void A_node_that_already_failed_does_not_get_the_seat_again()
+    {
+        var mesh = new[] { TestElectors.Make("n1"), TestElectors.Make("n2") };
+        var item = Item();
+        var entry = new QueueEntry(item, null, 0, null, null, Ballots: 0, false);
+
+        var seats = SeatAssignment.Seats(item.Revision, item.Pr, mesh, 1, Now);
+        var failed = seats[0];
+
+        var assigned = QueueProjection.AssignSeats(
+            [new QueueProjection.SeatCandidate(entry, RoundsUsed: 1, Voted: [failed])],
+            mesh,
+            Now);
+
+        var who = Assert.Contains(item.Revision.Id, assigned);
+        Assert.NotEqual(failed, who);
+    }
+
+    /// <summary>只剩这一台、而它已经失败过 —— 不硬塞回去，留在队列里等新节点。</summary>
+    [Fact]
+    public void The_only_node_that_already_failed_gets_no_seat_at_all()
+    {
+        var mesh = new[] { TestElectors.Make("n1") };
+        var item = Item();
+        var entry = new QueueEntry(item, null, 0, null, null, Ballots: 0, false);
+
+        var assigned = QueueProjection.AssignSeats(
+            [new QueueProjection.SeatCandidate(entry, RoundsUsed: 1, Voted: ["n1"])],
+            mesh,
+            Now);
+
+        Assert.Empty(assigned);
+    }
+
+    /// <summary>
+    /// 「换掉失败的那台」只管这一版 —— 作者 push 修复之后照旧回到原评审者。
+    /// </summary>
+    /// <remarks>
+    /// 待作者 / 驳回之后作者会推新 commit，PR 号不变但 <see cref="Revision"/> 变了，
+    /// 于是「谁出过票」是空的、排除规则不生效，incumbent 照常拿 round 0。
+    /// 那个节点已经读过这份代码、提过这些 finding，复审的边际成本远低于换人从头看。
+    /// <para>
+    /// incumbent 本身来自 <c>SqliteReviewLog.ReadLastReviewerAsync</c>，那条 SQL 里
+    /// <c>status &lt;&gt; 'Error'</c> —— 上一版失败的节点不算「评过」，不会被请回来。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_new_commit_goes_back_to_the_reviewer_of_the_previous_revision()
+    {
+        var mesh = new[] { TestElectors.Make("n1"), TestElectors.Make("n2") };
+
+        // 同一个 PR 的下一版：commit 变了，PR 号没变。
+        var next = Item(Rev with { SrcCommit = "bbbbbbbb22222222" });
+        var entry = new QueueEntry(next, null, 0, null, null, Ballots: 0, false);
+
+        foreach (var incumbent in new[] { "n1", "n2" })
+        {
+            var assigned = QueueProjection.AssignSeats(
+                [new QueueProjection.SeatCandidate(entry, incumbent)], mesh, Now);
+
+            Assert.Equal(incumbent, Assert.Contains(next.Revision.Id, assigned));
+        }
+    }
+
+    /// <summary>开关打开就回到老行为：唯一那台机器再试一次。</summary>
+    [Fact]
+    public void The_switch_puts_the_seat_back_on_the_node_that_failed()
+    {
+        var mesh = new[] { TestElectors.Make("n1") };
+        var item = Item();
+        var entry = new QueueEntry(item, null, 0, null, null, Ballots: 0, false);
+
+        var assigned = QueueProjection.AssignSeats(
+            [new QueueProjection.SeatCandidate(
+                entry, RoundsUsed: 1, Voted: ["n1"], RetryOnSameNode: true)],
+            mesh,
+            Now);
+
+        Assert.Equal("n1", Assert.Contains(item.Revision.Id, assigned));
     }
 
     [Fact]

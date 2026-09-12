@@ -52,8 +52,8 @@ internal static class Labels
         "Current week" => "周额度（7d）",
 
         // seven_day:Fable → 周额度（Fable）。按模型细分的子额度只显示、不参与入席判定。
-        _ when key.StartsWith(Application.Ports.UsageWindow.ScopedSevenDayPrefix, StringComparison.Ordinal)
-            => "周额度（" + key[Application.Ports.UsageWindow.ScopedSevenDayPrefix.Length..] + "）",
+        _ when key.StartsWith(Conclave.Domain.UsageWindow.ScopedSevenDayPrefix, StringComparison.Ordinal)
+            => "周额度（" + key[Conclave.Domain.UsageWindow.ScopedSevenDayPrefix.Length..] + "）",
 
         _ => key,
     };
@@ -72,8 +72,8 @@ internal static class Labels
         "seven_day" or "Current week" => "7d",
         "spend_limit" => "消费",
 
-        _ when key.StartsWith(Application.Ports.UsageWindow.ScopedSevenDayPrefix, StringComparison.Ordinal)
-            => key[Application.Ports.UsageWindow.ScopedSevenDayPrefix.Length..],
+        _ when key.StartsWith(Conclave.Domain.UsageWindow.ScopedSevenDayPrefix, StringComparison.Ordinal)
+            => key[Conclave.Domain.UsageWindow.ScopedSevenDayPrefix.Length..],
 
         _ => key,
     };

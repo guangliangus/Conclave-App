@@ -41,6 +41,60 @@ public sealed class VerbatimCommentTests
         Assert.Equal(drafted, body);
     }
 
+    /// <summary>
+    /// 一个节点评审时，PR 上收到的就是 claude 那条评论本身 —— 不出现 Conclave。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 从 claude 的原始输出一路串到最终 markdown，中间不手搓 Ballot：
+    /// 上面那几条都是从 <see cref="BallotPayload"/> 起步的，而 PR 2916 的事故恰好
+    /// 死在更前面一步 —— 起草的评论里带 <c>```go</c> 示例代码，契约根本没解出来，
+    /// 于是 <c>Comment</c> 是 null，作者收到的是兜底渲染的
+    /// 「## Conclave 评审结论：Error」。评论写得越好越必然踩中。
+    /// </para>
+    /// <para>
+    /// 所以这条从 <c>type=result</c> 那一行开始跑，钉的是整条链路的结果。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void One_node_posts_claudes_own_comment_with_no_trace_of_conclave()
+    {
+        const string Drafted =
+            "**Code Review** — 🔴 需要修改：`Authenticate` 可绕过登录\n\n"
+                + "```go\nq := fmt.Sprintf(\"… WHERE name = '%s'\", name)\n```\n\n"
+                + "改成参数化：\n\n"
+                + "```go\nrow := s.db.QueryRowContext(ctx, `… WHERE name = $1`, name)\n```\n\n"
+                + "投票：**reject**。";
+
+        var stdout = ActaJson.Serialize(new
+        {
+            type = "result",
+            is_error = false,
+            result = "## 审阅完成\n\n### 结论：reject\n\n```json\n"
+                + ActaJson.Serialize(new
+                {
+                    decision = "reject",
+                    comment = Drafted,
+                    findings = new[]
+                    {
+                        new { file = "query.go", line = 104, severity = "critical", title = "注入", detail = "d" },
+                    },
+                })
+                + "\n```",
+        });
+
+        var ballot = ClaudeReviewRunner.Parse(
+            new Revision("edison-test", 2916, "cbe34411d8d61994"), 0, stdout, 1234,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var merged = QuorumEngine.Merge(Rev, [ballot], 1);
+        var body = AzCliPrSource.CommentBody(Pr, merged);
+
+        Assert.Equal(ReviewDecision.Reject, merged.Decision);
+        Assert.Equal(Drafted, body);
+        Assert.DoesNotContain("Conclave", body, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void No_comment_falls_back_to_the_rendered_table()
     {
@@ -100,5 +154,69 @@ public sealed class VerbatimCommentTests
         Assert.Equal("## 正常长度", ClaudeReviewRunner.CapComment("  ## 正常长度\n "));
         Assert.Null(ClaudeReviewRunner.CapComment(null));
         Assert.Null(ClaudeReviewRunner.CapComment(" \t "));
+    }
+
+    /// <summary>
+    /// 执行失败的结论不能说成「未发现问题」。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 一张有效票都没有时 <see cref="QuorumEngine.Merge"/> 出的是
+    /// <see cref="ReviewDecision.Error"/> + 空 findings。而渲染那条路原先只看
+    /// <c>Findings.Count == 0</c> 就写「未发现问题。」——「跑完了，是干净的」和
+    /// 「压根没跑出结论」对作者的意义正好相反，走错分支等于告诉他可以合。
+    /// </para>
+    /// <para>
+    /// 「确定性失败不再重试」之后这条路来得更快（一轮就收尾，不再烧满三轮），
+    /// 所以这句话必须是对的。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_failed_review_never_tells_the_author_the_pr_is_clean()
+    {
+        var merged = QuorumEngine.Merge(
+            Rev,
+            [Ballot(0, comment: null, decision: ReviewDecision.Error) with { Findings = [] }],
+            1);
+
+        var body = AzCliPrSource.CommentBody(Pr, merged);
+
+        Assert.Equal(ReviewDecision.Error, merged.Decision);
+        Assert.DoesNotContain("未发现问题", body, StringComparison.Ordinal);
+        Assert.Contains("这不代表代码没有问题", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>降级的两种原因要分开说。</summary>
+    /// <remarks>
+    /// 「合格节点不足」说的是评审是好的、只是票少；执行失败是压根没跑出结论。
+    /// 原先两者共用一句硬编码的「降级：合格节点不足」。
+    /// </remarks>
+    [Fact]
+    public void A_failed_review_says_why_it_is_degraded()
+    {
+        var merged = QuorumEngine.Merge(
+            Rev,
+            [Ballot(0, comment: null, decision: ReviewDecision.Error) with { Findings = [] }],
+            1);
+
+        var body = AzCliPrSource.CommentBody(Pr, merged);
+
+        Assert.True(merged.Degraded);
+        Assert.Contains("评审执行失败", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("合格节点不足", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>真·干净的 PR 照旧那么说 —— 上面两条不能把这句话一起掐掉。</summary>
+    [Fact]
+    public void A_genuinely_clean_review_still_says_so()
+    {
+        var merged = QuorumEngine.Merge(
+            Rev,
+            [Ballot(0, comment: null, decision: ReviewDecision.Approve) with { Findings = [] }],
+            1);
+
+        var body = AzCliPrSource.CommentBody(Pr, merged);
+
+        Assert.Contains("未发现问题", body, StringComparison.Ordinal);
     }
 }

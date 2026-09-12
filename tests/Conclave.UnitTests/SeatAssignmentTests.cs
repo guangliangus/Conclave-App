@@ -278,8 +278,17 @@ public class SeatAssignmentTests
         Assert.Equal(2, seats.Count);
     }
 
+    /// <summary>
+    /// 重试轮次默认<b>不</b>重抽同一台机器。
+    /// </summary>
+    /// <remarks>
+    /// 执行失败的原因基本都不在这份代码上 —— claude 没额度、用户退出登录、az 连不上、
+    /// token 到期 —— 在同一台机器上再跑一遍只会原样再错一次，而每一轮都是完整的账单。
+    /// 池子空了就让这一版留在队列里等没试过的节点，收尾由
+    /// <c>ChainState.CanPromulgate</c> 的 <c>nobodyLeftToTry</c> 那条管。
+    /// </remarks>
     [Fact]
-    public void Extra_rounds_are_retries_and_may_redraw_the_same_node()
+    public void Extra_rounds_do_not_redraw_a_node_that_already_sat()
     {
         var pr = TestElectors.Pr();                        // quorum = 1
         var only = new[] { TestElectors.Make("n1") };
@@ -287,9 +296,35 @@ public class SeatAssignmentTests
         var seats = SeatAssignment.Seats(
             pr.ToRevision(), pr, only, quorum: 1, TestElectors.Now, extraRounds: 2);
 
-        // 单节点 mesh 上弃权后必须还能重试，否则这个 PR 永远到不了终态：
-        // 没有票不能公布，也没有别人可以接管。
+        Assert.Equal(["n1"], seats);
+    }
+
+    /// <summary>开关打开就是老行为 —— 同一台机器一直重试到上限。</summary>
+    [Fact]
+    public void Retry_on_the_same_node_is_available_behind_the_switch()
+    {
+        var pr = TestElectors.Pr();
+        var only = new[] { TestElectors.Make("n1") };
+
+        var seats = SeatAssignment.Seats(
+            pr.ToRevision(), pr, only, quorum: 1, TestElectors.Now, extraRounds: 2,
+            retryOnSameNode: true);
+
         Assert.Equal(["n1", "n1", "n1"], seats);
+    }
+
+    /// <summary>换得动的时候就该换 —— 第二轮落在没坐过的那台上。</summary>
+    [Fact]
+    public void A_retry_round_goes_to_a_node_that_has_not_sat_yet()
+    {
+        var pr = TestElectors.Pr();
+        var mesh = new[] { TestElectors.Make("n1"), TestElectors.Make("n2") };
+
+        var seats = SeatAssignment.Seats(
+            pr.ToRevision(), pr, mesh, quorum: 1, TestElectors.Now, extraRounds: 1);
+
+        Assert.Equal(2, seats.Count);
+        Assert.Equal(2, seats.Distinct().Count());
     }
 
     [Fact]

@@ -87,8 +87,10 @@ public sealed record BallotPayload(
     /// 否则账单里连「这一票评的是哪个仓库的哪个 PR」都答不上来。
     /// </para>
     /// <para>
-    /// quorum=1 时每个 revision 只有一票，所以并不会像原先担心的那样「同一份快照在链上
-    /// 存两遍」；quorum≥2 时会有几份副本，那是为了让每一票都自洽可读，值得。
+    /// quorum=1 时每个 revision 只有一票，但公布块上还有一份
+    /// （<see cref="PromulgationPayload.Pr"/>），所以链上最少存两份；quorum≥2 时每票各
+    /// 一份。那是为了让<b>每一块</b>都自洽可读 —— 单拎出一条出票行或一条公布行都答得上
+    /// 「这是谁的哪个 PR」，值这个字节数。
     /// </para>
     /// <para>
     /// 是 init 属性而不是构造参数：既有的构造点和 <c>with</c> 拷贝都不用改，
@@ -119,6 +121,32 @@ public sealed record BallotPayload(
     /// </para>
     /// </remarks>
     public string? Comment { get; init; }
+
+    /// <summary>
+    /// 这张 Error 票再试一次还有没有意义。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 默认 <c>true</c>：绝大多数失败是偶发的 —— 工作区拉不下来、claude 子进程挂了、
+    /// 服务端 5xx、评审超时。换一轮换一台机器很可能就过了，
+    /// 这正是 <c>ConclaveOptions.MaxReviewAttempts</c> 存在的理由。
+    /// </para>
+    /// <para>
+    /// 置 <c>false</c> 的是<b>确定性</b>失败：claude 把评审做完了、token 也烧光了，
+    /// 只是最后那个机器可读的契约块没出来（或者输出根本不是合法 JSON）。
+    /// 同一份输入再跑一遍只会得到同一个结果，而每一遍都是完整的账单 ——
+    /// 实测一个 PR 两轮就是 121 万 token、$2.79，产出为零。
+    /// </para>
+    /// <para>
+    /// 只对 <see cref="ReviewDecision.Error"/> 有意义；别的结论不看这个字段。
+    /// 是 init 属性而不是构造参数，理由同 <see cref="Pr"/>：既有构造点不用改，
+    /// 老 Ballot 反序列化成 <c>true</c> 正是「那时候没有这个概念，一律可重试」。
+    /// </para>
+    /// </remarks>
+    public bool Retryable { get; init; } = true;
+
+    /// <summary>确定性失败的 Error 票 —— 重试只会原样再失败一次。</summary>
+    public bool IsFatal => Decision == ReviewDecision.Error && !Retryable;
 
     /// <summary>拿不到计量时退成全 0，免得每个读取点都判空。</summary>
     public ReviewUsage Metering => Usage ?? ReviewUsage.None;
@@ -151,6 +179,48 @@ public sealed record PromulgationPayload(
     /// 默认策略是全 1（<see cref="QuorumPolicy.Single"/>），所以常态走原文这条路。
     /// </remarks>
     public string? Comment { get; init; }
+
+    /// <summary>
+    /// 评审时的 PR 快照。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 跟 <see cref="BallotPayload.Pr"/> 同一个理由，只是晚补了一步：公布块原先只有
+    /// revision id，「这是谁的哪个 PR」得回头翻同一 revision 的出票块 —— 而那两块未必
+    /// 在同一段链里读得到（账本浏览器一次只列最近 60 块，票和公布之间还插着别的 PR）。
+    /// </para>
+    /// <para>
+    /// 由公布者填（<c>ReviewOrchestrator.PromulgateAsync</c>），取它自己队列里的那份快照，
+    /// 而不是从票上抄 —— 这样<b>一张有效票都没有</b>时也填得出来。三轮全挂的降级结论
+    /// 正是这种块：合并器收到的是空列表，却最需要说清楚这是哪个 PR。
+    /// </para>
+    /// <para>
+    /// 是 init 属性而不是构造参数，理由同 <see cref="BallotPayload.Pr"/>：既有构造点不用改，
+    /// 改造之前落链的老公布块反序列化留 null 正是「那时候没有这个东西」。
+    /// </para>
+    /// </remarks>
+    public PrMeta? Pr { get; init; }
+
+    /// <summary>
+    /// 出过票的评审者，az 身份，按 round 排。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>含 Error 票的出票者</b>，所以它跟 <see cref="ActualQuorum"/> 数的不是一回事：
+    /// 后者刻意只数有效票（Error 票在 <see cref="ChainState.SpentRounds"/> 里已经让出过
+    /// 席位，再计入分母会把失败次数也算成「评审次数」）。这里答的是另一个问题 ——
+    /// 「谁评的」。一个 PR 三轮全挂时 ActualQuorum 是 0，而那三台确实都跑过。
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>这份是公布者签的转述，不是评审者自己签的。</b> 权威的那份仍在出票块上
+    /// （<see cref="BallotPayload.ReviewerAz"/>，落在那一票的签名范围内，所以不可否认）。
+    /// 要做审计就得回去读票；这里只是为了让公布块自己读得懂。
+    /// </para>
+    /// <para>
+    /// 没有 az 身份的老票会被跳过，所以它可能比出票数短。
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string>? Reviewers { get; init; }
 }
 
 /// <summary>

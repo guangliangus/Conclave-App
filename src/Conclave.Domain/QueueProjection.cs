@@ -190,12 +190,17 @@ public static class QueueProjection
     /// 领域层保持无 I/O。
     /// </para>
     /// </param>
+    /// <param name="RetryOnSameNode">
+    /// 允许把席位再给一个已经在这一版上出过票的节点。见
+    /// <c>ConclaveOptions.RetryOnSameNode</c>，默认关着。
+    /// </param>
     public sealed record SeatCandidate(
         QueueEntry Entry,
         string? Incumbent = null,
         int RoundsUsed = 0,
         IReadOnlyCollection<string>? Voted = null,
-        bool NeedsReviewer = true);
+        bool NeedsReviewer = true,
+        bool RetryOnSameNode = false);
 
     /// <summary>
     /// 对整个队列做<b>一次</b>席位分配：每个节点最多拿一个席位。
@@ -279,27 +284,35 @@ public static class QueueProjection
                 break;
             }
 
-            // 已经出过票的节点排除掉，正式席位互不重复 —— 但<b>只在填正式席位时</b>。
-            // 重试轮次（roundsUsed ≥ quorum）必须允许再抽到同一个节点，否则单节点 mesh 上
-            // 一次失败就让这个 PR 永远卡住：唯一的节点已经出过（Error）票，池子空了。
-            // 这条跟 SeatAssignment.Seats 里「重试轮次才重新蓄池」是同一个规则。
-            var formalRound = c.RoundsUsed < c.Entry.Quorum;
-            var pool = formalRound && c.Voted is { Count: > 0 } voted
-                ? free.Where(m => !voted.Contains(m.Id)).ToList()
+            // 已经出过票的节点排除掉 —— 正式席位互不重复，而<b>重试轮次同样排除</b>：
+            // 一次执行失败之后，这一版要的是「换一台机器」，不是让刚失败的那台再跑一遍。
+            // 池子因此可能空掉，那就让它留在队列里等没试过的节点上线（这正是
+            // 「回队列重新获取席位」的落点），而不是硬塞回去。
+            // 这条跟 SeatAssignment.Seats 里蓄池那段是同一个规则，开关也是同一个。
+            var excludeVoted = !c.RetryOnSameNode && c.Voted is { Count: > 0 };
+            var pool = excludeVoted
+                ? free.Where(m => !c.Voted!.Contains(m.Id)).ToList()
                 : free;
+
+            // <b>下标跟着池子走。</b> 坐过的人被排除之后就不再占位，席位表变成
+            // 「还没坐过的人的排队顺序」，下一个待填的永远是第 0 个。
+            // 继续拿 RoundsUsed 当下标会越界 —— 表少了几项而下标照旧往后数，
+            // 表现是「明明还换得动机器，却分不出席位」，PR 静静地卡在队列里。
+            var index = excludeVoted ? 0 : c.RoundsUsed;
 
             var seats = SeatAssignment.Seats(
                 c.Entry.Revision, c.Entry.Pr, pool, c.Entry.Quorum, now,
-                extraRounds: c.RoundsUsed, incumbent: c.Incumbent,
-                allowSelfReview: c.Entry.AllowSelfReview);
+                extraRounds: index, incumbent: c.Incumbent,
+                allowSelfReview: c.Entry.AllowSelfReview,
+                retryOnSameNode: c.RetryOnSameNode);
 
-            if (seats.Count <= c.RoundsUsed)
+            if (seats.Count <= index)
             {
                 // 这一版没有合格且空闲的节点：留在队列里等，而不是硬塞给谁。
                 continue;
             }
 
-            var winner = seats[c.RoundsUsed];
+            var winner = seats[index];
             assigned[c.Entry.Revision.Id] = winner;
             _ = free.RemoveAll(m => m.Id == winner);
         }
@@ -320,6 +333,8 @@ public static class QueueProjection
     /// <param name="incumbent">
     /// 同一个 PR 上一版的评审者。非空且仍合格时直接坐第一个待填席位。
     /// </param>
+    /// <param name="voted">已经在这一版上出过票的节点，它们不再被分到席位。</param>
+    /// <param name="retryOnSameNode">见 <see cref="SeatCandidate.RetryOnSameNode"/>。</param>
     /// <param name="roundsUsed">
     /// 这个 revision 上已经烧掉的轮次数（链上 <see cref="ChainState.SpentRounds"/> 的个数）。
     /// <para>
@@ -346,7 +361,9 @@ public static class QueueProjection
         IEnumerable<Elector> members,
         DateTimeOffset now,
         string? incumbent = null,
-        int roundsUsed = 0)
+        int roundsUsed = 0,
+        IReadOnlyCollection<string>? voted = null,
+        bool retryOnSameNode = false)
     {
         ArgumentNullException.ThrowIfNull(entry);
 
@@ -355,7 +372,8 @@ public static class QueueProjection
         // 注意：单项调用看不到「本节点正被别的 PR 占着」，那要整队一起分才知道。
         // 编排循环走的是 AssignSeats；这个重载给单个 PR 的推理与测试用。
         var assigned = AssignSeats(
-            [new SeatCandidate(entry, incumbent, roundsUsed)], members, now);
+            [new SeatCandidate(entry, incumbent, roundsUsed, voted, RetryOnSameNode: retryOnSameNode)],
+            members, now);
 
         return assigned.TryGetValue(entry.Revision.Id, out var who) && who == selfId
             ? roundsUsed

@@ -48,8 +48,20 @@ internal sealed class FakePrSource : IPrSource
         }
 
         return Task.FromResult<IReadOnlyList<PrMeta>>(
-            Active.TryGetValue(project, out var prs) ? prs : []);
+            Active.TryGetValue(project, out var prs) ? [.. prs.Select(Reparsed)] : []);
     }
+
+    /// <summary>
+    /// 每次列举都给一份<b>新构造</b>的 PrMeta，跟真实的 az 路径一致。
+    /// </summary>
+    /// <remarks>
+    /// 真实实现每轮重新解析一次 JSON，所以对端拿到的永远是新对象、新
+    /// <see cref="PrMeta.ChangedPaths"/> 列表。fake 原先把同一个实例递出去，
+    /// 于是任何「内容没变就别写」的判断在测试里都会因为引用恰好相同而通过，
+    /// 生产上却因为引用每轮都变而失效 —— record 的结构相等对列表成员用的是引用比较。
+    /// 这类假绿灯正是 <c>DiscoveryService.Publish</c> 那次踩到的。
+    /// </remarks>
+    private static PrMeta Reparsed(PrMeta pr) => pr with { ChangedPaths = [.. pr.ChangedPaths] };
 
     /// <summary>fake 不查 ADO，原样返回 —— PrMeta 里的统计由测试直接给定。</summary>
     public Task<PrMeta> EnrichWithChangeStatsAsync(PrMeta pr, CancellationToken ct)
@@ -138,6 +150,15 @@ internal sealed class FakeReviewRunner : IReviewRunner
     internal Exception? Throw { get; set; }
 
     /// <summary>
+    /// 非 null 时出一张<b>不可重试</b>的 Error 票，用来验证确定性失败不再烧后续轮次。
+    /// </summary>
+    /// <remarks>
+    /// 真实来源是 <c>ClaudeReviewRunner.Parse</c> 里「没输出 collect 契约的 JSON 块」
+    /// 那条路 —— 它是正常返回一张票，不是抛异常，所以不能拿 <see cref="Throw"/> 造。
+    /// </remarks>
+    internal string? FatalError { get; set; }
+
+    /// <summary>
     /// 非 null 时评审会挂在这里，直到测试放闸。
     /// </summary>
     /// <remarks>
@@ -159,7 +180,16 @@ internal sealed class FakeReviewRunner : IReviewRunner
             await Gate.Task.WaitAsync(ct);
         }
 
-        return Throw is not null ? throw Throw : _produce(revision, round);
+        if (Throw is not null)
+        {
+            throw Throw;
+        }
+
+        return FatalError is { } fatal
+            ? new BallotPayload(
+                revision.Id, round, ReviewDecision.Error, [], "claude-opus-5", 1234,
+                Error: fatal) { Retryable = false }
+            : _produce(revision, round);
     }
 }
 
@@ -289,12 +319,16 @@ internal sealed class FakeUsageMeter(double utilization = 0) : IUsageMeter
 
     internal int Calls { get; private set; }
 
+    /// <summary>拆得出窗口时给这一份；空的就是「按预算折算」那条路。</summary>
+    internal IReadOnlyList<UsageWindow> Windows { get; set; } = [];
+
     public Task<UsageReading> ReadAsync(string electorId, CancellationToken ct)
     {
         Calls++;
         return Throw is not null
             ? throw Throw
-            : Task.FromResult(new UsageReading(Utilization, "fake", "测试给定"));
+            : Task.FromResult(
+                new UsageReading(Utilization, "fake", "测试给定") { Windows = Windows });
     }
 }
 

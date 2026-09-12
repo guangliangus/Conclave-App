@@ -196,13 +196,44 @@ public sealed class ConclaveOptions
     public bool AllowSelfReview { get; set; }
 
     /// <summary>
-    /// 一个 revision 最多烧掉几个席位（超时弃权与执行失败各算一次）。
+    /// 一个 revision 最多让<b>几个不同节点</b>试（执行失败算一次）。
     /// </summary>
     /// <remarks>
-    /// 到顶之后就拿手上的票公布，可能是一个 degraded 的 Error 结论 ——
-    /// 否则「claude 每次都起不来」这种情况会让同一个 PR 无限重试下去。
+    /// <para>
+    /// 出错的节点不会被再抽到（见 <see cref="RetryOnSameNode"/>），所以每一轮都落在
+    /// 一台没试过的机器上，这个数就是「最多换几台」。到顶之后写一个 degraded 的
+    /// Error 结论、发一条通知，并且<b>不再分配席位</b> ——
+    /// 否则「claude 在谁那儿都起不来」会一直排下去。
+    /// </para>
+    /// <para>
+    /// 单节点 mesh 上把它设成 1，就是「一失败立刻收尾」。
+    /// </para>
     /// </remarks>
     public int MaxReviewAttempts { get; set; } = 3;
+
+    /// <summary>
+    /// 执行失败之后，允许把席位再给同一个节点。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 默认<b>关</b>。出错的原因基本都不在这份代码上 —— claude 没额度、用户退出登录、
+    /// az DevOps 连不上、token 到期 —— 在同一台机器上再跑一遍只会原样再错一次，
+    /// 而每一轮都是一份完整的账单。关着的时候一次失败就把这一版放回队列，
+    /// 由还没试过的节点重新获取席位。
+    /// </para>
+    /// <para>
+    /// 打开则回到老行为：池子空了就重新蓄满，单节点 mesh 上会在同一台机器上
+    /// 重试到 <see cref="MaxReviewAttempts"/> 为止。
+    /// </para>
+    /// <para>
+    /// ⚠️ 它参与席位分配，而席位分配是纯函数、各节点必须算出同一张表 ——
+    /// 所以<b>整个 mesh 要配成一样的</b>。跟 <see cref="MaxReviewAttempts"/> 同级：
+    /// 两边不一致时，一个节点认为该给自己、另一个认为该换人，会短暂地各算各的
+    /// （下一轮心跳把 <c>Reviewing</c> 广播出去就收敛）。真要按 PR 变的策略得像
+    /// <see cref="AllowSelfReview"/> 那样随条目广播并计入规则指纹。
+    /// </para>
+    /// </remarks>
+    public bool RetryOnSameNode { get; set; }
 
     /// <summary>
     /// 作者 push 修复之后，是否仍由上一版的评审者复审。

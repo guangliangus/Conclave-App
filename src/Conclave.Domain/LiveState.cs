@@ -198,6 +198,39 @@ public sealed record LiveState
     /// <summary>等本节点确认的指派请求。</summary>
     public IReadOnlyList<AssignmentRequest> Pending { get; init; } = [];
 
+    /// <summary>
+    /// 本节点各个额度窗口的原始读数（会话 5h / 周 7d），只带参与入席判定的那些；
+    /// 真值读不到（退到按预算折算）或节点太旧没上报时为空。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Elector.Utilization"/> 是这些窗口经 <c>UsagePressure</c> 折算出来的<b>一个</b>
+    /// 标量，席位规则只认它，它也只需要一个数。但「到底是会话额度快满了还是周额度快满了」
+    /// 压不进一个数里 —— 而看别人那一行时想知道的恰恰是这个。以前这份明细只有本节点自己有，
+    /// 于是同一张表上本机画「5h 31% / 7d 77%」、别人画「压力 26%」，两种不是一回事的数并排摆着。
+    /// </para>
+    /// <para>
+    /// <b>为什么在这里而不是挂到 <see cref="Elector"/> 上随心跳走。</b> 心跳走 UDP，而它
+    /// <b>已经没有余量了</b>：实测 35 个 project 的心跳 1418 字节，离以太网 MTU（1472 =
+    /// 1500 - 20 IP - 8 UDP）只剩 54 字节，两条窗口明细就是 175 字节，直接把它推过线。
+    /// 分片的 UDP 是网络设备最爱静默丢的那种包，表现是整台机器从 mesh 里消失、没有任何报错。
+    /// 走这条 HTTP 通道则一点 MTU 预算都不占，还顺带被
+    /// <see cref="SignedLiveState"/> 签名保护 —— 挂在心跳上就只能像
+    /// <see cref="Elector.ClaudeVersion"/> 那样裸奔（加进签名载荷 = 全 mesh 同时升级）。
+    /// 这跟队列当初为什么不塞进心跳是同一个理由、同一套分工。
+    /// </para>
+    /// <para>
+    /// 代价是它跟着 <see cref="Version"/> 走：额度读数一变，对端下一轮就会拉一次
+    /// <c>GET /state</c>。所以写它的那一处要先比一比再决定改不改 —— 额度每轮都会被重新
+    /// 算一遍，不比就等于每轮都在改。
+    /// </para>
+    /// <para>
+    /// 写 <see cref="Discovered"/> 的 <c>DiscoveryService.Publish</c> 也是同一套做法，
+    /// 理由相同 —— 它原先每轮无条件重写，于是队列一动没动，版本也每轮都涨。
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<UsageWindow> UsageWindows { get; init; } = [];
+
     /// <summary>本节点占着某个 revision（正在评或已认领）。</summary>
     public bool Holds(string revisionId)
         => Reviewing.Any(r => r.RevisionId == revisionId)

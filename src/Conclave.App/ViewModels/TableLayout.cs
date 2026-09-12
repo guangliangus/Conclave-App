@@ -37,10 +37,10 @@ namespace Conclave.App.ViewModels;
 /// </remarks>
 public sealed partial class TableLayout : ObservableObject
 {
-    /// <summary>结论、TOKEN、在跑、心跳在这个宽度以下让位。</summary>
+    /// <summary>结论、TOKEN、在跑、心跳、Acta 的评审在这个宽度以下让位。</summary>
     private const double MidAt = 820;
 
-    /// <summary>仓库、问题数、近 24H、权重在这个宽度以下让位。</summary>
+    /// <summary>仓库、问题数、近 24H、权重、Acta 的作者在这个宽度以下让位。</summary>
     private const double WideAt = 1040;
 
     /// <summary>窗口当前宽度，由 <c>MainWindow.SizeChanged</c> 推进来。</summary>
