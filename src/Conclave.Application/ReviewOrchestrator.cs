@@ -392,10 +392,19 @@ public sealed class ReviewOrchestrator : BackgroundService
                 ? roundsUsed
                 : -1;
 
-            // 没有任何节点有资格评它 —— 最常见的原因是作者就是唯一的节点。
-            // 那不是「在等」，界面上必须区分开。
+            // 没有任何节点<b>原则上</b>能评它 —— 作者就是唯一的节点、没人有这个 project 的
+            // 权限、或者能评的都离线了。那不是「在等」，界面上必须区分开。
+            //
+            // ⚠️ 这里<b>必须</b>用 CouldEverReview 而不是 Eligible：后者还包含「此刻在评别的
+            // PR」和「额度过线」，而那两样几分钟后就会变。用 Eligible 的后果是
+            // MaxConcurrent=1 的机器一旦开始评任何一个 PR，<b>其余每一行</b>都会翻成
+            // 「无人可评」—— 而那句话背后的 tooltip 还会建议「指派给别的节点」，
+            // 实际上等它评完就好。实测就是这么出现的：认领 → 开跑 → 满屏无人可评。
+            //
+            // 这跟 CouldEverReview 自己注释里写的是同一个坑，重试那条路
+            //（上面的 untried）已经踩过一次了。
             var eligible = members.Any(
-                m => SeatAssignment.Eligible(m, entry.Pr, now, entry.AllowSelfReview));
+                m => SeatAssignment.CouldEverReview(m, entry.Pr, now, entry.AllowSelfReview));
 
             views.Add(BuildView(
                 entry,

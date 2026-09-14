@@ -44,6 +44,8 @@
       <!-- 品牌金，只给「本节点」用 -->
       <SolidColorBrush x:Key="GoldBrush" Color="#E2AC44" />
       <SolidColorBrush x:Key="GoldSoftBrush" Color="#2EE2AC44" />
+      <!-- 实心色块用的金。深色下跟文字那档同色，浅色下不同 —— 见浅色那边的注释 -->
+      <SolidColorBrush x:Key="GoldFillBrush" Color="#E2AC44" />
 
       <SolidColorBrush x:Key="OkBrush" Color="#45C08A" />
       <SolidColorBrush x:Key="OkSoftBrush" Color="#2E45C08A" />
@@ -101,6 +103,13 @@
 
       <SolidColorBrush x:Key="GoldBrush" Color="#8A6410" />
       <SolidColorBrush x:Key="GoldSoftBrush" Color="#22C08D2A" />
+      <!--
+        实心色块用的金 = 品牌金原色，不是上面那档。
+        GoldBrush 在浅色下被压暗成棕金是为了让小字在白底上够对比度（AA），
+        而一块 120×4 的色块不需要读，压暗只会让它发浑、像块锈。
+        软底色那两档（GoldSoft / RowMine）用的本来也是这个原色。
+      -->
+      <SolidColorBrush x:Key="GoldFillBrush" Color="#C08D2A" />
 
       <SolidColorBrush x:Key="OkBrush" Color="#0F6E4A" />
       <SolidColorBrush x:Key="OkSoftBrush" Color="#1A119668" />

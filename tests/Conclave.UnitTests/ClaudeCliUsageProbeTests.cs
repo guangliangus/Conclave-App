@@ -95,6 +95,77 @@ public sealed class ClaudeCliUsageProbeTests : IDisposable
         Assert.True(window.ResetsAt > newYearsEve);
     }
 
+    /// <summary>
+    /// 跨年的<b>另一半</b>：1 月初看到「Dec 30」。
+    /// </summary>
+    /// <remarks>
+    /// 老规则只试「今年、明年」，所以这种情况下最近的那个答案（去年）根本不在候选里，
+    /// 得到的是一个 11 个月之后的时刻。
+    /// </remarks>
+    [Fact]
+    public void A_reset_date_from_the_previous_year_rolls_back()
+    {
+        var newYearsDay = new DateTimeOffset(2027, 1, 2, 9, 0, 0, TimeSpan.FromHours(8));
+        var text = "Current week (all models): 12% used · resets Dec 30 at 2am (Asia/Shanghai)";
+
+        var window = Assert.Single(ClaudeCliUsageProbe.Parse(text, newYearsDay));
+
+        Assert.Equal(2026, window.ResetsAt!.Value.Year);
+    }
+
+    /// <summary>
+    /// 刚过去的重置时刻要如实报成「刚过去」，不能滚到明年。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 这是实测踩到的那个：2026-09-14 09:08 读到 <c>resets Sep 14 at 2am</c>（七小时前），
+    /// 老规则「重置总在未来」把它算成了 <b>2027</b>-09-14。
+    /// </para>
+    /// <para>
+    /// 危害不止于日期难看：<see cref="ClaudeUsageMeter"/> 靠 <c>ResetsAt &gt; now</c> 丢掉
+    /// 已经重置的窗口，而一年后的日期必然通过那道过滤 —— 本该作废的陈旧读数就被复活了。
+    /// 这几个窗口最长也就七天，一年后的重置时刻在任何情况下都是错的。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_reset_that_just_passed_stays_in_the_past()
+    {
+        var morning = new DateTimeOffset(2026, 9, 14, 9, 8, 0, TimeSpan.FromHours(8));
+        var text = "Current week (all models): 96% used · resets Sep 14 at 2am (Asia/Shanghai)";
+
+        var window = Assert.Single(ClaudeCliUsageProbe.Parse(text, morning));
+
+        Assert.Equal(
+            new DateTimeOffset(2026, 9, 14, 2, 0, 0, TimeSpan.FromHours(8)),
+            window.ResetsAt);
+        Assert.True(window.ResetsAt < morning, "刚过去的就该是过去时");
+    }
+
+    /// <summary>解析出来的重置时刻永远在「现在」的半年之内。</summary>
+    /// <remarks>
+    /// 5h 窗口最多 5 小时、7d 最多 7 天 —— 差半年以上的答案一定是年份推错了。
+    /// 这条不挑具体日期，只钉这个不变量。
+    /// </remarks>
+    [Theory]
+    [InlineData("Jan 3")]
+    [InlineData("Jun 15")]
+    [InlineData("Sep 14")]
+    [InlineData("Dec 30")]
+    public void A_parsed_reset_is_never_half_a_year_away(string date)
+    {
+        foreach (var month in Enumerable.Range(1, 12))
+        {
+            var now = new DateTimeOffset(2026, month, 14, 9, 0, 0, TimeSpan.FromHours(8));
+            var text = $"Current week (all models): 50% used · resets {date} at 2am (Asia/Shanghai)";
+
+            var window = Assert.Single(ClaudeCliUsageProbe.Parse(text, now));
+            var gap = window.ResetsAt!.Value - now;
+            var days = Math.Abs(gap.TotalDays);
+
+            Assert.True(days <= 183, $"{now:yyyy-MM} 看到「{date}」，推出来差了 {days:F0} 天");
+        }
+    }
+
     [Fact]
     public void A_percentage_survives_an_unparseable_reset_time()
     {

@@ -45,8 +45,23 @@ namespace Conclave.Infrastructure;
 public sealed partial class ClaudeCliUsageProbe(
     ConclaveOptions options,
     ClaudeCli claudeCli,
-    ILogger<ClaudeCliUsageProbe> logger)
+    ILogger<ClaudeCliUsageProbe> logger,
+    TimeProvider? time = null)
 {
+    /// <summary>
+    /// 时钟，跟 <see cref="ClaudeUsageMeter"/> 用同一个。
+    /// </summary>
+    /// <remarks>
+    /// 以前这里直接读 <c>DateTimeOffset.Now</c>，于是<b>解析年份</b>用的是真实日历，
+    /// 而调用方（测试）钉住的只是 meter 那一个时钟 —— 同一份输入换一天跑就是另一个结果。
+    /// 实测：测试把「现在」钉在 2026-09-09，却在 2026-09-14 那天红了，
+    /// 因为文本里没有年份的重置时刻是拿真实的今天去推断的。
+    /// <para>
+    /// 缓存的 TTL 也走它：不然「时间往前拨」在测试里推不动缓存。
+    /// </para>
+    /// </remarks>
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+
     private readonly SemaphoreSlim _gate = new(1, 1);
     private IReadOnlyList<UsageWindow> _cached = [];
     private string _cachedNote = string.Empty;
@@ -57,7 +72,7 @@ public sealed partial class ClaudeCliUsageProbe(
     public async Task<(IReadOnlyList<UsageWindow> Windows, string Note)> ReadAsync(CancellationToken ct)
     {
         var ttl = options.ClaudeUsage.CliProbeInterval;
-        if (DateTimeOffset.UtcNow - _cachedAt < ttl)
+        if (_time.GetUtcNow() - _cachedAt < ttl)
         {
             return (_cached, _cachedNote);
         }
@@ -66,7 +81,7 @@ public sealed partial class ClaudeCliUsageProbe(
         try
         {
             // 双检：等锁期间别的调用可能已经刷新过了，没必要再起一个子进程。
-            if (DateTimeOffset.UtcNow - _cachedAt < ttl)
+            if (_time.GetUtcNow() - _cachedAt < ttl)
             {
                 return (_cached, _cachedNote);
             }
@@ -79,7 +94,7 @@ public sealed partial class ClaudeCliUsageProbe(
             {
                 _cached = windows;
                 _cachedNote = note;
-                _cachedAt = DateTimeOffset.UtcNow;
+                _cachedAt = _time.GetUtcNow();
                 return (windows, note);
             }
 
@@ -146,7 +161,10 @@ public sealed partial class ClaudeCliUsageProbe(
             return ([], "claude 的输出不是预期的 JSON");
         }
 
-        var windows = Parse(text, DateTimeOffset.Now);
+        // 用注入的时钟，而且带上它的时区偏移 —— 年份推断要跟「本地的今天」比，
+        // 拿一个 UTC 时刻去比会在跨日的那几小时里推出差一天的结果。
+        var nowUtc = _time.GetUtcNow();
+        var windows = Parse(text, nowUtc.ToOffset(_time.LocalTimeZone.GetUtcOffset(nowUtc)));
         if (windows.Count == 0)
         {
             // API key 用户没有订阅额度，输出里本来就没有这几行 —— 那是正常情况，不该刷警告。
@@ -277,9 +295,20 @@ public sealed partial class ClaudeCliUsageProbe(
     /// （<c>2am</c> / <c>1:40pm</c>）。
     /// </para>
     /// <para>
-    /// 年份按「重置总是在未来」推断：先套当前年，算出来若落在过去就加一年 ——
-    /// 跨年那几天（12 月底看到 <c>Jan 3</c>）不这样处理会得到一个去年的时刻，
-    /// 于是那个窗口会被当成已过期而丢掉。
+    /// 年份按「<b>离现在最近</b>」推断，在去年 / 今年 / 明年三个候选里挑：这几个窗口最长
+    /// 也就七天（5h 更短），所以正确答案一定是紧挨着现在的那一个。跨年那几天
+    /// （12 月底看到 <c>Jan 3</c>）挑出来的是明年，正是想要的。
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>刻意不再用「重置总是在未来」那条规则。</b> 它遇到一个刚过去的重置时刻
+    /// （读数是缓存的、或者就是隔了几小时才看）会把年份滚到<b>明年</b>，得出一个一年后的
+    /// 日期 —— 而 <c>ClaudeUsageMeter</c> 正是靠 <c>ResetsAt &gt; now</c> 把已经重置的窗口
+    /// 丢掉的，一年后的日期必然通过那道过滤，于是本该作废的陈旧读数被复活，还顶着一个
+    /// 荒唐的重置时刻。「已经重置了」本来就该如实报出来，让上面那道过滤去处理。
+    /// </para>
+    /// <para>
+    /// 实测踩到：2026-09-14 09:08（上海）读到 <c>resets Sep 14 at 2am</c>，
+    /// 七小时前的事，却被算成 2027-09-14。
     /// </para>
     /// <para>
     /// 括号里的时区就是 Claude 渲染时用的时区，一般等于本机时区；能解析就按它算，
@@ -318,10 +347,13 @@ public sealed partial class ClaudeCliUsageProbe(
         var zone = ResolveZone(m.Groups["tz"].Success ? m.Groups["tz"].Value : null);
         var local = now.ToOffset(zone.GetUtcOffset(now));
 
-        for (var yearShift = 0; yearShift <= 1; yearShift++)
+        // 去年 / 今年 / 明年里挑离现在最近的那个。去年那一项是为 1 月初看到 12 月末的
+        // 重置时刻准备的 —— 跟 12 月末看到 1 月初是同一个跨年问题的另一半。
+        DateTimeOffset? best = null;
+        for (var yearShift = -1; yearShift <= 1; yearShift++)
         {
             var year = local.Year + yearShift;
-            if (day < 1 || day > DateTime.DaysInMonth(year, month.Month))
+            if (year < 1 || year > 9999 || day < 1 || day > DateTime.DaysInMonth(year, month.Month))
             {
                 continue;
             }
@@ -329,14 +361,16 @@ public sealed partial class ClaudeCliUsageProbe(
             var naive = new DateTime(year, month.Month, day, hour, minute, 0, DateTimeKind.Unspecified);
             var candidate = new DateTimeOffset(naive, zone.GetUtcOffset(naive));
 
-            // 重置时刻总在未来。留一点余量，免得刚好卡在边界上把当前窗口判成过期。
-            if (candidate > now.AddHours(-1))
+            if (best is null
+                || Abs(candidate - now) < Abs(best.Value - now))
             {
-                return candidate;
+                best = candidate;
             }
         }
 
-        return null;
+        return best;
+
+        static TimeSpan Abs(TimeSpan t) => t < TimeSpan.Zero ? -t : t;
     }
 
     private static TimeZoneInfo ResolveZone(string? id)

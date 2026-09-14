@@ -80,10 +80,17 @@ public sealed class ClaudeUsageMeterTests : IDisposable
             // 指向一个不存在的可执行文件：探针拿不到真值，干净地降级到折算。
             : Path.Combine(_dir, "no-such-claude");
 
-        var probe = new ClaudeCliUsageProbe(
-            options, new ClaudeCli(options, new ExecutableResolver(options), NullLogger<ClaudeCli>.Instance), NullLogger<ClaudeCliUsageProbe>.Instance);
+        // 探针跟 meter 必须共用同一个时钟。只钉住 meter 的话，文本里那个<b>没有年份</b>的
+        // 重置时刻会拿真实日历去推断年份 —— 这一组用例因此会在每年 9 月 14 日那天变红。
+        var clock = new FixedClock(Wednesday);
 
-        return new ClaudeUsageMeter(options, probe, log, new FixedClock(Wednesday));
+        var probe = new ClaudeCliUsageProbe(
+            options,
+            new ClaudeCli(options, new ExecutableResolver(options), NullLogger<ClaudeCli>.Instance),
+            NullLogger<ClaudeCliUsageProbe>.Instance,
+            clock);
+
+        return new ClaudeUsageMeter(options, probe, log, clock);
     }
 
     private string FakeClaude(string usageText)
@@ -207,6 +214,40 @@ public sealed class ClaudeUsageMeterTests : IDisposable
         Assert.Equal(0.25, reading.Utilization);
         Assert.Equal("budget", reading.Source);
         Assert.Contains("没有 Claude 额度真值", reading.Detail);
+    }
+
+    /// <summary>
+    /// 全过期的读数要作废、降级到折算，而不是被当成当前读数。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 真值来自 <c>~/.conclave/usage</c>，写它的是节点主人的交互式会话 —— 那台机器一天
+    /// 没开过 claude，文件就是一天前的。过期窗口本来就该被丢掉（这里靠
+    /// <c>ResetsAt &gt; now</c> 过滤），然后干净地降级到按预算折算。
+    /// </para>
+    /// <para>
+    /// 老的年份推断会让这条路<b>静默失效</b>：文本里没有年份，而「重置总在未来」那条规则
+    /// 把一个刚过去的时刻滚到明年 —— 一年后的日期必然通过 <c>&gt; now</c>，
+    /// 于是陈旧读数被复活成「当前额度」，还顶着一个一年后的重置时刻。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_stale_reading_expires_instead_of_being_resurrected_a_year_out()
+    {
+        // 两个窗口的重置时刻都在 Wednesday（9/9 中午）之前。
+        var stale = "Current session: 46% used · resets Sep 8 at 1:40pm (Asia/Shanghai)\n"
+            + "Current week (all models): 96% used · resets Sep 7 at 2am (Asia/Shanghai)";
+
+        var log = new FakeReviewLog { Tokens = 10_000_000 };
+        var reading = await Meter(Options(tokenBudget: 40_000_000), log, stale)
+            .ReadAsync(SelfId, CancellationToken.None);
+
+        // 降级到折算，而不是报那个 96%。
+        Assert.Equal("budget", reading.Source);
+        Assert.Equal(0.25, reading.Utilization);
+
+        // 尤其不能留下一个一年后的重置时刻。
+        Assert.Null(reading.ResetsAt);
     }
 
     [Fact]

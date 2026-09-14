@@ -285,6 +285,32 @@
     <Setter Property="TextAlignment" Value="Right" />
   </Style>
 
+  <!--
+    排行榜的领先度条。轨道定宽（120，跟 MainWindow.axaml 那一列写的是同一个数），
+    填充宽度由 BoardRow 按「自己的分 ÷ 榜首的分」算成像素 —— XAML 里做不了除法。
+
+    轨道用边框色而不是更淡的 MutedSoft：0 分那一行看到的只有轨道，
+    淡到看不见的话那一格会像是漏画了，而「空轨道」本身就是一句话。
+    填充默认中性灰，只有本机那一行是金的 —— 跟 Theme.axaml 顶部那条规矩一致，
+    金色不表示「第一名」，表示「这是你」。
+  -->
+  <Style Selector="Border.bar">
+    <Setter Property="Height" Value="4" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="Background" Value="{DynamicResource BorderBrush}" />
+  </Style>
+
+  <Style Selector="Border.bar > Border">
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="Background" Value="{DynamicResource TextMutedBrush}" />
+  </Style>
+
+  <Style Selector="Border.bar.gold > Border">
+    <Setter Property="Background" Value="{DynamicResource GoldFillBrush}" />
+  </Style>
+
   <Style Selector="TextBlock.empty">
     <Setter Property="FontSize" Value="12" />
     <Setter Property="HorizontalAlignment" Value="Center" />

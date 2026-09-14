@@ -768,6 +768,76 @@ public class ReviewOrchestratorTests
         Assert.Equal("无人可评", view.Stage);
     }
 
+    /// <summary>
+    /// 本节点正在评一个 PR，不该让其余每一行都翻成「无人可评」。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 实测那一幕：MaxConcurrent=1 的机器认领并开跑了 #2940，同一屏上另外三个 PR
+    /// 全变成「无人可评」，而那句话的 tooltip 还建议「指派给别的节点」——
+    /// 实际上等它评完就好。
+    /// </para>
+    /// <para>
+    /// 根因是这个徽章拿 <see cref="SeatAssignment.Eligible"/> 判，而它把「此刻在评别的 PR」
+    /// 和「额度过线」也算进去了。该用的是
+    /// <see cref="SeatAssignment.CouldEverReview"/> —— 「无人可评」说的是
+    /// <b>原则上</b>没人能评（作者是唯一节点、没人有这个 project 的权限、能评的都离线），
+    /// 那是要人动手的；忙只是等一会儿。
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_busy_node_does_not_make_every_other_row_look_unreviewable()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.MaxConcurrent = 1;
+
+        // 必须走 ReportAsync：编排循环读的是实时状态里的队列，而把 PR 放进队列的是
+        // 发现循环。只往假 az 源里 Publish 的话队列是空的，评审根本不会开跑。
+        _ = await h.ReportAsync(Pr(id: 2940));
+        _ = await h.ReportAsync(Pr(id: 2938), append: true);
+
+        // 卡住不放的评审，把本节点仅有的那个并发位占满。
+        // 不能用 h.TickAsync()：它里面的 WhenIdleAsync 会一直等这个评审跑完。
+        h.Runner.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var tick = h.Orchestrator.TickAsync(CancellationToken.None);
+        await h.Runner.Started.Task;
+        await tick;
+
+        // 再转一轮，让视图在「本节点正忙」的状态下重建一次。
+        await h.Orchestrator.TickAsync(CancellationToken.None);
+
+        // 哪个被挑中评由加权 HRW 决定，不写死 —— 要的是「另外那个」。
+        var waiting = h.State.Pipeline.Single(v => v.ReviewingBy is null);
+        var busy = h.Mesh.Self.RunningJobs;
+
+        h.Runner.Gate.SetResult();
+        await h.Orchestrator.WhenIdleAsync();
+
+        Assert.Equal(1, busy);
+
+        // 等着的那一行是「待评审」—— 它确实在排队，本节点评完就轮到它。
+        Assert.False(waiting.NobodyEligible);
+        Assert.Equal("待评审", waiting.Stage);
+    }
+
+    /// <summary>额度过线同理：那是几小时后自己会好的事，不是「没人可评」。</summary>
+    [Fact]
+    public async Task A_node_out_of_quota_does_not_make_rows_look_unreviewable()
+    {
+        using var h = new Harness();
+        _ = await h.ReportAsync(Pr());
+        h.Mesh.UpdateSelf(self => self with { Utilization = 0.99 });
+        await h.TickAsync();
+
+        var view = h.State.Pipeline.Single();
+
+        Assert.False(h.Mesh.Self.HasHeadroom);
+        Assert.False(view.NobodyEligible);
+        Assert.Equal("待评审", view.Stage);
+    }
+
     [Fact]
     public async Task Posting_is_skipped_while_the_toggle_is_off()
     {

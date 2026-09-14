@@ -120,6 +120,25 @@ public sealed partial class MainViewModel : ViewModelBase
 
     private readonly DispatcherTimer _toastTimer;
 
+    /// <summary>
+    /// 把灰掉的按钮<b>按时</b>放开的那个一次性计时器。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 过期标记的清理写在 <see cref="Refresh"/> 里，可 <see cref="Refresh"/> 得有人来触发。
+    /// 原先指望 <see cref="_liveTimer"/>，但它在这个场景下根本不转：
+    /// <see cref="SyncLiveTimer"/> 的判据是「有行在显示时长或指派提示」，而点「评审」的那一行
+    /// 恰恰两样都没有（还没人开跑、也不是指派）。于是按钮灰下去之后要等一个<b>不相干</b>的
+    /// 事件（别的节点心跳、30 秒的账单轮询）顺手带一次重画才放开 —— 什么都没发生时就一直灰着。
+    /// </para>
+    /// <para>
+    /// 就算它转，间隔也是 30 秒，比 20 秒的标记寿命还长 —— 最坏要 50 秒才放开。
+    /// 所以这里按「最早那条什么时候到期」精确排一次，而不是去调快那个通用计时器：
+    /// 「看不见的东西不必重画」那条仍然成立，这一枪只为放锁而打。
+    /// </para>
+    /// </remarks>
+    private readonly DispatcherTimer _unlockTimer;
+
     /// <summary>刚点过但后台还没反映出来的操作：revisionId → 显示什么 + 灰掉时怎么解释 + 什么时候点的。</summary>
     private readonly Dictionary<string, (string Text, string Tip, DateTimeOffset At)> _justDone =
         new(StringComparer.Ordinal);
@@ -619,6 +638,10 @@ public sealed partial class MainViewModel : ViewModelBase
         _refreshTimer.Tick += (_, _) => _ = LoadLedgerAsync();
 
         // 单次触发：每次 ShowToast 重新计时，所以连续操作只会看到最后一条
+        // 间隔在 ScheduleUnlock 里按「最早那条还有多久到期」现算，这里只接事件。
+        _unlockTimer = new DispatcherTimer();
+        _unlockTimer.Tick += (_, _) => ReleaseExpiredMarks();
+
         _toastTimer = new DispatcherTimer { Interval = ToastLifetime };
         _toastTimer.Tick += (_, _) =>
         {
@@ -692,6 +715,7 @@ public sealed partial class MainViewModel : ViewModelBase
         _refreshTimer.Stop();
         _liveTimer.Stop();
         _toastTimer.Stop();
+        _unlockTimer.Stop();
         ToastText = string.Empty;
         Log?.Suspend();
     }
@@ -802,11 +826,16 @@ public sealed partial class MainViewModel : ViewModelBase
                 .ConfigureAwait(true);
             var self = _mesh.Self.AzIdentity;
 
+            // 榜首的分数是领先度条的分母。榜是按分数降序回来的，所以就是第一行 ——
+            // 再 Max() 一遍只是把「它已经排好序了」这条前提藏起来。
+            var top = board.Count > 0 ? board[0].Points : 0;
+
             RowSync.Apply(
                 Board,
                 [.. board.Select((r, i) => new BoardRow(
                     r, i + 1,
                     string.Equals(r.Person, self, StringComparison.OrdinalIgnoreCase),
+                    top,
                     Layout))],
                 static r => r.PersonFull);
 
@@ -1368,6 +1397,76 @@ public sealed partial class MainViewModel : ViewModelBase
     {
         _justDone[revisionId] = (text, tip, DateTimeOffset.UtcNow);
         Refresh();
+        ScheduleUnlock();
+    }
+
+    /// <summary>
+    /// 按「最早那条标记什么时候到期」排一次重画。
+    /// </summary>
+    /// <remarks>
+    /// 取最早的那条：几行同时灰着时，先到期的那行不该陪着最晚的一起等。
+    /// 一条都没有就不排 —— 没有锁要放的时候不必醒。
+    /// </remarks>
+    private void ScheduleUnlock()
+    {
+        _unlockTimer.Stop();
+
+        if (UnlockDelay(_justDone.Values.Select(v => v.At), DateTimeOffset.UtcNow) is not { } delay)
+        {
+            return;
+        }
+
+        _unlockTimer.Interval = delay;
+        _unlockTimer.Start();
+    }
+
+    /// <summary>
+    /// 下一次该在多久之后去放锁；没有锁要放就返回 <c>null</c>。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 取<b>最早</b>那条：几行同时灰着时，先到期的那行不该陪着最晚的一起等。
+    /// </para>
+    /// <para>
+    /// 已经过期的返回一个最小正值而不是零或负数 —— <see cref="DispatcherTimer.Interval"/>
+    /// 不收非正数，而「已经该放了」的正确反应是立刻响一次，不是不排。
+    /// </para>
+    /// </remarks>
+    /// <param name="markedAt">各条标记是什么时候打上的。</param>
+    /// <param name="now">判定时刻，由调用方传入。</param>
+    internal static TimeSpan? UnlockDelay(IEnumerable<DateTimeOffset> markedAt, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(markedAt);
+
+        DateTimeOffset? earliest = null;
+        foreach (var at in markedAt)
+        {
+            if (earliest is null || at < earliest)
+            {
+                earliest = at;
+            }
+        }
+
+        if (earliest is null)
+        {
+            return null;
+        }
+
+        var delay = earliest.Value + JustDoneLifetime - now;
+        return delay > TimeSpan.Zero ? delay : TimeSpan.FromMilliseconds(1);
+    }
+
+    /// <summary>
+    /// 到点了：重画一次（<see cref="Refresh"/> 顺手清掉过期的），还有没到期的就接着排。
+    /// </summary>
+    /// <remarks>
+    /// 一次性计时器，响完即停 —— 它不是个心跳，只是「几点几分去把那把锁放开」的闹钟。
+    /// </remarks>
+    private void ReleaseExpiredMarks()
+    {
+        _unlockTimer.Stop();
+        Refresh();
+        ScheduleUnlock();
     }
 
     /// <summary>编排循环最多多久转一圈，用在「再点也不会更快」那句解释里。</summary>

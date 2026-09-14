@@ -842,8 +842,18 @@
               <Grid RowDefinitions="Auto,*" IsVisible="{Binding ShowBoard}">
                 <Border Grid.Row="0" Classes="thead">
                   <DockPanel LastChildFill="True">
-                    <TextBlock DockPanel.Dock="Left" Width="44" Classes="th num" Text="#" />
+                    <!-- 名次右对齐，后面留 14 —— 不留的话「1」正好贴着名字，读成「1guang…」 -->
+                    <TextBlock DockPanel.Dock="Left" Width="40" Classes="th num" Margin="0,0,14,0"
+                               Text="#" />
                     <TextBlock DockPanel.Dock="Right" Width="86" Classes="th num" Text="分数" />
+
+                    <!--
+                      领先度条这一列的表头是空的：它画的就是右边那一列分数，再标一次是同义反复。
+                      但这个占位必须在，而且宽度与边距要跟行里那条一模一样，否则表头与行错位。
+                    -->
+                    <Panel DockPanel.Dock="Right" Width="120" Margin="10,0,12,0"
+                           IsVisible="{Binding Layout.Wide}" />
+
                     <TextBlock DockPanel.Dock="Right" Width="72" Classes="th num" Margin="0,0,12,0"
                                Text="评审" />
                     <TextBlock DockPanel.Dock="Right" Width="88" Classes="th num" Margin="0,0,12,0"
@@ -859,12 +869,37 @@
                     <ItemsControl ItemsSource="{Binding Board}">
                       <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:BoardRow">
-                          <Border Classes="row" ToolTip.Tip="{Binding Tip}">
+                          <!--
+                            行高用 .row.pr 这一档（38，跟节点表同一档）。原先只挂了 .row，
+                            而 .row 本身不定高 —— 一行就被压成一条缝，六列数字挤在一起。
+                            榜上只有几个人，是全部六张表里最不缺纵向空间的那张。
+                          -->
+                          <Border Classes="row pr" ToolTip.Tip="{Binding Tip}">
                             <DockPanel LastChildFill="True">
-                              <TextBlock DockPanel.Dock="Left" Width="44" Classes="cell num dim"
-                                         Text="{Binding Rank}" />
+                              <TextBlock DockPanel.Dock="Left" Width="40" Classes="cell num muted"
+                                         Margin="0,0,14,0" Text="{Binding Rank}" />
+
+                              <!--
+                                分数是这张表的主角（其余几列都是它的分解），所以比别的格大一号。
+                                0 分 —— 票全是 Error 的人 —— 退成 muted：它是个真实的名次，
+                                但不该跟榜首用同一种黑。
+                              -->
                               <TextBlock DockPanel.Dock="Right" Width="86" Classes="cell num"
-                                         FontWeight="SemiBold" Text="{Binding Points}" />
+                                         Classes.muted="{Binding !HasPoints}"
+                                         FontSize="13.5" FontWeight="SemiBold"
+                                         Text="{Binding Points}" />
+
+                              <!--
+                                领先度条：跟榜首比的长度。宽度在 BoardRow 里算好（见那里的注释），
+                                金色仍然只给本机那一行。最宽这一档才显示 —— 它说的事分数已经说过，
+                                该第一个让位。
+                              -->
+                              <Border DockPanel.Dock="Right" Width="120" Margin="10,0,12,0"
+                                      Classes="bar" Classes.gold="{Binding IsSelf}"
+                                      IsVisible="{Binding Layout.Wide}">
+                                <Border Width="{Binding BarWidth}" />
+                              </Border>
+
                               <TextBlock DockPanel.Dock="Right" Width="72" Classes="cell num dim"
                                          Margin="0,0,12,0" Text="{Binding Reviews}" />
                               <TextBlock DockPanel.Dock="Right" Width="88" Classes="cell num dim"
@@ -874,7 +909,8 @@
                                          Margin="0,0,12,0" IsVisible="{Binding Layout.Wide}"
                                          Text="{Binding Files}" />
                               <!-- 金色只留给「跟本节点有关」，见 Theme.axaml 顶部那三类颜色 -->
-                              <TextBlock Classes="cell" Classes.gold="{Binding IsSelf}"
+                              <TextBlock Classes="cell" FontSize="12.5"
+                                         Classes.gold="{Binding IsSelf}"
                                          Text="{Binding Person}" />
                             </DockPanel>
                           </Border>
