@@ -66,6 +66,7 @@ public sealed class MeshHttpServer : IDisposable
     private readonly Func<SignedAssignment, bool, CancellationToken, Task<bool>> _onAssignment;
     private readonly Func<Block, CancellationToken, Task> _onBlock;
     private readonly Func<string, long, LogChunk> _readLog;
+    private readonly Func<string, string?> _readFullLog;
     private readonly ILogger<MeshHttpServer> _logger;
 
     public MeshHttpServer(
@@ -76,6 +77,7 @@ public sealed class MeshHttpServer : IDisposable
         Func<SignedAssignment, bool, CancellationToken, Task<bool>> onAssignment,
         Func<Block, CancellationToken, Task> onBlock,
         Func<string, long, LogChunk> readLog,
+        Func<string, string?> readFullLog,
         ILogger<MeshHttpServer> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -86,6 +88,7 @@ public sealed class MeshHttpServer : IDisposable
         _onAssignment = onAssignment;
         _onBlock = onBlock;
         _readLog = readLog;
+        _readFullLog = readFullLog;
         _logger = logger;
 
         Port = options.HttpPort;
@@ -298,6 +301,32 @@ public sealed class MeshHttpServer : IDisposable
             return;
         }
 
+        if (method == "GET" && path == "/log/full")
+        {
+            // 落盘那份的全文（见 ReviewLogArchive）。跟 /log 的分工：那条是实时的、按序号
+            // 给增量、只有内存里那几百行；这条是事后的 —— 评审失败了或者没跑完，
+            // 作者要把日志整份拉回本地看，而那时候本节点早就不在评了，增量接口给不出东西。
+            //
+            // ⚠️ 身份校验同 /log：没有。敏感度也同 /log（源码路径、命令行、模型的分析原文），
+            // 只是一次给得更多。要收紧就三个 GET 接口一起加签名校验。
+            var wanted = context.Request.QueryString["revision"];
+            if (string.IsNullOrWhiteSpace(wanted))
+            {
+                TrySetStatus(context, HttpStatusCode.BadRequest);
+                return;
+            }
+
+            var full = _readFullLog(wanted);
+            if (full is null)
+            {
+                TrySetStatus(context, HttpStatusCode.NotFound);
+                return;
+            }
+
+            await WriteTextAsync(context, full, ct).ConfigureAwait(false);
+            return;
+        }
+
         if (method == "GET" && path == "/elector")
         {
             await WriteJsonAsync(context, _self(), ct).ConfigureAwait(false);
@@ -343,6 +372,15 @@ public sealed class MeshHttpServer : IDisposable
     {
         var bytes = Encoding.UTF8.GetBytes(ActaJson.Serialize(value));
         context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.ContentLength64 = bytes.Length;
+        await context.Response.OutputStream.WriteAsync(bytes, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>纯文本原样发。日志不是 JSON —— 包一层只会让 curl 出来的东西没法直接读。</summary>
+    private static async Task WriteTextAsync(HttpListenerContext context, string text, CancellationToken ct)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        context.Response.ContentType = "text/plain; charset=utf-8";
         context.Response.ContentLength64 = bytes.Length;
         await context.Response.OutputStream.WriteAsync(bytes, ct).ConfigureAwait(false);
     }

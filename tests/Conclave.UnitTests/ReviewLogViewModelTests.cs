@@ -21,9 +21,13 @@ namespace Conclave.UnitTests;
 /// 它不能跟着一起封顶，否则一条还在跑的评审看起来会像卡在上限上。
 /// </para>
 /// </remarks>
-public sealed class ReviewLogViewModelTests
+public sealed class ReviewLogViewModelTests : IDisposable
 {
     private const string Rev = "edison-test!2878!a8d427bb";
+
+    private readonly TempHome _home = new("logvm");
+
+    public void Dispose() => _home.Dispose();
 
     /// <summary>
     /// 建一个已经在跑的日志面板。
@@ -34,13 +38,14 @@ public sealed class ReviewLogViewModelTests
     /// <c>Running: false</c>，面板会据此判定「评完了」并停掉轮询。
     /// 这一行也会被第一次 poll 收走，所以累计计数从 1 起。
     /// </remarks>
-    private static (ReviewLogViewModel Vm, ReviewProgressLog Log, int Seeded) Make()
+    private (ReviewLogViewModel Vm, ReviewProgressLog Log, int Seeded) Make()
     {
         var self = TestElectors.Make("alan");
         var log = new ReviewProgressLog();
         log.Append(Rev, "拉代码进临时工作区");
 
-        var vm = new ReviewLogViewModel(new FakeMesh(self), log, Rev, self.Id, "edison-test!2878");
+        var vm = new ReviewLogViewModel(
+            new FakeMesh(self), log, _home.Archive, Rev, self.Id, "edison-test!2878");
         return (vm, log, 1);
     }
 
@@ -92,6 +97,87 @@ public sealed class ReviewLogViewModelTests
             vm.Lines[^1],
             StringComparison.Ordinal);
         Assert.DoesNotContain(vm.Lines, l => l.EndsWith("行 0", StringComparison.Ordinal));
+    }
+
+    /// <summary>没有节点在评这一版时的面板：实时那条路是空的，只能靠留档。</summary>
+    private ReviewLogViewModel Orphan(FakeMesh mesh, string? reviewerId = null)
+        => new(mesh, new ReviewProgressLog(), _home.Archive, Rev, reviewerId, "edison-test!2878");
+
+    [Fact]
+    public void A_review_that_is_over_falls_back_to_the_copy_on_disk()
+    {
+        // 「评审失败了/没跑完，我想看日志」= 没有节点在评这一版，实时接口给不出东西。
+        // 本机跑过它的话盘上那份还在（留一天），面板要自己退到那条路上，
+        // 而不是甩一句「没有节点在评这一版」。
+        _home.Archive.Append(Rev, "round=1 跑到一半挂了");
+
+        var vm = Orphan(new FakeMesh(TestElectors.Make("alan")));
+
+        Assert.Contains(vm.Lines, l => l.Contains("跑到一半挂了", StringComparison.Ordinal));
+        Assert.Contains(_home.Archive.LivePathOf(Rev), vm.Status, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Pulling_asks_every_other_node_when_nobody_admits_to_reviewing_it()
+    {
+        // 这条正是需求里最难的一半：评审早就结束了，实时状态里那一格是空的，
+        // 于是<b>连「该问谁」都不知道</b> —— 只能挨个问。
+        var self = TestElectors.Make("alan");
+        var a = TestElectors.Make("peer-a");
+        var b = TestElectors.Make("peer-b");
+        var mesh = new FakeMesh(self, [a, b]);
+        mesh.PeerFullLogs[b.Id + "|" + Rev] = "10:00:01 round=1\n10:14:47 claude 退出码 1";
+
+        var vm = Orphan(mesh);
+        await vm.PullCommand.ExecuteAsync(null);
+
+        Assert.Contains(a.Id + "|" + Rev, mesh.FullLogAsks);
+        Assert.Contains(b.Id + "|" + Rev, mesh.FullLogAsks);
+
+        // 拉回来的要存本地（下次不用再问），并且当场显示出来。
+        Assert.Contains("claude 退出码 1", _home.Archive.Read(Rev)!.Text, StringComparison.Ordinal);
+        Assert.Contains(vm.Lines, l => l.Contains("claude 退出码 1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Pulling_asks_only_the_reviewer_when_it_is_known()
+    {
+        var self = TestElectors.Make("alan");
+        var a = TestElectors.Make("peer-a");
+        var b = TestElectors.Make("peer-b");
+        var mesh = new FakeMesh(self, [a, b]);
+        mesh.PeerFullLogs[b.Id + "|" + Rev] = "b 的日志";
+
+        var vm = Orphan(mesh, reviewerId: b.Id);
+        await vm.PullCommand.ExecuteAsync(null);
+
+        Assert.Equal([b.Id + "|" + Rev], mesh.FullLogAsks);
+    }
+
+    [Fact]
+    public async Task When_no_node_has_it_the_panel_says_so_instead_of_looking_broken()
+    {
+        var self = TestElectors.Make("alan");
+        var mesh = new FakeMesh(self, [TestElectors.Make("peer-a")]);
+
+        var vm = Orphan(mesh);
+        await vm.PullCommand.ExecuteAsync(null);
+
+        Assert.Contains("没有这一版的日志", vm.Status, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Pulling_does_not_yank_the_view_out_from_under_a_running_review()
+    {
+        // 还在实时跟着的时候，拉取只存盘 —— 拿一份快照盖掉滚动中的日志，
+        // 看起来就像评审停了。
+        var (vm, log, _) = Make();
+        Fill(log, 0, 5);
+        Poll(vm);
+
+        await vm.PullCommand.ExecuteAsync(null);
+
+        Assert.Contains(vm.Lines, l => l.EndsWith("行 4", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -86,13 +86,82 @@ public class ConclaveOptionsTests
     }
 
     [Fact]
-    public void An_empty_deny_list_excludes_nothing()
+    public void An_empty_deny_list_leaves_only_the_built_in_suffixes()
     {
         var opts = Bind("""{ "Conclave": { } }""");
 
         Assert.Empty(opts.ProjectDenyList);
-        Assert.False(opts.IsProjectDenied("edison-test"));
+        Assert.False(opts.IsProjectDenied("liontrip-cms"));
         Assert.Equal(["a", "b"], opts.FilterProjects(["a", "b"]));
+
+        // 后缀排除是另一条路，而且默认开着 —— 黑名单空不代表什么都不排除。
+        Assert.True(opts.IsProjectDenied("edison-test"));
+    }
+
+    [Theory]
+    [InlineData("edison-test", true)]
+    [InlineData("EDISON-TEST", true)]        // 大小写不敏感 —— project 名大小写不统一
+    [InlineData("payments-qa", true)]
+    [InlineData("Payments-QA", true)]
+    [InlineData("liontrip-cms", false)]
+    [InlineData("payment-center", false)]
+    [InlineData("contest-service", false)]   // 后缀匹配不会像 *test* 那样把 contest 也带走
+    [InlineData("test-harness", false)]      // 只认结尾，不认开头和中间
+    [InlineData("qa", false)]                // 光叫 qa 不算 —— 要的是 "-qa" 这个后缀
+    public void Non_production_projects_are_excluded_by_suffix_out_of_the_box(string project, bool denied)
+    {
+        var opts = Bind("""{ "Conclave": { } }""");
+
+        Assert.Equal(denied, opts.IsProjectDenied(project));
+    }
+
+    [Fact]
+    public void The_suffix_list_replaces_the_default_instead_of_adding_to_it()
+    {
+        // 这条正是它不做成数组的原因：数组在配置绑定里是<b>追加</b>的，
+        // 自己配一份会变成「默认那两个 + 你写的」，而且没有任何提示。
+        var opts = Bind("""
+            { "Conclave": { "ExcludedProjectSuffixes": "-uat;-sandbox" } }
+            """);
+
+        Assert.False(opts.IsProjectDenied("edison-test"));
+        Assert.True(opts.IsProjectDenied("billing-UAT"));
+        Assert.True(opts.IsProjectDenied("demo-sandbox"));
+    }
+
+    [Fact]
+    public void An_empty_suffix_setting_turns_the_exclusion_off_entirely()
+    {
+        var opts = Bind("""{ "Conclave": { "ExcludedProjectSuffixes": "" } }""");
+
+        Assert.False(opts.IsProjectDenied("edison-test"));
+        Assert.False(opts.IsProjectDenied("payments-qa"));
+    }
+
+    [Fact]
+    public void Suffix_exclusion_and_the_deny_list_are_a_union()
+    {
+        var opts = Bind("""
+            { "Conclave": { "ProjectDenyList": [ "*demo*" ] } }
+            """);
+
+        Assert.True(opts.IsProjectDenied("sales-demo"));     // 黑名单
+        Assert.True(opts.IsProjectDenied("edison-test"));    // 后缀
+        Assert.False(opts.IsProjectDenied("liontrip-cms"));
+    }
+
+    [Fact]
+    public void Blank_and_spaced_suffixes_are_ignored_rather_than_matching_everything()
+    {
+        // 空段若当成「后缀是空串」，EndsWith("") 对每个 project 都是 true ——
+        // 一次把所有 project 排空，而日志上只看得出「轮询 0 个 project」。
+        var opts = Bind("""
+            { "Conclave": { "ExcludedProjectSuffixes": " -qa ; ; -test ;" } }
+            """);
+
+        Assert.False(opts.IsProjectDenied("liontrip-cms"));
+        Assert.True(opts.IsProjectDenied("payments-qa"));
+        Assert.True(opts.IsProjectDenied("edison-test"));
     }
 
     [Fact]

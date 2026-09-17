@@ -24,6 +24,20 @@ public sealed class ConclaveOptions
     /// </remarks>
     public string WorkspaceRoot => Path.Combine(HomeDirectory, "work");
 
+    /// <summary>评审日志的落地目录。一次评审一个文件，见 <see cref="ReviewLogArchive"/>。</summary>
+    public string LogDirectory => Path.Combine(HomeDirectory, "logs");
+
+    /// <summary>
+    /// 落盘的评审日志在本地留多久。
+    /// </summary>
+    /// <remarks>
+    /// 一天。日志是「出了事当场翻」的东西，而它里面有源码路径、命令行和模型的分析原文，
+    /// 长期堆在磁盘上既占地方也没必要。真要长期追溯，每一票的会话 ID 是从
+    /// <c>(revisionId, round)</c> 确定性派生的，<c>claude --resume &lt;那个 ID&gt;</c>
+    /// 能翻出完整会话，比留一堆文本可靠。
+    /// </remarks>
+    public TimeSpan LogRetention { get; set; } = TimeSpan.FromDays(1);
+
     /// <summary>
     /// 轮询 Azure DevOps 的间隔。
     /// </summary>
@@ -45,7 +59,7 @@ public sealed class ConclaveOptions
     public TimeSpan SeatingTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>单个 claude 子进程的墙钟上限。</summary>
-    public TimeSpan ReviewTimeout { get; set; } = TimeSpan.FromMinutes(15);
+    public TimeSpan ReviewTimeout { get; set; } = TimeSpan.FromMinutes(45);
 
     /// <summary>拉取临时工作区的墙钟上限。大仓库的首次拉取会比较久。</summary>
     public TimeSpan CheckoutTimeout { get; set; } = TimeSpan.FromMinutes(10);
@@ -128,10 +142,36 @@ public sealed class ConclaveOptions
     public IList<string> ProjectDenyList { get; set; } = [];
 
     /// <summary>
-    /// 这个 project 是否被 <see cref="ProjectDenyList"/> 排除。
+    /// 扫描 project 时按<b>名字后缀</b>直接排除，分号分隔，大小写不敏感；留空表示不按后缀排除。
     /// </summary>
     /// <remarks>
-    /// 用 <see cref="FileSystemName.MatchesSimpleExpression"/> 而不是自己写通配匹配 ——
+    /// <para>
+    /// 默认 <c>-qa;-test</c>。这类 project 里的 PR 是给流程本身练手的，评了只是白烧额度，
+    /// 而它们在一个 collection 里通常有几十个 —— 靠人往 <see cref="ProjectDenyList"/> 里
+    /// 一个个列不现实。要加就写成 <c>-qa;-test;-uat;-sandbox</c>，<b>要关掉就留空串</b>。
+    /// </para>
+    /// <para>
+    /// <b>为什么是分号分隔的字符串而不是数组。</b> 这一条是整个配置里唯一一个「带默认值的
+    /// 排除规则」，而数组属性绝对不能带默认值：.NET 的配置绑定对集合是追加语义，
+    /// 「属性初始化器里给一份 + 配置文件里再列一遍」会得到两份（见 <see cref="ProjectAllowList"/>
+    /// 上那条注释记的事故）。标量属性没有这个问题 —— 后一层配置整个替换前一层，
+    /// 于是「默认排除、要改就整条覆盖」这个语义是干净的。
+    /// </para>
+    /// <para>
+    /// <b>为什么是后缀而不是通配。</b> <c>*test*</c> 会连 <c>contest-service</c> 一起命中
+    /// （<see cref="ProjectDenyList"/> 的测试里专门钉了这个坑），而它是<b>静默</b>的 ——
+    /// 日志上只看得出少轮询了几个 project。后缀匹配没有这种误伤。真要通配还有
+    /// <see cref="ProjectDenyList"/>，两者是并集。
+    /// </para>
+    /// </remarks>
+    public string ExcludedProjectSuffixes { get; set; } = "-qa;-test";
+
+    /// <summary>
+    /// 这个 project 是否被排除：<see cref="ExcludedProjectSuffixes"/> 或
+    /// <see cref="ProjectDenyList"/> 命中任一即排除。
+    /// </summary>
+    /// <remarks>
+    /// 通配用 <see cref="FileSystemName.MatchesSimpleExpression"/> 而不是自己写匹配 ——
     /// <see cref="Domain.ReservedMatters"/> 里的路径匹配用的就是它，同一个仓库里两套
     /// 通配语义只会让人猜错。
     /// </remarks>
@@ -139,10 +179,39 @@ public sealed class ConclaveOptions
     {
         ArgumentNullException.ThrowIfNull(project);
 
+        if (HasExcludedSuffix(project))
+        {
+            return true;
+        }
+
         foreach (var pattern in ProjectDenyList)
         {
             if (!string.IsNullOrWhiteSpace(pattern)
                 && FileSystemName.MatchesSimpleExpression(pattern.Trim(), project, ignoreCase: true))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>名字是不是以 <see cref="ExcludedProjectSuffixes"/> 里任一个后缀结尾。</summary>
+    /// <remarks>
+    /// 每次现拆而不是缓存：一轮扫描几十个 project，拆一个十来字符的串的代价可以忽略，
+    /// 而缓存要跟着 setter 失效 —— 配置热改时忘了失效的那种 bug 不值得为这点开销去冒。
+    /// </remarks>
+    private bool HasExcludedSuffix(string project)
+    {
+        if (string.IsNullOrWhiteSpace(ExcludedProjectSuffixes))
+        {
+            return false;
+        }
+
+        foreach (var suffix in ExcludedProjectSuffixes.Split(
+            ';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (project.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
@@ -163,9 +232,7 @@ public sealed class ConclaveOptions
     public IReadOnlyList<string> FilterProjects(IEnumerable<string> candidates)
     {
         ArgumentNullException.ThrowIfNull(candidates);
-        return ProjectDenyList.Count == 0
-            ? [.. candidates]
-            : [.. candidates.Where(p => !IsProjectDenied(p))];
+        return [.. candidates.Where(p => !IsProjectDenied(p))];
     }
 
     /// <summary>

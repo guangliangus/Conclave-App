@@ -127,6 +127,7 @@ scripts/package-macos.sh                       # 或者打成 dist/Conclave.app
 | `elector.key` | 本机私钥（ECDsa P-256，权限 0600）。**这就是这台机器的身份，别删** |
 | `acta.db` | 本机的账本 |
 | `work/` | 临时工作区。只在评审期间有内容，评完即删，启动时还会清一遍残留 |
+| `logs/` | 评审日志留档，一次评审一个 `<revision>.log`。**只留一天**（`LogRetention`） |
 | `electors.allow` | 节点白名单，**需要你自己建**。不存在 = 单机模式（只信任自己） |
 | `appsettings.json` | 可选。本机的配置覆盖 |
 
@@ -196,13 +197,25 @@ scripts/package-macos.sh                       # 或者打成 dist/Conclave.app
 | **认领** | 别人的 PR，还没人在评也没人认领 | 声明由本机来评，优先于自动分配。两台同时认领，先到的赢 |
 | **撤销** | 你刚认领、还没开跑 | 交回 mesh 自动分配。**开跑之后就撤不了了** |
 | **指派** | 只出现在**你自己的 PR** 上 | 把它交给别的机器评，对方点了同意才生效 |
-| **日志** | 有人正在评它 | 在表格下面开出实时日志：拉代码、调工具、模型的分析都在里面 |
+| **日志** | 有人正在评它、或者它已经评过 | 在表格下面开出日志：拉代码、调工具、模型的分析都在里面。正在评就是实时的；**评完、失败、没跑完的看留档** |
 
 点过之后那一行的状态徽章会立刻改字（「已排队」「已认领」「等 xxx 确认」），同时这一行的动作会灰掉 —— 后台的编排循环最长 15 秒才转一圈，不这样的话你会以为没点上然后再点一次。
 
 ### 场景一：我想让某个 PR 现在就被评
 
 在「PR 队列」里找到它，点 **评审**。最多 15 秒后开跑。想看它评到哪了，点 **日志**。
+
+### 场景一之二：那次评审失败了 / 没跑完，我想看日志
+
+还是点那一行的 **日志**。面板会按这个顺序找：
+
+1. **有节点正在评** → 每两秒要一次增量，实时滚。
+2. **没人在评，但本机跑过它** → 直接读 `~/.conclave/logs/<revision>.log`。评审的每一行都是当场落盘的，所以**节点崩了、进程被砍了、超时了**，跑过的那部分一行不少。
+3. **本机没有** → 点面板右上角的 **拉取日志**，它会向 mesh 里其它节点要那份留档（知道是谁评的就只问它，不知道就挨个问），拿回来存进 `~/.conclave/logs/` 再显示。
+
+留档**只留一天**（`LogRetention`）。再往前的要用会话 ID 翻：每一票的会话是从 `(revisionId, round)` 确定性派生的，在跑那次评审的机器上 `claude --resume <会话 ID>` 能翻出完整会话。
+
+> 同一版 PR 重试了几轮，几轮的日志都在同一个文件里（实时面板只显示当前这一轮）—— 「上一轮为什么失败」正是最常要翻的。
 
 手上只有一个 PR 号、不想等下一轮轮询，也可以直接命令行：
 
@@ -310,7 +323,7 @@ launchctl load ~/Library/LaunchAgents/com.liontravel.conclave.plist
 
 ```
 UDP 多播 239.255.42.7:47707   ← 签名心跳（谁在线、HTTP 端点、有哪些 project 权限、负载、额度）
-HTTP     :47708               ← 区块传播、补链、指派、实时日志
+HTTP     :47708               ← 区块传播、补链、指派、实时日志、日志留档
 ```
 
 **开启后前 40 秒没动静是正常的** —— 它在等 mesh 成员表收敛。连上的标志是日志里的 `发现节点 <指纹> @ http://…`。
@@ -337,6 +350,22 @@ HTTP     :47708               ← 区块传播、补链、指派、实时日志
 
 **生效配置会在启动日志里完整打一遍**，四层叠加出问题时先看这一行。
 
+### 改了配置不用重启
+
+两份 `appsettings.json` 都盯着变化，保存完几百毫秒内生效，面板上会弹一条「配置已热更新」。
+改个 `Quorum`、开关 `AutoReview`、换飞书应用，都不用碰进程。
+
+三样例外——它们在启动时就被别的东西吃掉了，改了会提示「要重启才生效」，而且**不会**假装已经生效：
+
+| 键 | 为什么 |
+|---|---|
+| `HomeDirectory` | 账本数据库已经打开了 |
+| `Mesh.*` | 端口和组播 socket 已经 listen，放行策略在装配时就选定了 |
+| `AzIdentityOverride` | 已经烤进本节点广播出去的身份 |
+
+⚠️ **环境变量不在热更新范围内**（进程启动时读一次），所以用
+`CONCLAVE_Conclave__Lark__AppSecret` 配的密钥改了之后还是要重启节点。
+
 常改的几项：
 
 | 键 | 默认 | 说明 |
@@ -345,14 +374,16 @@ HTTP     :47708               ← 区块传播、补链、指派、实时日志
 | `OrchestratorInterval` | 15 秒 | 编排循环间隔（也就是点了按钮最多等多久） |
 | `MaxConcurrent` | 1 | 本机同时最多跑几个评审。**改大不会真的并发**，编排循环有硬闸 |
 | `Quorum.*` | 全 1 | 一个 PR 由几台机器独立评。配成 2/3 就恢复多节点合并 |
-| `ReviewTimeout` | 15 分钟 | 单个 claude 子进程的墙钟上限 |
+| `ReviewTimeout` | 45 分钟 | 单个 claude 子进程的墙钟上限 |
+| `LogRetention` | 1 天 | 评审日志在 `~/.conclave/logs` 留多久。配 0 关掉落盘保留 |
 | `MaxReviewAttempts` | 3 | 一版 PR 最多烧掉几个席位（超时与失败各算一次） |
 | `StickyReviewer` | true | 作者 fix 后仍由上一版的评审者复审 |
-| `ProjectAllowList` / `ProjectDenyList` | 空 | 只轮询 / 排除某些 project |
+| `ProjectAllowList` / `ProjectDenyList` | 空 | 只轮询 / 排除某些 project（支持 `*` `?` 通配） |
+| `ExcludedProjectSuffixes` | `-qa;-test` | 扫描 project 时按**后缀**排除,分号分隔,大小写不敏感。配空串关掉 |
 | `AzureDevOpsOrgUrl` | 空 | 留空则读 `az devops configure` 的 organization |
 | `ExtraToolPaths` | 空 | `az` / `claude` 装在非常规位置时补路径 |
 | `Mesh.Enabled` | false | 关掉就是单机模式 |
-| `Lark.Enabled` | false | 结论出来后用飞书私聊通知 PR 作者（要配自建应用的 AppId/AppSecret） |
+| `Lark.Enabled` | false | 结论出来后飞书私聊通知 PR 作者，见下面「开飞书通知」 |
 
 ⚠️ 两个**只用于本机联调**的开关，别留在日常机器上：
 
@@ -360,6 +391,42 @@ HTTP     :47708               ← 区块传播、补链、指派、实时日志
 - `Mesh.TrustAllElectors` —— 不读白名单，信任所有验签通过的机器。它关掉的是「谁能让你的机器跑 Bash」那道闸。
 
 完整模板见 `scripts/appsettings.example.json`。
+
+### 开飞书通知
+
+结论投递回 PR 只解决留痕。没人会盯着 34 个 project 的 PR 列表刷新，所以公布之后还会飞书私聊 PR 作者一条。
+
+**要配的就四个键**（复用组里现成的飞书机器人应用，不必新建）：
+
+```jsonc
+"Lark": {
+  "Enabled": true,
+  "AppId": "cli_xxx",
+  "AppSecret": "",                  // 见下面，别写在这里
+  "EmailDomain": "liontravel.com"
+}
+```
+
+不需要 `contact` 通讯录权限、不需要 `UserMap`、不需要拉群、不需要谁的 open_id ——
+应用只要有 `im:message`，按邮箱直投就是通的（三次实测见 `docs/DESIGN.md` §9.5）。
+
+**AppSecret 不要落盘到仓库里。** 两种写法，优先第二种：
+
+```bash
+# ① 每台机器自己的 ~/.conclave/appsettings.json（不在 git 里）
+# ② 环境变量，优先级最高，磁盘上不留明文
+launchctl setenv CONCLAVE_Conclave__Lark__AppSecret "xxx"
+```
+
+**唯一要去开发者后台确认的事：收件人在应用的「可用范围」里。** 范围外的人发不出去，
+飞书返回 99992402 —— 这个码同时表示「查无此人」，所以单看那条日志分不出是哪种。
+范围配成全员最省事。
+
+收件人是按 `az` 账号拼的：`LIONMAIL\tobeyhuang` + `@liontravel.com`。改过名、外包账号、
+离职复用这些拼不准的人，在 `UserMap` 里单独写一条（值可以是邮箱，也可以是 `ou_` 开头的 open_id）。
+
+配好之后没收到通知就看日志：算不出收件人、发送失败都有 warning，**不会静默跳过**；
+而通知失败绝不会影响结论 —— 结论早就在链上了。
 
 ---
 

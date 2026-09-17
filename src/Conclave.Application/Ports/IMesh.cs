@@ -78,4 +78,19 @@ public interface IMesh
     /// 日志只在评审节点的内存里（见 <see cref="ReviewProgressLog"/>），所以只能现问。
     /// </remarks>
     Task<LogChunk?> FetchLogAsync(Elector peer, string revisionId, long from, CancellationToken ct);
+
+    /// <summary>
+    /// 向某个节点要它留着的某一版评审日志<b>全文</b>。
+    /// </summary>
+    /// <param name="peer">问谁。</param>
+    /// <param name="revisionId">哪一版。</param>
+    /// <param name="ct">取消。</param>
+    /// <returns>对端没有这一版的日志（没评过、已过保留期、旧版本没有这个接口）时为 <c>null</c>。</returns>
+    /// <remarks>
+    /// 跟 <see cref="FetchLogAsync"/> 的分工：那条是<b>实时</b>用的，按序号要增量，只给内存里
+    /// 还留着的那几百行；这条是<b>事后</b>用的，要的是盘上那份全文（见 <see cref="ReviewLogArchive"/>）。
+    /// 「评审失败了/没跑完，我想把日志拉回本地看」走的就是这条 —— 那时候对端早就不在评了，
+    /// 增量接口给不出东西来。
+    /// </remarks>
+    Task<string?> FetchFullLogAsync(Elector peer, string revisionId, CancellationToken ct);
 }

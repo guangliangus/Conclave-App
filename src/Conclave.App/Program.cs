@@ -8,6 +8,7 @@ using Conclave.Application.Ports;
 using Conclave.Domain;
 using Conclave.Infrastructure;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -176,13 +177,29 @@ internal sealed class Program
         var builder = Host.CreateApplicationBuilder(args);
         var home = ResolveHome(args);
 
+        // 两份 JSON 都盯着变化：改了配置立刻生效，不用重启节点（见 ConfigReloadService）。
+        static void Watched(JsonConfigurationSource source, string path)
+        {
+            source.Path = path;
+            source.Optional = true;
+            source.ReloadOnChange = true;
+
+            // 文件监视器会在文件写到一半时就触发一次加载，而默认行为是把 FormatException
+            // 抛到监视线程上 —— 一次普通的保存就能把进程带倒。忽略掉：写完还会再触发一次，
+            // 那一次读到的才是完整的。
+            source.OnLoadException = ctx => ctx.Ignore = true;
+
+            // 必须自己调一次：按路径传参的那个重载会替你调，Action 这个重载不会。
+            // 漏掉的话 FileProvider 落到「内容根目录」，两份绝对路径的配置全都读不到 ——
+            // 而且不报错，表现成所有配置静默退回默认值。
+            source.ResolveFileProvider();
+        }
+
         _ = builder.Configuration
             // 显式加程序目录那份：Host.CreateApplicationBuilder 默认从 ContentRoot（工作目录）读，
             // 而 Finder 启动 .app 时工作目录是 /，打包进去的 appsettings.json 就永远读不到。
-            .AddJsonFile(
-                Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
-                optional: true, reloadOnChange: false)
-            .AddJsonFile(Path.Combine(home, "appsettings.json"), optional: true, reloadOnChange: false)
+            .AddJsonFile(s => Watched(s, Path.Combine(AppContext.BaseDirectory, "appsettings.json")))
+            .AddJsonFile(s => Watched(s, Path.Combine(home, "appsettings.json")))
             .AddEnvironmentVariables("CONCLAVE_");
 
         _ = builder.Logging.AddSimpleConsole(o =>

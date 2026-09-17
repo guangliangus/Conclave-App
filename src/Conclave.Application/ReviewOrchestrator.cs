@@ -259,6 +259,8 @@ public sealed class ReviewOrchestrator : BackgroundService
         using var timer = new PeriodicTimer(_options.OrchestratorInterval);
         do
         {
+            LoopInterval.Follow(timer, _options.OrchestratorInterval);
+
             try
             {
                 await TickAsync(stoppingToken).ConfigureAwait(false);
@@ -968,16 +970,24 @@ public sealed class ReviewOrchestrator : BackgroundService
             revision.Id, merged.Decision, merged.Findings.Count,
             merged.ActualQuorum, merged.ExpectedQuorum, merged.Degraded ? "，降级" : string.Empty);
 
-        try
+        // 执行失败不通知作者，理由跟上面不投递到 PR 完全一样：「评审没跑出结论」是这边的
+        // 运维问题，对作者没有任何可行动信息。他收到一条「评审结论：执行失败」只会来问
+        // 「我要改什么」，而答案是「你什么都不用改」。
+        //
+        // 该看到它的是运维：本机的 NoticeKind.Bad 和上面那条日志已经把它摆在面板上了。
+        if (deliverable)
         {
-            await _notifier
-                .NotifyPromulgationAsync(pr, merged with { ThreadId = threadId }, ct)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // 跟投递失败同样处理：结论已经在链上，通知补发的成本远低于让编排循环带着异常退出。
-            _logger.LogError(ex, "通知 {Revision} 的作者失败，结论已公布", revision.Id);
+            try
+            {
+                await _notifier
+                    .NotifyPromulgationAsync(pr, merged with { ThreadId = threadId }, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // 跟投递失败同样处理：结论已经在链上，通知补发的成本远低于让编排循环带着异常退出。
+                _logger.LogError(ex, "通知 {Revision} 的作者失败，结论已公布", revision.Id);
+            }
         }
     }
 

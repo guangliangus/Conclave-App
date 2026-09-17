@@ -114,7 +114,8 @@ public sealed class PrRow
         RowNote? note = null,
         bool claimedLocally = false,
         bool selfOccupied = false,
-        bool blockedByAssignment = false)
+        bool blockedByAssignment = false,
+        bool hasArchivedLog = false)
     {
         ArgumentNullException.ThrowIfNull(view);
         ArgumentNullException.ThrowIfNull(commands);
@@ -316,10 +317,18 @@ public sealed class PrRow
         AssignTip = HasAssignHint ? AssignHint : "把这一版交给别的节点评，对方同意才生效";
 
         // 有人在评就能问它要日志 —— 评审是十几分钟的黑盒，「卡住了」和「正常慢」
-        // 光看一个计时器分不出来。日志在评审节点的内存里，现问现给。
-        // 它是只读的，所以不跟着 busy 一起灰 —— 恰恰是这一行正在办事的时候最该点它。
+        // 光看一个计时器分不出来。它是只读的，所以不跟着 busy 一起灰 ——
+        // 恰恰是这一行正在办事的时候最该点它。
+        //
+        // 评完了同样给。这个按钮原先只在 ReviewingBy 不是 null 时才画，于是
+        // <b>最想看日志的那两种情况反而点不开</b>：评审失败了要看为什么失败，
+        // 跑了一半没收尾（节点崩了、超时）要看卡在哪 —— 那时候 ReviewingBy 早就空了。
+        // 日志本身是有的：跑评审那个节点把每一行都落了盘，留一天
+        // （见 ReviewLogArchive），面板会去拉。
+        //   · 本机盘上有        → 直接能看
+        //   · 链上有票          → 说明真评过，那台机器上多半还留着，值得让人点一下去拉
         ReviewerId = view.ReviewingBy;
-        CanShowLog = view.ReviewingBy is not null;
+        CanShowLog = view.ReviewingBy is not null || view.BallotCount > 0 || hasArchivedLog;
 
         HasActions = ShowReview || ShowClaim || ShowRelease || ShowAssign || CanShowLog;
     }

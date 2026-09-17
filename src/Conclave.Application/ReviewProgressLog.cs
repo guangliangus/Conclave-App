@@ -30,12 +30,16 @@ public sealed record LogChunk(
 /// 而面板是每两秒轮询一次的。序号是单调递增的全局计数，被环形缓冲挤掉的行不会重来。
 /// </para>
 /// <para>
-/// <b>只在内存里，不落盘。</b> 它是给人当场看的东西；要事后追溯的话，
-/// 每一票的会话 ID 是从 <c>(revisionId, round)</c> 确定性派生的，
-/// <c>claude --resume &lt;那个 ID&gt;</c> 能翻出完整会话，比自己存一份日志可靠。
+/// <b>内存里这份是给人当场看的</b>，所以有上限、会被挤掉、进程一退就没。
+/// 而人想翻日志的时刻往往晚于它还在的时刻（评审失败了要看为什么、进程重启过要看上一轮），
+/// 所以每一行同时交给 <see cref="ReviewLogArchive"/> 落一份盘，留一天。
+/// 两者分工明确：内存管「实时、按序号取增量」，盘上那份管「事后、要全文」。
 /// </para>
 /// </remarks>
-public sealed class ReviewProgressLog
+/// <param name="archive">
+/// 落盘的那一份。给 <c>null</c> 就是纯内存 —— 单测默认走这条，免得每个用例都碰磁盘。
+/// </param>
+public sealed class ReviewProgressLog(ReviewLogArchive? archive = null)
 {
     /// <summary>
     /// 单个 revision 最多留几行。超了从头挤掉。
@@ -74,13 +78,29 @@ public sealed class ReviewProgressLog
         lock (_gate)
         {
             Slot(revisionId).Add(stamped);
+
+            // 在锁里写盘：盘上的行序必须跟内存里一致，否则事后翻出来的日志跟当时看到的
+            // 不是一回事。IO 失败由 archive 自己吞掉并记一条 —— 落盘绝不该让评审出错。
+            archive?.Append(revisionId, stamped);
         }
     }
 
-    /// <summary>标记这次评审开始 —— 会清掉同一版上一次的残留。</summary>
+    /// <summary>
+    /// 标记这次评审开始 —— 会清掉同一版上一次的残留。
+    /// </summary>
+    /// <remarks>
+    /// 清的只是<b>内存</b>里那份：实时面板要看的是这一轮。盘上那份继续往后追加，
+    /// 于是同一版重试了几次，几次的日志都在同一个文件里（见 <see cref="ReviewLogArchive.Append"/>）。
+    /// <para>
+    /// 顺手清一次过期日志。挂在这里而不是另起一个定时器：评审是这个目录唯一的增长来源，
+    /// 不评审就不会长，一天扫不到几次。
+    /// </para>
+    /// </remarks>
     public void Begin(string revisionId, string line)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+
+        archive?.Sweep();
 
         lock (_gate)
         {
@@ -124,12 +144,42 @@ public sealed class ReviewProgressLog
         }
     }
 
-    /// <summary>本机是否留着这一版的日志。</summary>
+    /// <summary>本机是否留着这一版的日志（内存或盘上）。</summary>
     public bool Has(string revisionId)
     {
         lock (_gate)
         {
-            return _buffers.ContainsKey(revisionId);
+            if (_buffers.ContainsKey(revisionId))
+            {
+                return true;
+            }
+        }
+
+        return archive?.Has(revisionId) == true;
+    }
+
+    /// <summary>
+    /// 这一版日志的全文，供「拉到本地存一份」用。
+    /// </summary>
+    /// <remarks>
+    /// 优先给盘上那份：它<b>没有 <see cref="MaxLines"/> 这个上限</b>，而内存里那份是环形缓冲，
+    /// 一次长评审的开头早被挤掉了 —— 事后要看的恰恰常是开头（拉代码、起会话那几步）。
+    /// 盘上没有（比如对端关掉了落盘）才退回内存里现有的那些行。
+    /// </remarks>
+    public string? ReadAll(string revisionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+
+        if (archive?.Read(revisionId) is { } archived)
+        {
+            return archived.Text;
+        }
+
+        lock (_gate)
+        {
+            return _buffers.TryGetValue(revisionId, out var buffer)
+                ? buffer.Snapshot()
+                : null;
         }
     }
 
@@ -171,6 +221,9 @@ public sealed class ReviewProgressLog
                 _base++;
             }
         }
+
+        /// <summary>现有的行拼成一整份文本。</summary>
+        internal string Snapshot() => string.Join(Environment.NewLine, _lines);
 
         internal LogChunk Read(string revisionId, long from)
         {

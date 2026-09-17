@@ -69,6 +69,8 @@ public sealed class DiscoveryService(
         using var timer = new PeriodicTimer(options.PollInterval);
         do
         {
+            LoopInterval.Follow(timer, options.PollInterval);
+
             try
             {
                 await PollOnceAsync(stoppingToken).ConfigureAwait(false);

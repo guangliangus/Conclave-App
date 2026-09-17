@@ -986,4 +986,55 @@ public class ReviewOrchestratorTests
             h.Mesh.Broadcast,
             b => Assert.Contains(b.Kind, new[] { BlockKind.Ballot, BlockKind.Promulgation }));
     }
+
+    /// <summary>
+    /// 三轮全挂之后公布的那条 Error 结论，不该私聊作者。
+    /// </summary>
+    /// <remarks>
+    /// 「评审没跑出结论」是这边的运维问题，对作者没有可行动信息 —— 投递回 PR 那条路早就
+    /// 按这个理由拦住了（<c>deliverable</c>），而通知曾经是无条件发的。两个出口对同一件事
+    /// 给出相反的判断，且两边都不报错：作者收到「评审结论：执行失败」，回到 PR 上却什么
+    /// 都没有，只能来问「我要改什么」——而答案是「你什么都不用改」。
+    /// </remarks>
+    [Fact]
+    public async Task A_failed_review_is_not_pushed_to_the_author()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.RetryOnSameNode = true;
+        h.Options.MaxReviewAttempts = 1;
+        h.Runner.Throw = new InvalidOperationException("claude 挂了");
+        var rev = await h.ReportAsync(Pr());
+
+        await h.TickAsync();          // 出 Error 票
+        await h.TickAsync();          // 重试到顶，公布降级结论
+
+        var state = await h.StateOfAsync(rev);
+        Assert.Equal(ReviewDecision.Error, state.Promulgation!.Decision);
+        Assert.Empty(h.Notifier.Sent);
+    }
+
+    /// <summary>
+    /// 出了真结论就得推到作者眼前。
+    /// </summary>
+    /// <remarks>
+    /// 上一条用例单独看是「通知整个没接」也能通过的，所以这一条必须在。
+    /// </remarks>
+    [Fact]
+    public async Task A_real_verdict_is_pushed_to_the_author()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        var rev = await h.ReportAsync(Pr());
+
+        await h.TickAsync();          // 出票
+        await h.TickAsync();          // 公布
+
+        var state = await h.StateOfAsync(rev);
+        Assert.Equal(ReviewDecision.Reject, state.Promulgation!.Decision);
+
+        var sent = Assert.Single(h.Notifier.Sent);
+        Assert.Equal(Author, sent.Pr.Author);
+        Assert.Equal(ReviewDecision.Reject, sent.Result.Decision);
+    }
 }

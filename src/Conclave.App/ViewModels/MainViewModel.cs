@@ -20,6 +20,7 @@ public sealed partial class MainViewModel : ViewModelBase
     private readonly IReviewLog _reviewLog;
     private readonly IActaStore _acta;
     private readonly ReviewProgressLog _progress;
+    private readonly ReviewLogArchive _logArchive;
     private readonly IUpdateInstaller _installer;
     private readonly ILogger<MainViewModel> _logger;
 
@@ -597,6 +598,7 @@ public sealed partial class MainViewModel : ViewModelBase
         IReviewLog reviewLog,
         IActaStore acta,
         ReviewProgressLog progress,
+        ReviewLogArchive logArchive,
         IUpdateInstaller installer,
         ILogger<MainViewModel> logger)
     {
@@ -609,6 +611,7 @@ public sealed partial class MainViewModel : ViewModelBase
         _orchestrator = orchestrator;
         _options = options;
         _reviewLog = reviewLog;
+        _logArchive = logArchive;
         _acta = acta;
         _progress = progress;
         _installer = installer;
@@ -1060,7 +1063,8 @@ public sealed partial class MainViewModel : ViewModelBase
                 note,
                 claimedLocally: myClaims.Contains(view.Revision.Id),
                 selfOccupied: selfOccupied,
-                blockedByAssignment: blockedByAssignment);
+                blockedByAssignment: blockedByAssignment,
+                hasArchivedLog: _progress.Has(view.Revision.Id));
 
             // 自己的 PR 只进「我的 PR」那张表。留在队列里没有意义 ——
             // 本节点评不了它（硬规则），也认领不了，能做的只有指派给别人。
@@ -1537,8 +1541,13 @@ public sealed partial class MainViewModel : ViewModelBase
     /// 打开某一行的评审日志。
     /// </summary>
     /// <remarks>
-    /// 本节点在评就直读本地缓冲，别的节点在评就走 <c>GET /log</c> 现问 ——
-    /// 这个分流在 <see cref="ReviewLogViewModel"/> 里，这里只管把面板换成它。
+    /// 本节点在评就直读本地缓冲，别的节点在评就走 <c>GET /log</c> 现问，都取不到就退到
+    /// 盘上那份留档（<see cref="ReviewLogArchive"/>）—— 这个分流在
+    /// <see cref="ReviewLogViewModel"/> 里，这里只管把面板换成它。
+    /// <para>
+    /// 所以这个命令对<b>已经评完、失败、甚至没跑完</b>的版本同样有意义，
+    /// 不是只有「正在评」的那几行才点得动。
+    /// </para>
     /// </remarks>
     [RelayCommand]
     private void ShowLog(PrRow? row)
@@ -1550,7 +1559,7 @@ public sealed partial class MainViewModel : ViewModelBase
 
         Log?.Dispose();
         Log = new ReviewLogViewModel(
-            _mesh, _progress, row.RevisionId, row.ReviewerId, row.Subject);
+            _mesh, _progress, _logArchive, row.RevisionId, row.ReviewerId, row.Subject);
     }
 
     [RelayCommand]

@@ -91,6 +91,9 @@ public sealed class LocalMesh : IMesh
         Elector peer, string revisionId, long from, CancellationToken ct)
         => Task.FromResult<LogChunk?>(null);
 
+    public Task<string?> FetchFullLogAsync(Elector peer, string revisionId, CancellationToken ct)
+        => Task.FromResult<string?>(null);
+
     public void UpdateSelf(Func<Elector, Elector> mutate)
     {
         ArgumentNullException.ThrowIfNull(mutate);

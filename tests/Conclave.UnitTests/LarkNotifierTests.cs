@@ -76,6 +76,9 @@ public sealed class LarkNotifierTests
 
         internal List<(string Path, string Body, string? Auth)> Calls { get; } = [];
 
+        /// <summary>每次请求打到了哪个主机 —— BaseUrl 是热更新得了的，要看得见它换没换。</summary>
+        internal List<string> Hosts { get; } = [];
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -84,6 +87,7 @@ public sealed class LarkNotifierTests
                 : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
             var path = request.RequestUri!.PathAndQuery;
+            Hosts.Add(request.RequestUri!.Host);
             Calls.Add((path, body, request.Headers.Authorization?.Parameter));
 
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -241,11 +245,12 @@ public sealed class LarkNotifierTests
     /// 按邮箱发失败时，报错要指出真正的出路。
     /// </summary>
     /// <remarks>
-    /// 99992402 跟「这个人不存在」共用一个码，单看没有信息量 —— 实测本租户上按邮箱发
-    /// 一律是这个码，因为应用看不到通讯录里的 email 字段。不指路的话下一个人会再反推一遍。
+    /// 99992402 跟「这个人不存在」共用一个码，单看没有信息量。实测邮箱直投本身不需要任何
+    /// 通讯录权限（DESIGN §9.5），所以真正的成因几乎总是「收件人不在应用的可用范围内」——
+    /// 而那是个后台配置问题，报错里不说，下一个人会往权限上反推一遍。
     /// </remarks>
     [Fact]
-    public async Task A_failed_email_send_points_at_the_two_real_ways_out()
+    public async Task A_failed_email_send_points_at_the_availability_scope()
     {
         using var stub = new Stub(path => path switch
         {
@@ -261,8 +266,8 @@ public sealed class LarkNotifierTests
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => notifier.NotifyPromulgationAsync(Pr(), Result(), CancellationToken.None));
 
-        Assert.Contains("UserMap", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("contact:user.id:readonly", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("可用范围", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("contact:user.id:readonly", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -321,5 +326,62 @@ public sealed class LarkNotifierTests
         var lark = Options(mapAccount: key, mapTo: OpenId).Lark;
 
         Assert.Equal(OpenId, lark.RecipientFor(@"LIONMAIL\tobeyhuang"));
+    }
+
+    /// <summary>
+    /// 配置热更新换了应用之后，旧 token 和旧 open_id 都不能再用。
+    /// </summary>
+    /// <remarks>
+    /// 两样都是应用维度的：旧应用的 token 在新应用上一律无效，而同一个人在新应用上是
+    /// 另一个 <c>ou_</c>。拿旧的去发撞上的是 99992402 —— 跟「查无此人」共用的那个码，
+    /// 看日志分不出是换应用造成的。
+    /// </remarks>
+    [Fact]
+    public async Task Swapping_the_app_at_runtime_drops_the_token_and_the_open_id_cache()
+    {
+        using var stub = new Stub(HappyPath);
+        var opts = Options();
+        using var notifier = new LarkNotifier(opts, NullLogger<LarkNotifier>.Instance, stub);
+
+        await notifier.NotifyPromulgationAsync(Pr(), Result(), CancellationToken.None);
+
+        // 热更新把整个 Lark 块换掉，跟 ConfigHotReload.Apply 做的事一样。
+        opts.Lark = new LarkOptions
+        {
+            Enabled = true,
+            AppId = "cli_new",
+            AppSecret = "secret-new",
+            BaseUrl = opts.Lark.BaseUrl,
+            EmailDomain = opts.Lark.EmailDomain,
+        };
+
+        await notifier.NotifyPromulgationAsync(Pr(), Result(), CancellationToken.None);
+
+        var tokens = stub.Calls
+            .Where(c => c.Path.Contains("tenant_access_token", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(2, tokens.Count);
+        Assert.Contains("cli_new", tokens[1].Body, StringComparison.Ordinal);
+
+        // 第二次必须重新查一遍 open_id：缓存里那个是旧应用的。
+        Assert.Equal(2, stub.Calls.Count(c => c.Path.Contains("batch_get_id", StringComparison.Ordinal)));
+    }
+
+    /// <summary>改了 BaseUrl 也得立刻生效 —— 它曾经焊在 HttpClient.BaseAddress 上。</summary>
+    [Fact]
+    public async Task A_changed_base_url_takes_effect_without_a_restart()
+    {
+        using var stub = new Stub(HappyPath);
+        var opts = Options();
+        using var notifier = new LarkNotifier(opts, NullLogger<LarkNotifier>.Instance, stub);
+
+        await notifier.NotifyPromulgationAsync(Pr(), Result(), CancellationToken.None);
+
+        opts.Lark.BaseUrl = "https://open.feishu.invalid";
+        await notifier.NotifyPromulgationAsync(Pr(), Result(), CancellationToken.None);
+
+        Assert.Contains(stub.Hosts, h => h == "open.larksuite.invalid");
+        Assert.Contains(stub.Hosts, h => h == "open.feishu.invalid");
     }
 }

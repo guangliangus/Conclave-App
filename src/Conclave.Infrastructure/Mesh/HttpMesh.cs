@@ -183,6 +183,38 @@ public sealed class HttpMesh : IMesh, IDisposable
         }
     }
 
+    public async Task<string?> FetchFullLogAsync(Elector peer, string revisionId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+        ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+
+        if (peer.Endpoint.Length == 0)
+        {
+            return null;
+        }
+
+        var url = $"{peer.Endpoint}/log/full?revision={Uri.EscapeDataString(revisionId)}";
+
+        try
+        {
+            using var response = await _http.GetAsync(new Uri(url), ct).ConfigureAwait(false);
+
+            // 404 是正常答案（对端没评过这一版，或者已经过了保留期），不是故障。
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogDebug(ex, "从 {Elector} 取 {Revision} 的评审日志全文失败", peer.Id, revisionId);
+            return null;
+        }
+    }
+
     public async Task<bool> PullStateAsync(Elector peer, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(peer);

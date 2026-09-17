@@ -87,7 +87,8 @@ public sealed class MeshService(
         using var beacon = new MeshBeaconSocket(options.Mesh);
         using var server = new MeshHttpServer(
             options.Mesh, acta, () => mesh.Self, mesh.SignedState,
-            OnAssignmentReceivedAsync, OnBlockReceivedAsync, progress.Read, serverLogger);
+            OnAssignmentReceivedAsync, OnBlockReceivedAsync,
+            progress.Read, progress.ReadAll, serverLogger);
         _server = server;
 
         try

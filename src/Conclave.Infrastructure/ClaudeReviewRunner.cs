@@ -67,6 +67,9 @@ public sealed class ClaudeReviewRunner(
     /// </remarks>
     private const int MaxCommentChars = 64 * 1024;
 
+    /// <summary>摘掉围栏之后留在日志里的那句话。</summary>
+    private const string Elided = "（略去出票用的 json 围栏）";
+
     public async Task<BallotPayload> RunAsync(
         Revision revision, PrMeta pr, int round, CancellationToken ct)
     {
@@ -383,7 +386,7 @@ public sealed class ClaudeReviewRunner(
                 var value = text.GetString();
                 if (!string.IsNullOrWhiteSpace(value))
                 {
-                    parts.Add(Truncate(value.Trim().ReplaceLineEndings(" "), 220));
+                    parts.Add(Prose(value));
                 }
             }
             else if (kind == "tool_use")
@@ -394,6 +397,96 @@ public sealed class ClaudeReviewRunner(
         }
 
         return string.Join(" ", parts);
+    }
+
+    /// <summary>
+    /// 助手说的那段话。整段留着，只把出票用的那个围栏摘掉。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>不截断。</b> 这里原先跟工具参数一样截到 220 字 —— 而助手最后那条消息正是整场
+    /// 评审的结论（跑过哪些检查、几条问题、为什么是问题），于是日志面板上最值得读的那一行
+    /// 永远停在半句话上，想看全文还得 <c>claude --resume</c> 翻会话。截断是为了不让
+    /// 几千字符的工具参数刷屏，那条理由对结论不成立。
+    /// </para>
+    /// <para>
+    /// 摘掉围栏是「不截断」的前提：结论后面紧跟着的是 <see cref="CollectPrompt"/> 要的
+    /// 那个 <c>```json</c> 契约，而它里面的 <c>comment</c> 是整篇评论原文，最大能到 64KB
+    /// （见 <see cref="CapComment"/>）—— 原样灌进面板就是一堵 JSON 墙。它本来也不是给人读的，
+    /// 解析出来的结论和 finding 另有地方显示。
+    /// </para>
+    /// </remarks>
+    private static string Prose(string text)
+    {
+        var fence = BallotFence(text);
+        var prose = (fence < 0 ? text : text[..fence]).ReplaceLineEndings(" ").Trim();
+
+        return fence < 0
+            ? prose
+            : (prose.Length == 0 ? Elided : prose + " " + Elided);
+    }
+
+    /// <summary>
+    /// 出票契约那个围栏的起点（行首）；没有则 -1。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>按行判定围栏</b>，理由同 <see cref="JsonCandidates"/>：契约里的 <c>comment</c>
+    /// 是评论原文，一条像样的评审评论几乎必然带 <c>```go</c> 这样的示例代码块，而那些反引号
+    /// 在 JSON 字符串<b>里面</b>、一定在行中间；markdown 的围栏则一定独占一行。
+    /// </para>
+    /// <para>
+    /// 只认最后一个开出来的、info string 为空或 <c>json</c> 的围栏 —— 评审正文里带语言的
+    /// 示例块要原样留着。收不收尾都算：模型漏写收尾围栏、或者输出被截在半截时，
+    /// 后面那一大坨更要摘掉。
+    /// </para>
+    /// <para>
+    /// 跟 <see cref="JsonCandidates"/> 是两处独立的扫法：那边要的是块的<b>内容</b>
+    /// （拿去解析出票），这边要的是块的<b>起点</b>（拿去切掉）。真要改围栏的约定，两处都得改。
+    /// </para>
+    /// </remarks>
+    private static int BallotFence(string text)
+    {
+        const string Fence = "```";
+
+        var open = false;   // 当前有没有围栏开着
+        var last = -1;      // 最后一个像契约的围栏，起点行首
+        var pos = 0;
+
+        while (true)
+        {
+            var nl = text.IndexOf('\n', pos);
+            var lineEnd = nl < 0 ? text.Length : nl;
+            var line = text.AsSpan(pos, lineEnd - pos).Trim();
+
+            if (line.StartsWith(Fence, StringComparison.Ordinal))
+            {
+                var info = line[Fence.Length..].Trim();
+
+                if (!open)
+                {
+                    open = true;
+
+                    if (info.Length == 0 || info.Equals("json", StringComparison.OrdinalIgnoreCase))
+                    {
+                        last = pos;
+                    }
+                }
+                else if (info.Length == 0)
+                {
+                    open = false;
+                }
+            }
+
+            if (nl < 0)
+            {
+                break;
+            }
+
+            pos = nl + 1;
+        }
+
+        return last;
     }
 
     /// <summary>工具调用里最能说明「在看什么」的那一个参数。</summary>

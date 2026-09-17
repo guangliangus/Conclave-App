@@ -26,7 +26,12 @@ public static class ConclaveServiceCollectionExtensions
 
         var opts = new ConclaveOptions();
         configuration.GetSection("Conclave").Bind(opts);
-        return services.AddConclaveNode(opts);
+        _ = services.AddConclaveNode(opts);
+
+        // 只在走配置的这条路上盯文件：另一个重载直接收一个实例（测试与本机联调用），
+        // 那种情况下没有配置源，也就没有东西可以重载。
+        _ = services.AddHostedService<ConfigReloadService>();
+        return services;
     }
 
     /// <summary>
@@ -64,13 +69,16 @@ public static class ConclaveServiceCollectionExtensions
 
             // 把生效配置打出来：配置分四层叠加，出问题时最先要确认的就是「到底生效了哪份」。
             logger.LogInformation(
-                "生效配置：轮询 {Poll} · 编排 {Orch} · 并发 {Max} · 自动评审 {Auto} · 投递 {Post} · mesh {Mesh} · 飞书通知 {Lark} · project 白名单 {Projects} · project 黑名单 {Denied} · 工作区 {Work} · 额度预算 {Budget} · quorum {Quorum} · 重试上限 {Attempts} · 复审归属 {Sticky}",
+                "生效配置：轮询 {Poll} · 编排 {Orch} · 并发 {Max} · 自动评审 {Auto} · 投递 {Post} · mesh {Mesh} · 飞书通知 {Lark} · project 白名单 {Projects} · project 黑名单 {Denied} · 排除后缀 {Suffixes} · 工作区 {Work} · 额度预算 {Budget} · quorum {Quorum} · 重试上限 {Attempts} · 复审归属 {Sticky}",
                 opts.PollInterval, opts.OrchestratorInterval, opts.MaxConcurrent,
                 opts.AutoReview, opts.PostToAzureDevOps,
                 opts.Mesh.Enabled ? $"开（:{opts.Mesh.HttpPort}）" : "关",
                 DescribeLark(opts.Lark),
                 opts.ProjectAllowList.Count > 0 ? string.Join(',', opts.ProjectAllowList) : "全部",
                 opts.ProjectDenyList.Count > 0 ? string.Join(',', opts.ProjectDenyList) : "无",
+                // 这一条是默认<b>开着</b>的，而它静默地少扫几个 project —— 不打出来的话
+                // 「我的 PR 怎么一直没人评」会一路查到权限上去。
+                opts.ExcludedProjectSuffixes.Length > 0 ? opts.ExcludedProjectSuffixes : "无",
                 opts.WorkspaceRoot,
                 DescribeBudget(opts.ClaudeUsage),
                 DescribeQuorum(opts.Quorum),
@@ -105,7 +113,15 @@ public static class ConclaveServiceCollectionExtensions
         _ = services.AddSingleton<IUsageMeter, ClaudeUsageMeter>();
         _ = services.AddSingleton<IPrSource, AzCliPrSource>();
         // 单例：评审日志的写方（runner）和读方（mesh 接口、界面）必须是同一份缓冲。
-        _ = services.AddSingleton<ReviewProgressLog>();
+        // 落盘那份跟着一起注进去 —— 启动时先扫一遍过期的，免得一台一直开着没评审的机器
+        // 把上一天的日志一直留着（评审时 Begin 也会扫，但那要等到下一次评审）。
+        _ = services.AddSingleton<ReviewLogArchive>();
+        _ = services.AddSingleton(sp =>
+        {
+            var archive = sp.GetRequiredService<ReviewLogArchive>();
+            archive.Sweep();
+            return new ReviewProgressLog(archive);
+        });
         _ = services.AddSingleton<IReviewRunner, ClaudeReviewRunner>();
         _ = services.AddSingleton<SqliteActa>();
         _ = services.AddSingleton<IActaStore>(sp => sp.GetRequiredService<SqliteActa>());

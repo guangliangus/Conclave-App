@@ -80,7 +80,7 @@
             <Button Theme="{StaticResource GhostButton}" Content="日志" Padding="8,3"
                     IsVisible="{Binding CanShowLog}"
                     Command="{Binding ShowLogCommand}" CommandParameter="{Binding}"
-                    ToolTip.Tip="在表格下面开出实时日志（拉代码、调工具、模型的分析都在里面）" />
+                    ToolTip.Tip="在表格下面开出日志（拉代码、调工具、模型的分析都在里面）&#10;正在评就是实时的；评完、失败、没跑完的，去拉那份留档（留一天）" />
 
             <!--
               IsVisible = 这一行有没有这个动作，IsEnabled = 此刻点不点得动，tooltip 说
@@ -140,7 +140,7 @@
                     <Button Theme="{StaticResource MenuButton}" Content="查看评审日志"
                             IsVisible="{Binding CanShowLog}" Click="OnRowActionClick"
                             Command="{Binding ShowLogCommand}" CommandParameter="{Binding}"
-                            ToolTip.Tip="在表格下面开出实时日志" />
+                            ToolTip.Tip="在表格下面开出日志。评完、失败、没跑完的也能看 —— 拉那份留档" />
 
                     <!-- 跟宽布局同一套三态：不适用的不画，点不了的灰着 -->
                     <Button Theme="{StaticResource MenuButton}" Content="立即评审"
@@ -1232,6 +1232,15 @@
                   要么在 VM 上多挂一个只为显示存在的字符串属性，两者都不如这样直白。
                 -->
                 <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6">
+                  <!--
+                    实时那条路（每两秒要增量）只在「有节点正在评这一版」时才有东西。
+                    这个按钮走的是另一条：盘上那份留档，本机没有就去 mesh 里挨个问，
+                    拿回来存本地再显示 —— 评审失败的、没跑完的、评完很久的，都靠它。
+                    存到哪写在上面那行状态里。
+                  -->
+                  <Button Theme="{StaticResource GhostButton}" Content="拉取日志"
+                          Command="{Binding Log.PullCommand}"
+                          ToolTip.Tip="把这一版的完整日志拉到本地存一份（~/.conclave/logs，留一天）&#10;评审失败或没跑完也能拉 —— 那时候实时日志已经没有了" />
                   <Button Theme="{StaticResource GhostButton}" Content="收起表格"
                           IsVisible="{Binding !TablesCollapsed}"
                           Command="{Binding ToggleTablesCommand}"
@@ -1274,7 +1283,7 @@
               </ScrollViewer>
 
               <TextBlock Classes="empty" IsVisible="{Binding Log.IsEmpty}"
-                         Text="还没有日志&#10;评审开头要先拉一份代码进临时工作区，那一步本身没有输出" />
+                         Text="还没有日志&#10;评审开头要先拉一份代码进临时工作区，那一步本身没有输出&#10;这一版早就评完了的话，点右上角「拉取日志」把留档拉到本地" />
             </Panel>
           </Grid>
         </Border>

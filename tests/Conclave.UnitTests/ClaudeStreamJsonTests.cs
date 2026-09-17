@@ -104,6 +104,36 @@ public sealed class ClaudeStreamJsonTests
     }
 
     [Fact]
+    public void The_closing_summary_is_logged_in_full()
+    {
+        // 助手最后那条消息就是整场评审的结论（跑过哪些检查、几条问题、为什么）。
+        // 它原先跟工具参数一样截到 220 字，于是面板上最值得读的那一行永远停在半句话上。
+        var summary = new string('话', 600);
+        var line = """{"type":"assistant","message":{"content":[{"type":"text","text":"SUMMARY\n\n```json\n{\"decision\":\"approve\",\"comment\":\"COMMENT\",\"findings\":[]}\n```"}]}}"""
+            .Replace("SUMMARY", summary, StringComparison.Ordinal)
+            .Replace("COMMENT", new string('x', 5000), StringComparison.Ordinal);
+
+        var text = ClaudeReviewRunner.Summarize(line);
+
+        Assert.StartsWith(summary, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("已截断", text, StringComparison.Ordinal);
+
+        // 「不截断」的前提是把出票那个围栏摘掉：里面的 comment 是整篇评论原文，
+        // 最大 64KB，原样灌进面板就是一堵 JSON 墙。
+        Assert.DoesNotContain("decision", text, StringComparison.Ordinal);
+        Assert.EndsWith("（略去出票用的 json 围栏）", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_code_example_in_the_reply_keeps_its_fence()
+    {
+        // 只摘出票那个围栏（info string 为空或 json）；正文里带语言的示例块要原样留着。
+        const string line = """{"type":"assistant","message":{"content":[{"type":"text","text":"看这里：\n```go\nfor i := range xs {}\n```\n就是它"}]}}""";
+
+        Assert.Equal("看这里： ```go for i := range xs {} ``` 就是它", ClaudeReviewRunner.Summarize(line));
+    }
+
+    [Fact]
     public void A_long_tool_argument_is_truncated()
     {
         var pattern = new string('x', 400);

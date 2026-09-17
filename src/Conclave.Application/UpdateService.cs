@@ -60,6 +60,8 @@ public sealed class UpdateService(
         using var timer = new PeriodicTimer(options.Update.PeerScanInterval);
         do
         {
+            LoopInterval.Follow(timer, options.Update.PeerScanInterval);
+
             var hint = PeerRunningNewerVersion();
             var due = since is null || since.Elapsed >= options.Update.CheckInterval;
 

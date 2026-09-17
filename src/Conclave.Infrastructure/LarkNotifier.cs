@@ -19,15 +19,18 @@ namespace Conclave.Infrastructure;
 /// <c>open_id</c>、邮箱换来的 <c>open_id</c>、以及按邮箱直投。
 /// </para>
 /// <para>
-/// <b>实测只有 open_id 真的能发。</b> <c>receive_id_type=email</c> 在本租户上一律
-/// 99992402 —— 因为应用看不到通讯录里的邮箱字段（<c>contact/v3/users/{id}</c> 回来的记录里
-/// 连 <c>email</c> 键都没有，那归 <c>contact:user.email:readonly</c> 管），于是收件人解析不出来。
-/// 同一个 body 换成 open_id 立刻成功。所以按邮箱直投只当最后一跳的尽力而为，
-/// 别当成「不需要权限的那条路」——它需要，只是需要的是另一个 scope。
+/// <b>实测邮箱直投就够。</b> <c>receive_id_type=email</c> 的收件人解析是租户侧做的，
+/// 不经过应用自己的通讯录可见性 —— 2026-09-17 在一个<b>明确没有</b>
+/// <c>contact:user.id:readonly</c> 的应用上连发成功两次（三次调用的全过程见 DESIGN §9.5）。
+/// 所以排在最后的那一跳才是常态路径，不是「尽力而为」。
 /// </para>
 /// <para>
-/// 结论：要么在 <c>UserMap</c> 里写死 <c>ou_</c>（零权限，今天就能用），
-/// 要么开 <c>contact:user.id:readonly</c> 让邮箱能换成 open_id。
+/// 真正会让它静默失效的是<b>可用范围</b>：收件人不在应用的可用范围内时解析不出来，
+/// 返回 99992402 —— 跟「这个人不存在」共用一个码，单看没有信息量。换一个应用重来时
+/// 要确认的是这个，不是权限列表。
+/// </para>
+/// <para>
+/// 开 <c>contact:user.id:readonly</c> 只省掉每进程一次的 open_id 探测，不是必需品。
 /// </para>
 /// <para>
 /// 缺通讯录权限只探一次：飞书对未申请的 scope 返回 99991672，而这个状态在进程生命周期内
@@ -56,10 +59,15 @@ public sealed class LarkNotifier : INotifier, IDisposable
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
     };
 
-    private readonly LarkOptions _options;
-
-    /// <summary>Azure DevOps 组织地址。只用来兜底拼 PR 链接（老区块里没有 RemoteUrl）。</summary>
-    private readonly string _orgUrl;
+    /// <summary>
+    /// 整份配置，<b>不是</b> <c>options.Lark</c>。
+    /// </summary>
+    /// <remarks>
+    /// 配置是热更新的（见 <c>ConfigHotReload</c>），在构造函数里把 <c>Lark</c> 那一块拆出来
+    /// 存下的话，人改完配置这个通知器还在用旧应用发 —— 而那种失效不报错、不打日志，
+    /// 表面上一切正常。所以存整份，每次现读 <see cref="Options"/>。
+    /// </remarks>
+    private readonly ConclaveOptions _conclave;
 
     private readonly ILogger<LarkNotifier> _logger;
     private readonly HttpClient _http;
@@ -72,6 +80,15 @@ public sealed class LarkNotifier : INotifier, IDisposable
     private DateTimeOffset _tokenExpiresAt = DateTimeOffset.MinValue;
     private bool _canResolveOpenId = true;
 
+    /// <summary>换出当前这枚 token 的那对凭据。配置换了应用，旧 token 就不能再用。</summary>
+    private (string AppId, string AppSecret) _tokenFor = (string.Empty, string.Empty);
+
+    /// <summary><see cref="_openIds"/> 与 <see cref="_canResolveOpenId"/> 属于哪个应用。</summary>
+    private string _cachesFor = string.Empty;
+
+    /// <summary>当前生效的飞书配置。每次现读，不缓存 —— 见 <see cref="_conclave"/>。</summary>
+    private LarkOptions Options => _conclave.Lark;
+
     /// <remarks>
     /// <c>handler</c> 只给测试用：传 null 走默认 handler，传进来的<b>不</b>由本类释放 ——
     /// 测试要自己持有它才能在断言里读到发出去的请求。
@@ -83,12 +100,14 @@ public sealed class LarkNotifier : INotifier, IDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        _options = options.Lark;
-        _orgUrl = options.AzureDevOpsOrgUrl;
+        _conclave = options;
         _logger = logger;
         _http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
-        _http.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/') + "/", UriKind.Absolute);
-        _http.Timeout = _options.RequestTimeout;
+
+        // BaseAddress 和 Timeout 都只在第一次请求前可改，而这两项都是热更新得了的配置。
+        // 所以地址每次请求现拼，超时交给 per-request 的 CTS —— HttpClient 自己的超时关掉，
+        // 否则 RequestTimeout 配得比它的默认 100 秒大时，先到期的是它而不是配置。
+        _http.Timeout = Timeout.InfiniteTimeSpan;
     }
 
     public async Task NotifyPromulgationAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct)
@@ -96,12 +115,12 @@ public sealed class LarkNotifier : INotifier, IDisposable
         ArgumentNullException.ThrowIfNull(pr);
         ArgumentNullException.ThrowIfNull(result);
 
-        if (!_options.IsConfigured)
+        if (!Options.IsConfigured)
         {
             return;
         }
 
-        var recipient = _options.RecipientFor(pr.Author);
+        var recipient = Options.RecipientFor(pr.Author);
         if (recipient is null)
         {
             // 不要静默跳过：配错域名或漏配 UserMap 的表现就是「结论出了但没人收到」，
@@ -117,7 +136,8 @@ public sealed class LarkNotifier : INotifier, IDisposable
         {
             ReceiveId = id,
             MsgType = "text",
-            Content = JsonSerializer.Serialize(new { text = RenderText(pr, result, _orgUrl) }, Json),
+            Content = JsonSerializer.Serialize(
+                new { text = RenderText(pr, result, _conclave.AzureDevOpsOrgUrl) }, Json),
         };
 
         var (code, msg, doc) = await PostAsync(
@@ -139,19 +159,18 @@ public sealed class LarkNotifier : INotifier, IDisposable
     /// 发送失败的说明。
     /// </summary>
     /// <remarks>
-    /// 按邮箱发失败时要额外指路。实测：应用看不到通讯录里的邮箱字段
-    /// （<c>contact/v3/users/{id}</c> 回来的记录里连 <c>email</c> 键都没有）时，
-    /// <c>receive_id_type=email</c> 一律 99992402 —— 跟「这个人不存在」同一个码，
-    /// 而同一个 body 换成 open_id 立刻成功。让人从这个码自己反推一遍不合理。
+    /// 按邮箱发失败时要额外指路。99992402 跟「这个人不存在」共用一个码，单看没有信息量，
+    /// 而实测最常见的成因是<b>收件人不在应用的可用范围内</b> —— 邮箱直投本身不需要任何
+    /// 通讯录权限（见 DESIGN §9.5）。让人从这个码自己反推一遍不合理。
     /// </remarks>
     private static string BuildSendError(string recipient, string idType, int code, string msg)
     {
         var head = $"飞书发送失败（收件人 {recipient}，{idType}）：{code} {msg}";
 
         return idType == "email" && code == FieldValidationFailed
-            ? head + "。按邮箱发要求应用能看到通讯录里的邮箱；"
-                + "要么在 UserMap 里直接写 ou_ 开头的 open_id（不需要任何通讯录权限），"
-                + "要么开通 contact:user.id:readonly 走邮箱换 open_id"
+            ? head + "。这个码同时表示「查无此人」和「解析不出收件人」；"
+                + "先去开发者后台确认这个人在应用的可用范围内（实测最常见的成因），"
+                + "再看邮箱本身对不对（EmailDomain 拼不准的人用 UserMap 单独兜）"
             : head;
     }
 
@@ -161,6 +180,8 @@ public sealed class LarkNotifier : INotifier, IDisposable
     /// <returns><c>receive_id_type</c> 与对应的 ID。</returns>
     private async Task<(string IdType, string Id)> ResolveRecipientAsync(string recipient, CancellationToken ct)
     {
+        DropCachesIfAppChanged();
+
         if (recipient.StartsWith("ou_", StringComparison.Ordinal))
         {
             return ("open_id", recipient);
@@ -182,6 +203,42 @@ public sealed class LarkNotifier : INotifier, IDisposable
         }
 
         return ("email", recipient);
+    }
+
+    /// <summary>
+    /// 配置热更新换了应用的话，把跟应用绑死的两样缓存丢掉。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// open_id 是<b>应用维度</b>的：同一个人在新应用上是另一个 <c>ou_</c>。拿旧的去发会撞上
+    /// 99992402，而那个码跟「查无此人」共用，看日志根本分不出是换应用造成的。
+    /// </para>
+    /// <para>
+    /// 位置很讲究：必须在<b>解析收件人之前</b>。放在 <see cref="TokenAsync"/> 里（换 token 时
+    /// 顺手清）看着更自然，但那时收件人早就从旧缓存里取出来了 —— 换应用后的第一条通知
+    /// 仍然会用旧的 <c>ou_</c> 发出去，而且只错这一条，最难查的那种。
+    /// </para>
+    /// <para>
+    /// <see cref="_canResolveOpenId"/> 也要一起复位：它记的是「这个应用没申请通讯录权限」，
+    /// 换个应用这个结论就不成立了。
+    /// </para>
+    /// </remarks>
+    private void DropCachesIfAppChanged()
+    {
+        var appId = Options.AppId;
+        if (string.Equals(_cachesFor, appId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (_cachesFor.Length > 0)
+        {
+            _openIds.Clear();
+            _canResolveOpenId = true;
+            _logger.LogInformation("飞书应用换成 {AppId}，已清掉 open_id 缓存与 scope 判定", appId);
+        }
+
+        _cachesFor = appId;
     }
 
     /// <summary>邮箱换 open_id。换不到（含没权限）返回 null，由调用方退回按邮箱直投。</summary>
@@ -239,7 +296,9 @@ public sealed class LarkNotifier : INotifier, IDisposable
     /// </remarks>
     private async Task<string> TokenAsync(CancellationToken ct)
     {
-        if (_tokenExpiresAt > DateTimeOffset.UtcNow)
+        var credentials = (Options.AppId, Options.AppSecret);
+
+        if (_tokenExpiresAt > DateTimeOffset.UtcNow && _tokenFor == credentials)
         {
             return _token;
         }
@@ -247,14 +306,14 @@ public sealed class LarkNotifier : INotifier, IDisposable
         await _tokenGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_tokenExpiresAt > DateTimeOffset.UtcNow)
+            if (_tokenExpiresAt > DateTimeOffset.UtcNow && _tokenFor == credentials)
             {
                 return _token;
             }
 
             var (code, msg, doc) = await PostAsync(
                 "open-apis/auth/v3/tenant_access_token/internal",
-                new { AppId = _options.AppId, AppSecret = _options.AppSecret },
+                new { AppId = credentials.AppId, AppSecret = credentials.AppSecret },
                 authorize: false, ct).ConfigureAwait(false);
 
             using (doc)
@@ -272,6 +331,7 @@ public sealed class LarkNotifier : INotifier, IDisposable
                     && e.ValueKind == JsonValueKind.Number ? e.GetInt32() : 7200;
 
                 _tokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, expire - 300));
+                _tokenFor = credentials;
             }
 
             return _token;
@@ -293,7 +353,10 @@ public sealed class LarkNotifier : INotifier, IDisposable
     private async Task<(int Code, string Msg, JsonDocument Doc)> PostAsync(
         string path, object body, bool authorize, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        // 地址每次现拼：BaseUrl 是热更新得了的，而 HttpClient.BaseAddress 焊死在第一次请求前。
+        var url = new Uri(new Uri(Options.BaseUrl.TrimEnd('/') + "/", UriKind.Absolute), path);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = new StringContent(
                 JsonSerializer.Serialize(body, body.GetType(), Json), Encoding.UTF8, "application/json"),
@@ -305,8 +368,26 @@ public sealed class LarkNotifier : INotifier, IDisposable
                 new AuthenticationHeaderValue("Bearer", await TokenAsync(ct).ConfigureAwait(false));
         }
 
-        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-        var raw = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(Options.RequestTimeout);
+
+        HttpResponseMessage response;
+        string raw;
+        try
+        {
+            response = await _http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+            raw = await response.Content.ReadAsStringAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // 自家的超时不能以取消的形态往上抛。调用方一路都是
+            // `catch (Exception ex) when (ex is not OperationCanceledException)`（那是留给停机的），
+            // 抛成取消会直接穿过 ReviewOrchestrator.PromulgateAsync 的护栏 ——
+            // 一次飞书超时就能掀掉「通知失败绝不影响公布」这条。
+            throw new TimeoutException($"飞书 {path} 超时（{Options.RequestTimeout}）");
+        }
+
+        using var _ = response;
 
         JsonDocument doc;
         try

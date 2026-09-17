@@ -266,6 +266,21 @@ internal sealed class FakeMesh : IMesh
         Elector peer, string revisionId, long from, CancellationToken ct)
         => Task.FromResult(PeerLogs.TryGetValue(revisionId, out var chunk) ? chunk : null);
 
+    /// <summary>假的对端全文日志。键是 "对端指纹|revisionId"。</summary>
+    internal Dictionary<string, string> PeerFullLogs { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>被问过全文的 (对端, revision)，按顺序。用来钉「问了谁」。</summary>
+    internal List<string> FullLogAsks { get; } = [];
+
+    public Task<string?> FetchFullLogAsync(Elector peer, string revisionId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+
+        var key = peer.Id + "|" + revisionId;
+        FullLogAsks.Add(key);
+        return Task.FromResult(PeerFullLogs.TryGetValue(key, out var text) ? text : null);
+    }
+
     public Task<bool> SendAssignmentReplyAsync(Elector peer, AssignmentReply reply, CancellationToken ct)
     {
         if (AssignmentDelivers)
