@@ -49,6 +49,7 @@ public static class ConclaveServiceCollectionExtensions
 
         var opts = options ?? new ConclaveOptions();
         _ = services.AddSingleton(opts);
+        _ = services.AddSingleton<SecretOverlay>();
 
         _ = services.AddSingleton(sp =>
         {

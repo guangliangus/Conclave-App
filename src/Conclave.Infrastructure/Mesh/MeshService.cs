@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json.Nodes;
 using Conclave.Application;
 using Conclave.Application.Ports;
 using Conclave.Domain;
@@ -21,6 +22,7 @@ public sealed class MeshService(
     HttpMesh mesh,
     NodeState state,
     ReviewProgressLog progress,
+    SecretOverlay secretOverlay,
     ILogger<MeshService> logger,
     ILogger<MeshHttpServer> serverLogger) : BackgroundService
 {
@@ -88,7 +90,7 @@ public sealed class MeshService(
         using var server = new MeshHttpServer(
             options.Mesh, acta, () => mesh.Self, mesh.SignedState,
             OnAssignmentReceivedAsync, OnBlockReceivedAsync,
-            progress.Read, progress.ReadAll, serverLogger);
+            progress.Read, progress.ReadAll, OfferConfig, serverLogger);
         _server = server;
 
         try
@@ -113,10 +115,17 @@ public sealed class MeshService(
             $"它跑的是 v{(peer.AppVersion.Length > 0 ? peer.AppVersion : "?")}（协议 v{peer.ProtocolVersion}），"
             + $"本机 v{AppInfo.Version}（协议 v{Beacon.ProtocolVersion}）。两边要升到同一版才能互认");
 
+        // 启动时先把手上那份的版本摆出来，别等第一次心跳循环 —— 邻居据此决定要不要来问。
+        if (EnsureHeld() is { } held && mesh.State.ConfigVersion != held.Version)
+        {
+            mesh.UpdateState(s => s with { ConfigVersion = held.Version });
+        }
+
         await Task.WhenAll(
             server.ServeAsync(stoppingToken),
             SendLoopAsync(beacon, stoppingToken),
-            ReceiveLoopAsync(beacon, stoppingToken)).ConfigureAwait(false);
+            ReceiveLoopAsync(beacon, stoppingToken),
+            ConfigSyncLoopAsync(stoppingToken)).ConfigureAwait(false);
     }
 
     private async Task SendLoopAsync(MeshBeaconSocket beacon, CancellationToken ct)
@@ -140,6 +149,13 @@ public sealed class MeshService(
                         $"节点 {gone.Id[..8]} 掉线",
                         $"{gone.AzIdentity} @ {gone.Endpoint} 心跳超时、HTTP 也不通；"
                             + "它在评的 PR 已回到队列");
+                }
+
+                // 广播本机手上那份配置的版本。没有「发布节点」，人人都可能是别人的上游。
+                var heldVersion = EnsureHeld()?.Version ?? 0;
+                if (mesh.State.ConfigVersion != heldVersion)
+                {
+                    mesh.UpdateState(s => s with { ConfigVersion = heldVersion });
                 }
 
                 mesh.UpdateSelf(self => self with { LastHeartbeat = now });
@@ -481,6 +497,300 @@ public sealed class MeshService(
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// 本机手上那份配置，<b>原作者签的</b>。
+    /// </summary>
+    /// <remarks>
+    /// 转发时原样给出去，绝不重签 —— 重签会让同一份内容以不同发布者 id 在网里流动，
+    /// 同版本抢占就不再收敛。见 <see cref="ConfigDocument"/>。
+    /// </remarks>
+    private ConfigDocument? _held;
+
+    private bool _heldLoaded;
+
+    /// <summary>
+    /// 护住 <see cref="_held"/> 的签发与落盘。
+    /// </summary>
+    /// <remarks>
+    /// <see cref="EnsureHeld"/> 被三个地方调：启动时、心跳循环、配置同步循环，而后两个是
+    /// 并发跑的（见 <c>Task.WhenAll</c>）。不护的话两边会同时为同一个版本各签一份 ——
+    /// ECDSA 每次签出来的字节不同，于是网里出现两份「同版本同作者、签名不同」的文档。
+    /// 它们互不抢占（<c>Supersedes</c> 对相等版本相等作者返回 false），所以不会抖，
+    /// 但会白写两次盘，而且日志里会出现两条「本机作者了配置 vN」，看着像出了问题。
+    /// </remarks>
+    private readonly object _heldGate = new();
+
+    /// <summary><see cref="_held"/> 的落盘位置。跟 meshsettings.json 是两回事：那份是给配置系统读的。</summary>
+    private string HeldPath => Path.Combine(options.HomeDirectory, "meshconfig.signed.json");
+
+    /// <summary>
+    /// 应答一次 <c>GET /config</c>。
+    /// </summary>
+    /// <param name="requesterPk">请求方的公钥，机密现封给它。</param>
+    /// <returns>本机手上还没有配置时为 <c>null</c>，由调用方回 404。</returns>
+    internal ConfigOffer? OfferConfig(string requesterPk)
+    {
+        if (!options.ConfigSync.Enabled)
+        {
+            return null;
+        }
+
+        var held = EnsureHeld();
+        if (held is null)
+        {
+            return null;
+        }
+
+        // 机密现封：本机手上有明文就封一份给来问的人。
+        //
+        // ⚠️ 这里<b>不查任何名单</b>，是选定的姿态：授权边界就是 mesh 本身，能连上这个端口的
+        // 都拿得到（跟 /state、/chain 一致）。加密挡的是链路上的旁观者，不是「谁有资格拿」。
+        // 换句话说：同网段任何一台机器都能要到这个 secret。挡住损失的是那个应用的权限面窄
+        // （只有 im:message），以及 SyncableConfig 的白名单，不是这一行。
+        if (options.Lark.AppSecret.Length == 0)
+        {
+            return ConfigOffer.Plain(held);
+        }
+
+        try
+        {
+            return new ConfigOffer(
+                held,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [SyncableConfig.SecretPurpose] = SecretSealing.Seal(
+                        options.Lark.AppSecret, requesterPk, identity, SyncableConfig.SecretPurpose),
+                });
+        }
+        catch (Exception ex) when (ex is FormatException or System.Security.Cryptography.CryptographicException)
+        {
+            // 请求方给的公钥不合法。正文照给 —— 那部分本来就是公开的。
+            logger.LogDebug(ex, "请求方的公钥无效，只给配置正文");
+            return ConfigOffer.Plain(held);
+        }
+    }
+
+    /// <summary>
+    /// 本机手上那份；人把版本号调高了就在本机重新签发一份。
+    /// </summary>
+    /// <remarks>
+    /// 「在任意一台上改 <c>meshsettings.json</c> 并把 <c>ConfigSync.Version</c> 调高」
+    /// 就是这套东西唯一的写入口。调高之后本机持有全网最大的版本，几十秒内扩散完。
+    /// </remarks>
+    private ConfigDocument? EnsureHeld()
+    {
+        lock (_heldGate)
+        {
+            if (!_heldLoaded)
+            {
+                _heldLoaded = true;
+                _held = LoadHeld();
+            }
+
+            var wanted = options.ConfigSync.Version;
+            if (wanted <= 0 || (_held is not null && _held.Version >= wanted))
+            {
+                return _held;
+            }
+
+            var document = ConfigDocument.Sign(identity, wanted, SyncableConfig.Serialize(options));
+            _held = document;
+            PersistHeld(document);
+            logger.LogInformation("本机作者了配置 v{Version}，将扩散到 mesh", wanted);
+            return document;
+        }
+    }
+
+    /// <summary>把手上那份从盘上读回来，好在重启后仍然原样转发。</summary>
+    private ConfigDocument? LoadHeld()
+    {
+        try
+        {
+            if (!File.Exists(HeldPath))
+            {
+                return null;
+            }
+
+            var document = ActaJson.Deserialize<ConfigDocument>(File.ReadAllText(HeldPath));
+
+            // 自己盘上那份也要验一遍：手改坏了、或者上次只写了一半，都不该当成有效配置转出去。
+            if (document is null || !document.VerifySignature())
+            {
+                logger.LogWarning("{Path} 验签不过，忽略", HeldPath);
+                return null;
+            }
+
+            return document;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                      or System.Text.Json.JsonException)
+        {
+            logger.LogWarning(ex, "读不回 {Path}，本机当作还没有配置", HeldPath);
+            return null;
+        }
+    }
+
+    private void PersistHeld(ConfigDocument document)
+    {
+        try
+        {
+            Directory.CreateDirectory(options.HomeDirectory);
+            WriteFileAtomically(HeldPath, ActaJson.Serialize(document));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 落不了盘只影响重启后要重新拉一次，不影响当前这一轮。
+            logger.LogWarning(ex, "存不下 {Path}", HeldPath);
+        }
+    }
+
+    private async Task ConfigSyncLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(options.ConfigSync.PollInterval);
+        do
+        {
+            LoopInterval.Follow(timer, options.ConfigSync.PollInterval);
+
+            try
+            {
+                if (options.ConfigSync.Enabled)
+                {
+                    await SyncConfigOnceAsync(ct).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "配置同步这一轮失败");
+            }
+        }
+        while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// 问一圈邻居有没有更新的配置。
+    /// </summary>
+    /// <remarks>
+    /// 没有指定的上游：谁都问，谁的版本大就采用谁的。所以离线过的机器上线后从<b>任何</b>
+    /// 一个邻居都能追上，不必等某台特定的机器活着。
+    /// </remarks>
+    private async Task SyncConfigOnceAsync(CancellationToken ct)
+    {
+        _ = EnsureHeld();
+
+        foreach (var peer in mesh.Members.Where(m => m.Id != mesh.Self.Id).ToList())
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // 对端广播的版本不比本机手上的新就不问了 —— 稳态下这一圈零 HTTP 请求。
+            // 对端还没上报过状态（ConfigVersion 为 0）时问一次，问不到就 404。
+            if (mesh.PeerStates.TryGetValue(peer.Id, out var peerState)
+                && peerState.ConfigVersion > 0
+                && peerState.ConfigVersion <= (_held?.Version ?? 0))
+            {
+                continue;
+            }
+
+            var offer = await mesh.PullConfigAsync(peer, ct).ConfigureAwait(false);
+
+            // 签名已经在 PullConfigAsync 里验过（验的是原作者的）。这里只判要不要采用。
+            if (offer is not null && offer.Document.Supersedes(_held))
+            {
+                Adopt(offer, peer.Id);
+            }
+        }
+    }
+
+    /// <summary>采用一份配置：落成 meshsettings.json，交给配置热更新去生效。</summary>
+    private void Adopt(ConfigOffer offer, string viaPeer)
+    {
+        var document = offer.Document;
+
+        try
+        {
+            // 收方重新投影一遍白名单。上游是被信任的，但一台被入侵的机器不该等于全组沦陷 ——
+            // 尤其是可执行文件路径那几个键，它们的代价是远程代码执行。
+            var filtered = SyncableConfig.Filter(document.Json, out var dropped);
+            if (dropped.Count > 0)
+            {
+                logger.LogWarning(
+                    "配置 v{Version}（作者 {Publisher}）里有白名单外的键，已丢弃：{Dropped}",
+                    document.Version, document.PublisherId, string.Join("、", dropped));
+            }
+
+            var root = JsonNode.Parse(filtered) as JsonObject ?? new JsonObject();
+            var conclave = root[SyncableConfig.Section] as JsonObject ?? new JsonObject();
+            root[SyncableConfig.Section] = conclave;
+
+            if (offer.Secrets.TryGetValue(SyncableConfig.SecretPurpose, out var envelope))
+            {
+                var secret = SecretSealing.Open(
+                    envelope, document.PublicKey, identity, SyncableConfig.SecretPurpose);
+
+                // 解不开是正常情况：转发的那一跳没有明文，或者它给的信封封给了别人。
+                // 正文照常采用，机密等下一轮从有明文的节点那里拿。
+                if (secret is not null)
+                {
+                    var lark = conclave["Lark"] as JsonObject ?? new JsonObject();
+                    lark["AppSecret"] = secret;
+                    conclave["Lark"] = lark;
+                    _ = secretOverlay.Accept(secret, document.PublisherId);
+                }
+            }
+
+            // 版本号由本机写，不从对端的正文里来（Filter 已经把 ConfigSync 整段剥掉了）。
+            conclave["ConfigSync"] = new JsonObject { ["Version"] = document.Version };
+
+            WriteFileAtomically(
+                Path.Combine(options.HomeDirectory, "meshsettings.json"),
+                root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+            lock (_heldGate)
+            {
+                _held = document;
+                PersistHeld(document);
+            }
+
+            mesh.UpdateState(s => s with { ConfigVersion = document.Version });
+
+            logger.LogInformation(
+                "采用配置 v{Version}（作者 {Publisher}，经 {Peer}）",
+                document.Version, document.PublisherId, viaPeer);
+            state.Notify(
+                NoticeKind.Ok,
+                $"已同步集群配置 v{document.Version}",
+                $"作者 {document.PublisherId[..Math.Min(8, document.PublisherId.Length)]}；改动已热生效");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "采用配置 v{Version} 失败", document.Version);
+        }
+    }
+
+    /// <summary>
+    /// 先写临时文件再改名。
+    /// </summary>
+    /// <remarks>
+    /// 配置文件正被读的同时被写，读方会拿到半截 JSON。改名在同一个文件系统上是原子的，
+    /// 读方要么看到旧的、要么看到新的。权限设在临时文件上 —— 改名保留 inode 和模式，
+    /// 而 meshsettings.json 里有飞书的 App Secret，不能是所有人可读。
+    /// </remarks>
+    private static void WriteFileAtomically(string path, string content)
+    {
+        var temp = path + ".tmp." + Guid.NewGuid().ToString("N")[..8];
+        File.WriteAllText(temp, content);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(temp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        File.Move(temp, path, overwrite: true);
     }
 
     public override void Dispose()

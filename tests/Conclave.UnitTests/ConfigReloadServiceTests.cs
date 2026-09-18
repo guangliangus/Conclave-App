@@ -88,4 +88,44 @@ public class ConfigReloadServiceTests
         var notice = Assert.Single(state.Notices);
         Assert.Equal(NoticeKind.Ok, notice.Kind);
     }
+
+    /// <summary>
+    /// meshsettings.json 按 key 覆盖 appsettings.json，未覆盖的字段保留本地值。
+    /// </summary>
+    [Fact]
+    public void Meshsettings_overrides_appsettings_key_by_key()
+    {
+        var appsettings = new Dictionary<string, string?>
+        {
+            ["Conclave:AutoReview"] = "false",
+            ["Conclave:MaxReviewAttempts"] = "3",
+            ["Conclave:Lark:AppSecret"] = "old-secret",
+            ["Conclave:Quorum:Default"] = "1",
+        };
+
+        var meshsettings = new Dictionary<string, string?>
+        {
+            ["Conclave:AutoReview"] = "true",
+            ["Conclave:Lark:AppSecret"] = "synced-secret",
+            ["Conclave:ConfigSync:Version"] = "5",
+        };
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(appsettings)
+            .AddInMemoryCollection(meshsettings)
+            .Build();
+
+        var live = new ConclaveOptions();
+        using var service = Service(config, live, new NodeState());
+        service.Reload();
+
+        // 覆盖的键取 meshsettings
+        Assert.True(live.AutoReview);
+        Assert.Equal("synced-secret", live.Lark.AppSecret);
+        Assert.Equal(5, live.ConfigSync.Version);
+
+        // 未被覆盖的键保留 appsettings 本地值
+        Assert.Equal(3, live.MaxReviewAttempts);
+        Assert.Equal(1, live.Quorum.Default);
+    }
 }

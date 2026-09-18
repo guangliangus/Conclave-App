@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -44,6 +45,7 @@ public sealed class ConfigReloadService : IHostedService, IDisposable
     private readonly ConclaveOptions _live;
     private readonly NodeState _state;
     private readonly ILogger<ConfigReloadService> _logger;
+    private readonly SecretOverlay? _secrets;
     private readonly object _gate = new();
     private readonly Timer _debounce;
 
@@ -54,12 +56,14 @@ public sealed class ConfigReloadService : IHostedService, IDisposable
         IConfiguration config,
         ConclaveOptions live,
         NodeState state,
-        ILogger<ConfigReloadService> logger)
+        ILogger<ConfigReloadService> logger,
+        SecretOverlay? secrets = null)
     {
         _config = config;
         _live = live;
         _state = state;
         _logger = logger;
+        _secrets = secrets;
         _debounce = new Timer(_ => Reload(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
@@ -115,7 +119,26 @@ public sealed class ConfigReloadService : IHostedService, IDisposable
             var fresh = new ConclaveOptions();
             section.Bind(fresh);
 
-            var pending = ConfigHotReload.Apply(_live, fresh);
+            var pending = ConfigHotReload.Apply(_live, fresh, _secrets);
+
+            // 集合不能靠配置叠加来覆盖：.NET 对数组是按索引合并的，集群推一个更短的列表
+            // 过来，本地多出来的那几项会静静留着。所以绑定之后按 meshsettings.json 再整体
+            // 替换一遍，见 MeshSettingsFile。
+            if (MeshSettingsFile.TryRead(_live) is { } meshJson)
+            {
+                try
+                {
+                    var replaced = MeshSettingsFile.ApplyCollections(_live, meshJson);
+                    if (replaced.Count > 0)
+                    {
+                        _logger.LogDebug("集群配置整体替换了这些集合：{Keys}", string.Join("、", replaced));
+                    }
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(ex, "{File} 解析不了，本轮沿用本地的集合配置", MeshSettingsFile.Name);
+                }
+            }
 
             if (pending.Count == 0)
             {

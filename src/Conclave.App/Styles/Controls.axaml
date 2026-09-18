@@ -25,6 +25,21 @@
     <Setter Property="Background" Value="{DynamicResource BgBrush}" />
   </Style>
 
+  <!--
+    标题栏那一条。左边 82 留给系统红绿灯 —— 它们画在这一层之上，压到底下的点不着。
+    背景跟顶栏同色：两条连在一起读起来才是一块，中间没有分界线。
+
+    高度不写死，靠内容 + 上下各 5 的留白撑开（ToggleChip 实际约 26px，撑出来 36）。
+    原先钉死 28 正好塞不下那个胶囊：上下各剩 1px，看起来是贴着边、底下还被下一条的
+    边线切掉一道。标题栏条比系统标准的 28 高一点没关系 —— 红绿灯由系统画在这一层
+    之上、靠上对齐，多出来的高度长在下面，跟顶栏同色所以看不出接缝。
+  -->
+  <Style Selector="Border.titlestrip">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="Padding" Value="82,5,12,5" />
+  </Style>
+
   <Style Selector="Border.topbar">
     <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
     <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />

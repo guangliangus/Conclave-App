@@ -49,6 +49,7 @@ public sealed class ClaudeReviewRunner(
     GitWorkspaceFactory workspaces,
     ClaudeCli claudeCli,
     ReviewProgressLog progress,
+    ConclaveOptions options,
     ILogger<ClaudeReviewRunner> logger) : IReviewRunner
 {
     /// <summary>
@@ -129,6 +130,14 @@ public sealed class ClaudeReviewRunner(
             "--session-id", sessionId.ToString(),
             "--allowedTools", "Bash", "Read", "Grep", "Glob",
         };
+
+        // 留空就不给这个参数 —— 那时用的是机器上 claude 自己的默认模型，
+        // 也就是这个选项加进来之前的行为。
+        if (options.ClaudeModel.Trim() is { Length: > 0 } model)
+        {
+            args.Add("--model");
+            args.Add(model);
+        }
 
         var env = new Dictionary<string, string>(StringComparer.Ordinal)
         {

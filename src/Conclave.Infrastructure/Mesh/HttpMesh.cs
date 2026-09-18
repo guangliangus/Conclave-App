@@ -215,6 +215,58 @@ public sealed class HttpMesh : IMesh, IDisposable
         }
     }
 
+    public async Task<ConfigOffer?> PullConfigAsync(Elector peer, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+
+        if (peer.Endpoint.Length == 0)
+        {
+            return null;
+        }
+
+        // 带上本机公钥：对端要用它把机密现封给本机，别人截到也解不开。
+        var url = $"{peer.Endpoint}/config?pk={Uri.EscapeDataString(_identity.PublicKey)}";
+
+        ConfigOffer? offer;
+        try
+        {
+            using var response = await _http.GetAsync(new Uri(url), ct).ConfigureAwait(false);
+
+            // 404 是正常答案：对端手上还没有配置。
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            offer = await response.Content
+                .ReadFromJsonAsync<ConfigOffer>(ActaJson.Options, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
+                                      or System.Text.Json.JsonException)
+        {
+            _logger.LogDebug(ex, "从 {Elector} 拉配置失败", peer.Id);
+            return null;
+        }
+
+        if (offer is null)
+        {
+            return null;
+        }
+
+        // 验的是原作者的签名，不是转发者的 —— 对端只是把它手上那份原样给出来，
+        // 所以这里<b>不</b>要求 PublisherId 等于 peer.Id。转发链上每一跳都验一次。
+        if (!offer.Document.VerifySignature())
+        {
+            _logger.LogWarning(
+                "丢弃 {Elector} 转来的配置 v{Version}：验签失败（原作者自称 {Publisher}）",
+                peer.Id, offer.Document.Version, offer.Document.PublisherId);
+            return null;
+        }
+
+        return offer;
+    }
+
     public async Task<bool> PullStateAsync(Elector peer, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(peer);

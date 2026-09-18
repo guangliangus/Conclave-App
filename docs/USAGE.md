@@ -366,6 +366,35 @@ HTTP     :47708               ← 区块传播、补链、指派、实时日志�
 ⚠️ **环境变量不在热更新范围内**（进程启动时读一次），所以用
 `CONCLAVE_Conclave__Lark__AppSecret` 配的密钥改了之后还是要重启节点。
 
+### 集群配置：改一处，全组跟上
+
+打开 `ConfigSync.Enabled` 之后，配置会在 mesh 里自己传开。**没有「主节点」**：每台机器都把手上那份摆出来，也都去问邻居，谁的版本号大谁赢。所以离线过的机器上线后从**任何**一个邻居都能追上，不必等某台特定的机器活着。
+
+**改配置的办法**——在**任意一台**上编辑 `~/.conclave/meshsettings.json`，把版本号调高：
+
+```jsonc
+{
+  "Conclave": {
+    "AutoReview": true,
+    "Quorum": { "Default": 2 },
+    "ConfigSync": { "Version": 8 }   // ← 比全网当前的大就行
+  }
+}
+```
+
+那台机器于是持有全网最大的版本，几十秒内扩散完，每台都热生效、不用重启。
+
+`appsettings.json` **不会**扩散——那份是每台机器自己的东西（路径、端口、az 身份）。两份的关系是：`meshsettings.json` 按 key 盖在 `appsettings.json` 上面。
+
+**哪些键会同步**：`Quorum.*`、`AutoReview`、`PostToAzureDevOps`、`Lark.*`、各种间隔与超时、project 白/黑名单。
+**哪些不会**：`ClaudeExecutable` / `AzExecutable` / `ExtraToolPaths`（指向哪个二进制 = 在别人机器上执行代码）、`Update`（`BundlePath` 决定就地替换写哪个目录）、`Mesh.*`、`HomeDirectory`、`AzIdentityOverride`。收方还会再过滤一遍，所以一台机器被入侵也推不出这些键。
+
+**飞书 App Secret 会跟着同步**，传输时用收件方的公钥加密（只有它解得开），落地写进 `meshsettings.json`，文件权限 600。配好一台，其余的自动拿到——不用再配环境变量。
+
+⚠️ **信任边界就是 mesh 本身**：任何能连上节点端口的 Conclave 都能推配置进来，也都能读到这份配置、包括那个 App Secret。挡住损失的是上面那张白名单（最坏是策略被改，不是机器被接管），以及那个飞书应用本身权限面很窄（只有 `im:message`）。范围超出本组就要把 `Mesh.TrustAllElectors` 关掉、按 README 互相写 `electors.allow`。
+
+⚠️ **别两个人同时改**。同版本号撞车会按发布者指纹的字典序判，确定性收敛，但输的那一方的改动会被悄悄盖掉。
+
 常改的几项：
 
 | 键 | 默认 | 说明 |

@@ -199,7 +199,10 @@ internal sealed class Program
             // 显式加程序目录那份：Host.CreateApplicationBuilder 默认从 ContentRoot（工作目录）读，
             // 而 Finder 启动 .app 时工作目录是 /，打包进去的 appsettings.json 就永远读不到。
             .AddJsonFile(s => Watched(s, Path.Combine(AppContext.BaseDirectory, "appsettings.json")))
+            // 用户目录的基础配置
             .AddJsonFile(s => Watched(s, Path.Combine(home, "appsettings.json")))
+            // mesh 同步来的配置：按 key 覆盖本地 appsettings.json，随集群自动同步并支持热更新
+            .AddJsonFile(s => Watched(s, Path.Combine(home, "meshsettings.json")))
             .AddEnvironmentVariables("CONCLAVE_");
 
         _ = builder.Logging.AddSimpleConsole(o =>

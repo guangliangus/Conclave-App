@@ -48,6 +48,29 @@ public sealed class ElectorIdentity : IDisposable
     /// <summary>导出 PKCS#8 私钥字节，交由基础设施层落盘。</summary>
     public byte[] ExportPkcs8() => _key.ExportPkcs8PrivateKey();
 
+    /// <summary>
+    /// 用同一副密钥做 ECDH 密钥协商，给密钥密封与解密用。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>复用签名密钥做密钥协商不是密码学上的最优做法</b>，理想形态是另生成一副专用的
+    /// 协商密钥。不这么做的理由是分发：要把机密封给某个节点，得先确信拿到的那把公钥
+    /// <b>真的是它的</b>，而 <see cref="Elector.PublicKey"/> 已经随签名心跳散到全 mesh
+    /// 并且逐条验过签了 —— 另开一副密钥就得再造一条同等可信的分发路径，而那条路径上
+    /// 任何一个缺口都比密钥复用严重得多。
+    /// </para>
+    /// <para>
+    /// P-256 的密钥材料对 ECDSA 和 ECDH 是同一种（<c>id-ecPublicKey</c>），所以 PKCS#8
+    /// 能直接导进 <see cref="ECDiffieHellman"/>，不需要拆 <see cref="ECParameters"/>。
+    /// </para>
+    /// </remarks>
+    public ECDiffieHellman CreateAgreement()
+    {
+        var ecdh = ECDiffieHellman.Create();
+        ecdh.ImportPkcs8PrivateKey(_key.ExportPkcs8PrivateKey(), out _);
+        return ecdh;
+    }
+
     public string Sign(string payload)
     {
         ArgumentNullException.ThrowIfNull(payload);

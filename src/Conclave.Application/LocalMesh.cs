@@ -94,6 +94,10 @@ public sealed class LocalMesh : IMesh
     public Task<string?> FetchFullLogAsync(Elector peer, string revisionId, CancellationToken ct)
         => Task.FromResult<string?>(null);
 
+    /// <summary>单机模式没有对端，拉不到配置。</summary>
+    public Task<ConfigOffer?> PullConfigAsync(Elector peer, CancellationToken ct)
+        => Task.FromResult<ConfigOffer?>(null);
+
     public void UpdateSelf(Func<Elector, Elector> mutate)
     {
         ArgumentNullException.ThrowIfNull(mutate);

@@ -143,6 +143,8 @@ public static class ProcessRunner
         try
         {
             await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            // 确保异步重定向的 OutputDataReceived / ErrorDataReceived 事件完全排空
+            process.WaitForExit();
         }
         catch (OperationCanceledException)
         {

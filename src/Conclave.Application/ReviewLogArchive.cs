@@ -36,6 +36,9 @@ public sealed record ArchivedLog(string Path, string Text);
 /// </remarks>
 public sealed class ReviewLogArchive(ConclaveOptions options, ILogger<ReviewLogArchive> logger)
 {
+    private readonly Lock _gate = new();
+    private bool _rootEnsured;
+
     /// <summary>落盘目录。</summary>
     public string Root => options.LogDirectory;
 
@@ -58,8 +61,16 @@ public sealed class ReviewLogArchive(ConclaveOptions options, ILogger<ReviewLogA
 
         try
         {
-            EnsureRoot();
-            File.AppendAllText(LivePathOf(revisionId), line + Environment.NewLine);
+            lock (_gate)
+            {
+                if (!_rootEnsured)
+                {
+                    EnsureRoot();
+                    _rootEnsured = true;
+                }
+
+                File.AppendAllText(LivePathOf(revisionId), line + Environment.NewLine);
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -128,13 +139,21 @@ public sealed class ReviewLogArchive(ConclaveOptions options, ILogger<ReviewLogA
 
         try
         {
-            EnsureRoot();
-            var path = Path.Combine(
-                Root,
-                Safe(revisionId) + "." + Safe(peerId[..Math.Min(8, peerId.Length)]) + ".log");
+            lock (_gate)
+            {
+                if (!_rootEnsured)
+                {
+                    EnsureRoot();
+                    _rootEnsured = true;
+                }
 
-            File.WriteAllText(path, text);
-            return path;
+                var path = Path.Combine(
+                    Root,
+                    Safe(revisionId) + "." + Safe(peerId[..Math.Min(8, peerId.Length)]) + ".log");
+
+                File.WriteAllText(path, text);
+                return path;
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

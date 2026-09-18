@@ -186,6 +186,24 @@ public sealed record LiveState
     /// </remarks>
     public long Version { get; init; }
 
+    /// <summary>
+    /// 本节点手上那份 mesh 配置的版本号；没有就是 0。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 跟 <see cref="Version"/> 完全一样的省流量套路：对端看到这个数比自己手上的大，才去拉一次
+    /// <c>GET /config</c>。配置几天才改一次，稳态下这里不产生任何额外请求。
+    /// </para>
+    /// <para>
+    /// 放在这里而不是挂到 <see cref="Elector"/> 上随心跳走，有两个理由。一是心跳<b>没有余量</b>了
+    /// （实测 35 个 project 时 1418 字节，离 MTU 只剩 54 字节）。二是
+    /// <see cref="Beacon.SigningPayload"/> 加字段就是协议破坏，新旧节点互相验签失败、
+    /// 整个 mesh 必须同时升级；而 <see cref="SignedLiveState"/> 签的是传输的 JSON 原文再单独
+    /// 反序列化，加字段<b>不</b>破坏兼容 —— 老节点验签照样过，只是读不到这个字段（得 0）。
+    /// </para>
+    /// </remarks>
+    public long ConfigVersion { get; init; }
+
     /// <summary>本节点这一片轮询到的、仍然活跃的 PR。</summary>
     public IReadOnlyList<QueuedRevision> Discovered { get; init; } = [];
 

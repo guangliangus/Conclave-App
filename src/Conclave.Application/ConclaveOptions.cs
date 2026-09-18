@@ -322,6 +322,9 @@ public sealed class ConclaveOptions
     /// <summary>结论出来后用飞书通知作者的参数。</summary>
     public LarkOptions Lark { get; set; } = new();
 
+    /// <summary>mesh 配置同步：一处改、全组跟上。</summary>
+    public ConfigSyncOptions ConfigSync { get; set; } = new();
+
     /// <summary>app 自身的更新：查 GitHub Release，人点了才装。</summary>
     public UpdateOptions Update { get; set; } = new();
 
@@ -370,6 +373,30 @@ public sealed class ConclaveOptions
 
     /// <summary><c>claude</c> 的命令名或绝对路径。</summary>
     public string ClaudeExecutable { get; set; } = "claude";
+
+    /// <summary>
+    /// 评审用哪个模型，例如 <c>claude-opus-5</c>。留空 = 用那台机器 <c>claude</c> 的默认模型。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>每台机器自己配，不随 mesh 同步。</b> 各台的订阅和各模型额度并不一样
+    /// （<c>/usage</c> 里 Fable 就有自己独立的周额度桶），全组统一指定一个模型，会让那个
+    /// 模型额度打满的机器直接失效 —— 而它本可以换一个模型继续干活。
+    /// </para>
+    /// <para>
+    /// 代价要知道：各节点用不同模型时，quorum 压方差这件事只剩一半。「被 3 个节点都提到
+    /// 几乎必然是真问题」仍然成立；但「只被 1 个提到 = 大概率是噪音」不再成立 ——
+    /// 它也可能是「只有能力强的那台看出来了」，而
+    /// <c>Confidence &lt; 0.5 只作提示不作阻塞</c> 这条规则正建立在前一种解释上。
+    /// 所以每一票用的是哪个模型要看得见，别只看 Confidence。
+    /// </para>
+    /// <para>
+    /// 留空是安全的默认：不给 <c>--model</c>，行为跟这个选项加进来之前一模一样。
+    /// 每一票<b>实际</b>用的模型照旧从 <c>modelUsage</c> 里事后读出来记进票里 ——
+    /// 配了这一项也不改那条路径，因为「配的」和「真跑的」不一定一致（模型下线、别名解析）。
+    /// </para>
+    /// </remarks>
+    public string ClaudeModel { get; set; } = string.Empty;
 
     /// <summary><c>az</c> 的命令名或绝对路径。</summary>
     public string AzExecutable { get; set; } = "az";

@@ -281,6 +281,15 @@ internal sealed class FakeMesh : IMesh
         return Task.FromResult(PeerFullLogs.TryGetValue(key, out var text) ? text : null);
     }
 
+    /// <summary>假的对端配置。键是 electorId，测试直接往里塞。</summary>
+    internal Dictionary<string, ConfigOffer> PeerConfigs { get; } = new(StringComparer.Ordinal);
+
+    public Task<ConfigOffer?> PullConfigAsync(Elector peer, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+        return Task.FromResult(PeerConfigs.TryGetValue(peer.Id, out var offer) ? offer : null);
+    }
+
     public Task<bool> SendAssignmentReplyAsync(Elector peer, AssignmentReply reply, CancellationToken ct)
     {
         if (AssignmentDelivers)

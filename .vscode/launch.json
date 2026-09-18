@@ -1,0 +1,97 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Conclave (GUI 菜单栏模式)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/Conclave.App/bin/Debug/net10.0/conclave.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/src/Conclave.App",
+      "stopAtEntry": false,
+      "console": "internalConsole",
+      "pipeTransport": {
+        "pipeCwd": "${workspaceFolder}",
+        "pipeProgram": "bash",
+        "pipeArgs": ["-c"],
+        "debuggerPath": "${env:HOME}/.local/share/netcoredbg/netcoredbg/netcoredbg",
+        "debuggerArgs": ["--interpreter=vscode"]
+      }
+    },
+    {
+      "name": "Conclave (Serve 无头常驻节点)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/Conclave.App/bin/Debug/net10.0/conclave.dll",
+      "args": ["serve"],
+      "cwd": "${workspaceFolder}/src/Conclave.App",
+      "stopAtEntry": false,
+      "console": "internalConsole",
+      "pipeTransport": {
+        "pipeCwd": "${workspaceFolder}",
+        "pipeProgram": "bash",
+        "pipeArgs": ["-c"],
+        "debuggerPath": "${env:HOME}/.local/share/netcoredbg/netcoredbg/netcoredbg",
+        "debuggerArgs": ["--interpreter=vscode"]
+      }
+    },
+    {
+      "name": "Conclave (Report 账单报告)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/Conclave.App/bin/Debug/net10.0/conclave.dll",
+      "args": ["report"],
+      "cwd": "${workspaceFolder}/src/Conclave.App",
+      "stopAtEntry": false,
+      "console": "internalConsole",
+      "pipeTransport": {
+        "pipeCwd": "${workspaceFolder}",
+        "pipeProgram": "bash",
+        "pipeArgs": ["-c"],
+        "debuggerPath": "${env:HOME}/.local/share/netcoredbg/netcoredbg/netcoredbg",
+        "debuggerArgs": ["--interpreter=vscode"]
+      }
+    },
+    {
+      "name": "Conclave (Review 指定 PR)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/Conclave.App/bin/Debug/net10.0/conclave.dll",
+      "args": ["review", "${input:prId}"],
+      "cwd": "${workspaceFolder}/src/Conclave.App",
+      "stopAtEntry": false,
+      "console": "internalConsole",
+      "pipeTransport": {
+        "pipeCwd": "${workspaceFolder}",
+        "pipeProgram": "bash",
+        "pipeArgs": ["-c"],
+        "debuggerPath": "${env:HOME}/.local/share/netcoredbg/netcoredbg/netcoredbg",
+        "debuggerArgs": ["--interpreter=vscode"]
+      }
+    },
+    {
+      "name": ".NET: 附加到已有进程 (Attach)",
+      "type": "coreclr",
+      "request": "attach",
+      "pipeTransport": {
+        "pipeCwd": "${workspaceFolder}",
+        "pipeProgram": "bash",
+        "pipeArgs": ["-c"],
+        "debuggerPath": "${env:HOME}/.local/share/netcoredbg/netcoredbg/netcoredbg",
+        "debuggerArgs": ["--interpreter=vscode"]
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "prId",
+      "type": "promptString",
+      "description": "输入要评审的 PR 号 (例如 2878):",
+      "default": "1"
+    }
+  ]
+}

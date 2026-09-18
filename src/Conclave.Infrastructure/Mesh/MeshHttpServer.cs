@@ -20,7 +20,7 @@ namespace Conclave.Infrastructure.Mesh;
 /// </para>
 /// <para>
 /// 接口：<c>POST /blocks</c> 收区块、<c>GET /chain?from=N</c> 供对方补链、
-/// <c>GET /elector</c> 方便 curl 排查。
+/// <c>GET /config?pk=…</c> 发配置、<c>GET /elector</c> 方便 curl 排查。
 /// </para>
 /// </remarks>
 public sealed class MeshHttpServer : IDisposable
@@ -67,6 +67,10 @@ public sealed class MeshHttpServer : IDisposable
     private readonly Func<Block, CancellationToken, Task> _onBlock;
     private readonly Func<string, long, LogChunk> _readLog;
     private readonly Func<string, string?> _readFullLog;
+
+    /// <summary>按请求方的公钥应答一份配置；本机手上还没有配置时返回 null。</summary>
+    private readonly Func<string, ConfigOffer?> _offerConfig;
+
     private readonly ILogger<MeshHttpServer> _logger;
 
     public MeshHttpServer(
@@ -78,6 +82,7 @@ public sealed class MeshHttpServer : IDisposable
         Func<Block, CancellationToken, Task> onBlock,
         Func<string, long, LogChunk> readLog,
         Func<string, string?> readFullLog,
+        Func<string, ConfigOffer?> offerConfig,
         ILogger<MeshHttpServer> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -89,6 +94,7 @@ public sealed class MeshHttpServer : IDisposable
         _onBlock = onBlock;
         _readLog = readLog;
         _readFullLog = readFullLog;
+        _offerConfig = offerConfig;
         _logger = logger;
 
         Port = options.HttpPort;
@@ -324,6 +330,35 @@ public sealed class MeshHttpServer : IDisposable
             }
 
             await WriteTextAsync(context, full, ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (method == "GET" && path == "/config")
+        {
+            // 请求方报上自己的公钥，本机把机密封给这把公钥（见 Domain.SecretSealing）。
+            //
+            // ⚠️ 刻意不要求请求方签名：签名在这里不起作用。公钥本来就是公开的，拿别人的
+            // 公钥来要，换回去的信封自己也解不开；拿自己的来要，签名一样过得了。
+            //
+            // 也就是说加密保护的是<b>线路</b>，不是授权。本设计里授权边界就是 mesh 本身：
+            // 能连上这个端口的都拿得到（跟 /state、/chain 同一姿态）。挡住损失的是
+            // SyncableConfig 那张白名单，不是这里。
+            var requester = context.Request.QueryString["pk"];
+            if (string.IsNullOrWhiteSpace(requester))
+            {
+                TrySetStatus(context, HttpStatusCode.BadRequest);
+                return;
+            }
+
+            var offer = _offerConfig(requester);
+            if (offer is null)
+            {
+                // 本机手上还没有配置。给 404 而不是 200 空体：对端据此就跳过这台。
+                TrySetStatus(context, HttpStatusCode.NotFound);
+                return;
+            }
+
+            await WriteJsonAsync(context, offer, ct).ConfigureAwait(false);
             return;
         }
 

@@ -10,7 +10,8 @@
         MinWidth="700" MinHeight="560"
         Icon="/Assets/conclave.ico"
         Background="{DynamicResource BgBrush}"
-        Title="Conclave">
+        Title="Conclave"
+        ExtendClientAreaToDecorationsHint="True">
 
   <!--
     四段结构，从上到下：
@@ -260,13 +261,32 @@
 
   <!-- 圆角与边框归这层：没有系统标题栏之后，窗口自己的直角会露在外面 -->
   <Border Classes="shell">
-    <Grid RowDefinitions="Auto,*">
+    <Grid RowDefinitions="Auto,Auto,*">
+
+      <!--
+        ── 标题栏那一条 ─────────────────────────────────────────────────
+        客户区延伸进了系统装饰区（ExtendClientAreaToDecorationsHint），所以这一条是
+        我们自己画的，红绿灯由系统盖在左上角。代价是系统原本画在中间的「Conclave」
+        文字没有了 —— 没补一个，因为下面那行的 CONCLAVE 标题已经把这件事说过一遍。
+
+        左边留 82px 给红绿灯：那三个按钮是系统在这一层之上画的，压到它们底下的东西
+        点不着也看不见。高度 28 是 macOS 标准标题栏高，比它矮会让红绿灯贴着下边缘。
+
+        跟下面的顶栏一样能按住拖窗口 —— 这一条现在是客户区，系统不再替我们处理拖动。
+      -->
+      <Border Grid.Row="0" Classes="titlestrip" PointerPressed="OnChromeDrag">
+        <ToggleButton Theme="{StaticResource ToggleChip}" Content="⚙ 设置"
+                      HorizontalAlignment="Right" VerticalAlignment="Center"
+                      IsChecked="{Binding ShowSettings, Mode=OneWay}"
+                      Command="{Binding ToggleSettingsCommand}"
+                      ToolTip.Tip="本机设置：同时评审数、claude 路径、评审模型&#10;改完即时生效，不用重启" />
+      </Border>
 
       <!--
         顶栏。按住它也能拖窗口（见 OnChromeDrag）—— 系统标题栏很窄，而工具栏拖动
         是 macOS 上的常规做法。落在按钮或开关上的按下会被它们先吃掉，不会误触发拖动。
       -->
-      <Border Grid.Row="0" Classes="topbar" PointerPressed="OnChromeDrag">
+      <Border Grid.Row="1" Classes="topbar" PointerPressed="OnChromeDrag">
         <!--
           两列：左边那串事实按内容取宽（Auto），右边那组开关吃掉剩余宽度并靠右排。
           左边<b>不能</b>用 <c>*</c> —— 星号列拿的是「分完剩下的」，窗口一窄就被挤成 0，
@@ -378,6 +398,7 @@
                             IsChecked="{Binding PostToAzureDevOps}"
                             ToolTip.Tip="开启后公布结论时会往真实 PR 发评论并投票（关着只写本地账本）" />
             </StackPanel>
+
             <!--
               「立即轮询」撤了：PR 每 30 秒自己轮一遍（ConclaveOptions.PollInterval），
               手动点一次只是把同一件事提前几秒，而它占着顶栏最显眼的一个位置。
@@ -394,7 +415,7 @@
         RowDefinition 不在可视树里，DataContext 到不了它，Height 绑不了。
         索引常量也在那边，改这里的行顺序要同步改过去。
       -->
-      <Grid Grid.Row="1" Name="ContentGrid" Margin="16,14,16,12">
+      <Grid Grid.Row="2" Name="ContentGrid" Margin="16,14,16,12">
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto" />        <!-- 0 告警条 -->
           <RowDefinition Height="Auto" />        <!-- 1 待确认的评审指派 -->
@@ -650,6 +671,7 @@
                       </Border>
                     </StackPanel>
                   </RadioButton>
+
                 </StackPanel>
 
                 <!-- 每张表一句说明。同一格里叠六个、按 tab 显隐，比在每张表里各写一遍紧凑 -->
@@ -1197,6 +1219,67 @@
                              Text="还没有通知&#10;有人请你评审、对方接受或拒绝、评审出结论、额度过线，都会落到这里" />
                 </Panel>
               </Grid>
+
+              <!--
+                ── 设置 ─────────────────────────────────────────────────
+                只写本机那份 ~/.conclave/appsettings.json。写完什么都不用做 ——
+                配置热更新会在几百毫秒内读回来生效，所以这里没有「应用」这一步。
+                改了要重启才生效的那几项（端口、数据目录）只读展示，不做成输入框：
+                摆一个改了不生效的框，比不给这个框糟糕得多。
+              -->
+              <ScrollViewer IsVisible="{Binding ShowSettings}">
+                <StackPanel Margin="16,12" Spacing="14" MaxWidth="560" HorizontalAlignment="Left">
+
+                  <TextBlock Classes="card-note" TextWrapping="Wrap"
+                             Text="这一页只改这台机器。集群共用的配置在 ~/.conclave/meshsettings.json，改它要调高 ConfigSync.Version" />
+
+                  <Border IsVisible="{Binding HasSettingsOverridden}"
+                          Background="#22FFB020" CornerRadius="6" Padding="10,8">
+                    <StackPanel Spacing="3">
+                      <TextBlock Text="下面这几项正被集群配置盖着，本机改了不会生效："
+                                 FontWeight="SemiBold" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding SettingsOverridden}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="同时评审数" FontWeight="SemiBold" />
+                    <TextBox Text="{Binding SettingMaxConcurrent}" Width="120" HorizontalAlignment="Left" />
+                    <TextBlock Classes="card-note" TextWrapping="Wrap"
+                               Text="改大不会真的并发起来（编排循环有硬闸），只会让席位判定以为本机还能接活" />
+                  </StackPanel>
+
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="评审模型" FontWeight="SemiBold" />
+                    <ComboBox HorizontalAlignment="Stretch"
+                              ItemsSource="{Binding ClaudeModelChoices}"
+                              SelectedItem="{Binding PickedClaudeModel}"
+                              DisplayMemberBinding="{Binding Label}" />
+                    <TextBlock Classes="card-note" TextWrapping="Wrap"
+                               Text="要用列表外的模型，改 ~/.conclave/appsettings.json 的 ClaudeModel —— 手改的值这里会照常显示出来，不会被覆盖掉" />
+                    <TextBlock Classes="card-note" TextWrapping="Wrap"
+                               Text="这一项只管这台机器，不随 mesh 同步 —— 各台的订阅和各模型额度不一样，统一指定会让额度打满的那台直接失效。代价是各节点模型不同时，「只被一个节点提到」不再等于「大概率是噪音」，也可能是只有能力强的那台看出来了" />
+                  </StackPanel>
+
+                  <StackPanel Spacing="8" Orientation="Horizontal">
+                    <Button Content="保存" Command="{Binding SaveSettingsCommand}" />
+                    <TextBlock Text="{Binding SettingsStatus}" VerticalAlignment="Center"
+                               Classes="card-note" TextWrapping="Wrap" />
+                  </StackPanel>
+
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="改了要重启才生效" FontWeight="SemiBold" />
+                    <TextBlock Classes="card-note" TextWrapping="Wrap"
+                               Text="{Binding SettingsRestartOnly}" />
+                    <TextBlock Classes="card-note" TextWrapping="Wrap"
+                               Text="它们在启动时就被已打开的数据库和已 listen 的 socket 吃掉了，所以只显示不给改 —— 要改去编辑 ~/.conclave/appsettings.json" />
+                  </StackPanel>
+
+                  <TextBlock Classes="card-note" TextWrapping="Wrap"
+                             Text="自动评审和「发回 PR」两个开关在顶栏，点一下就会写进本机配置文件" />
+                </StackPanel>
+              </ScrollViewer>
+
             </Panel>
           </Grid>
         </Border>

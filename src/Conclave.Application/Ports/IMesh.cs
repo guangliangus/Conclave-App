@@ -93,4 +93,22 @@ public interface IMesh
     /// 增量接口给不出东西来。
     /// </remarks>
     Task<string?> FetchFullLogAsync(Elector peer, string revisionId, CancellationToken ct);
+
+    /// <summary>
+    /// 向某个节点要它发布的那份配置。
+    /// </summary>
+    /// <param name="peer">问谁。</param>
+    /// <param name="ct">取消。</param>
+    /// <returns>对端手上没有配置（或者拿不到、验不过）时为 <c>null</c>。</returns>
+    /// <remarks>
+    /// <para>
+    /// 请求里会带上本节点的公钥，对端据此把机密<b>现封</b>给本机 —— 所以这个调用必须由要用
+    /// 配置的那个节点自己发起，不能代劳：别人替你要来的信封你解不开。
+    /// </para>
+    /// <para>
+    /// 实现负责验正文的签名（验的是<b>原作者</b>的，不是转发者的）；要不要采用由调用方按
+    /// 版本号决定。
+    /// </para>
+    /// </remarks>
+    Task<ConfigOffer?> PullConfigAsync(Elector peer, CancellationToken ct);
 }

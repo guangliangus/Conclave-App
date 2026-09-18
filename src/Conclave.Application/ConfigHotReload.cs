@@ -26,7 +26,14 @@ public static class ConfigHotReload
     /// <returns>
     /// 改了、但<b>要重启才生效</b>的键名。空表示这次改动全部已经生效。
     /// </returns>
-    public static IReadOnlyList<string> Apply(ConclaveOptions live, ConclaveOptions fresh)
+    /// <param name="live">活着的那个单例，就地改。</param>
+    /// <param name="fresh">刚从配置链绑出来的临时实例。</param>
+    /// <param name="secrets">
+    /// mesh 送来的机密（可选）。只在配置链里那份<b>为空</b>时才拿来兜底 ——
+    /// 本机写的（环境变量、用户目录那份）永远优先，远端给的只是默认值。
+    /// </param>
+    public static IReadOnlyList<string> Apply(
+        ConclaveOptions live, ConclaveOptions fresh, SecretOverlay? secrets = null)
     {
         ArgumentNullException.ThrowIfNull(live);
         ArgumentNullException.ThrowIfNull(fresh);
@@ -63,6 +70,13 @@ public static class ConfigHotReload
         live.ClaudeUsage = fresh.ClaudeUsage;
         live.Lark = fresh.Lark;
         live.Update = fresh.Update;
+        live.ConfigSync = fresh.ConfigSync;
+
+        // 机密兜底要放在换完 Lark 之后：上面那行整块换掉了 Lark，先填会被覆盖。
+        if (live.Lark.AppSecret.Length == 0 && secrets?.LarkAppSecret is { Length: > 0 } fromMesh)
+        {
+            live.Lark.AppSecret = fromMesh;
+        }
 
         return pending;
     }

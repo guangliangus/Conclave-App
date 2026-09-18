@@ -9,14 +9,14 @@ namespace Conclave.Application;
 /// 不在每轮同步一次的话，间隔类配置改了要等重启才换节奏 —— 而那正是
 /// <see cref="ConfigHotReload"/> 想消掉的那种「改了没反应」。
 /// </remarks>
-internal static class LoopInterval
+public static class LoopInterval
 {
     /// <summary>把 <paramref name="timer"/> 的间隔调成 <paramref name="wanted"/>。</summary>
     /// <remarks>
     /// 非正的间隔直接忽略：<see cref="PeriodicTimer.Period"/> 的 setter 对 0 和负数会抛，
     /// 而配置里写错一个 0 不该把后台循环整条带倒 —— 那比不生效严重得多。
     /// </remarks>
-    internal static void Follow(PeriodicTimer timer, TimeSpan wanted)
+    public static void Follow(PeriodicTimer timer, TimeSpan wanted)
     {
         ArgumentNullException.ThrowIfNull(timer);
 

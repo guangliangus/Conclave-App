@@ -331,6 +331,7 @@ public sealed partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(ShowNodes))]
     [NotifyPropertyChangedFor(nameof(ShowNotices))]
     [NotifyPropertyChangedFor(nameof(ShowBoard))]
+    [NotifyPropertyChangedFor(nameof(ShowSettings))]
     public partial MainTab Tab { get; set; } = MainTab.Queue;
 
     /// <summary>
@@ -381,6 +382,12 @@ public sealed partial class MainViewModel : ViewModelBase
     {
         get => Tab == MainTab.Board;
         set => Select(MainTab.Board, value);
+    }
+
+    public bool ShowSettings
+    {
+        get => Tab == MainTab.Settings;
+        set => Select(MainTab.Settings, value);
     }
 
     /// <summary>
@@ -1791,9 +1798,211 @@ public sealed partial class MainViewModel : ViewModelBase
             ? peer.Id[..Math.Min(8, peer.Id.Length)]
             : Labels.ShortAccount(peer.AzIdentity);
 
+    // ── 设置页 ──────────────────────────────────────────────────────────
+    //
+    // 只写本机那份 ~/.conclave/appsettings.json。写完不用做别的：配置热更新会在几百毫秒内
+    // 把它读回来生效（见 ConfigReloadService），所以这里没有任何「应用到运行中的节点」的代码。
+
+    /// <summary>本机同时最多跑几个评审。</summary>
+    [ObservableProperty]
+    public partial string SettingMaxConcurrent { get; set; } = "1";
+
+    /// <summary>评审用哪个模型；留空 = 用机器上 claude 的默认模型。</summary>
+    [ObservableProperty]
+    public partial string SettingClaudeModel { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 模型输入框的候选项。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>是建议，不是白名单。</b> 控件用 AutoCompleteBox 而不是 ComboBox，就是为了还能手填 ——
+    /// 模型 id 的更新节奏比这个 app 发版快得多，做成封闭下拉的话，出一个新模型就得改代码
+    /// 重打包，而那时候真正想用它的人只能去手改 JSON。
+    /// </para>
+    /// <para>
+    /// 也不去问 claude「有哪些模型」：没有一条能稳定依赖的列举命令，而 <c>/usage</c> 只给
+    /// 有独立额度桶的那几个（本机能看到 Fable 就是因为它有单独的周额度），不是可选模型的全集。
+    /// 拿一个不全的列表冒充全集，比明说「这是几个常用的」更糟。
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// 下拉里选中的那一项。
+    /// </summary>
+    /// <remarks>
+    /// 真值仍然是 <see cref="SettingClaudeModel"/>，这里只负责把它显示出来、改掉。
+    /// 拆开是因为「默认」要显示成一句人话，而它的值是空串 —— 直接把空串摆在下拉里，
+    /// 看起来是一行空白。
+    /// </remarks>
+    [ObservableProperty]
+    public partial ModelChoice? PickedClaudeModel { get; set; }
+
+    partial void OnPickedClaudeModelChanged(ModelChoice? value)
+        => SettingClaudeModel = value?.Value ?? string.Empty;
+
+    /// <summary>
+    /// 模型下拉的候选项。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 只给下拉、不给输入框，所以列表外的模型在界面上是选不出来的。但<b>手改进
+    /// <c>appsettings.json</c> 的值不会被这个界面丢掉</b>：打开设置页时如果当前值不在
+    /// 列表里，会把它临时插进来显示并选中 —— 否则下拉是空的，人一点保存就把那个值抹了，
+    /// 而他只是想看一眼。
+    /// </para>
+    /// <para>
+    /// 模型 id 换得比这个 app 发版快，所以这个列表注定会过时。新模型出来之前，
+    /// 走手改 JSON 那条路仍然是通的。
+    /// </para>
+    /// </remarks>
+    public ObservableCollection<ModelChoice> ClaudeModelChoices { get; } =
+    [
+        new("默认（跟随这台机器的 claude）", string.Empty),
+        new("claude-opus-5", "claude-opus-5"),
+        new("claude-sonnet-5", "claude-sonnet-5"),
+        new("claude-fable-5-1", "claude-fable-5-1"),
+        new("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+    ];
+
+    /// <summary>只读展示：改了要重启才生效的那几项。</summary>
+    [ObservableProperty]
+    public partial string SettingsRestartOnly { get; set; } = string.Empty;
+
+    /// <summary>被集群配置盖住的键，空串表示没有。</summary>
+    [ObservableProperty]
+    public partial string SettingsOverridden { get; set; } = string.Empty;
+
+    /// <summary>保存结果，显示在按钮旁边。</summary>
+    [ObservableProperty]
+    public partial string SettingsStatus { get; set; } = string.Empty;
+
+    public bool HasSettingsOverridden => SettingsOverridden.Length > 0;
+
+    /// <summary>
+    /// 设置页能改的那几个键，同时也是「被集群盖住了没有」要查的那几个。
+    /// </summary>
+    /// <remarks>
+    /// <c>ClaudeExecutable</c> 刻意不在这里：<c>ClaudeCli</c> 自己会按「配置 → PATH →
+    /// 常见安装目录」找，多份并存时挑版本号最大的那个，绝大多数机器不需要人告诉它。
+    /// 摆一个平时没人动的输入框，只会让真正要改的两项淹在里面。要改仍然可以写进
+    /// <c>appsettings.json</c>。
+    /// </remarks>
+    private static readonly string[] EditableKeys =
+        ["MaxConcurrent", "ClaudeModel", "AutoReview", "PostToAzureDevOps"];
+
+    /// <summary>从当前<b>生效</b>的配置填一遍表单。</summary>
+    private void LoadSettings()
+    {
+        SettingMaxConcurrent = _options.MaxConcurrent.ToString(CultureInfo.InvariantCulture);
+        SettingClaudeModel = _options.ClaudeModel;
+
+        // 当前值不在候选里（多半是手改进 JSON 的新模型）就临时补一行 ——
+        // 不补的话下拉是空的，人一点保存就把那个值抹了。
+        var current = ClaudeModelChoices.FirstOrDefault(
+            c => string.Equals(c.Value, _options.ClaudeModel, StringComparison.Ordinal));
+
+        if (current is null)
+        {
+            current = new ModelChoice(_options.ClaudeModel + "（本机配置）", _options.ClaudeModel);
+            ClaudeModelChoices.Add(current);
+        }
+
+        PickedClaudeModel = current;
+        SettingsStatus = string.Empty;
+
+        SettingsRestartOnly =
+            $"mesh 端口 {_options.Mesh.HttpPort.ToString(CultureInfo.InvariantCulture)}"
+            + $" · 心跳端口 {_options.Mesh.BeaconPort.ToString(CultureInfo.InvariantCulture)}"
+            + $" · 数据目录 {_options.HomeDirectory}";
+
+        // 被集群盖住的键要说出来：meshsettings.json 在配置链里排在本机这份后面，
+        // 所以这些项在这里改了看着像没生效 —— 不标出来，人会以为保存坏了。
+        var overridden = LocalSettingsFile.OverriddenByCluster(_options, EditableKeys);
+        SettingsOverridden = overridden.Count == 0
+            ? string.Empty
+            : string.Join("、", EditableKeys.Where(overridden.Contains));
+
+        OnPropertyChanged(nameof(HasSettingsOverridden));
+    }
+
+    [RelayCommand]
+    private void SaveSettings()
+    {
+        if (!int.TryParse(SettingMaxConcurrent, CultureInfo.InvariantCulture, out var concurrent)
+            || concurrent < 1)
+        {
+            SettingsStatus = "同时评审数要是一个 ≥1 的整数";
+            return;
+        }
+
+        try
+        {
+            LocalSettingsFile.Save(
+                _options,
+                new Dictionary<string, System.Text.Json.Nodes.JsonNode?>(StringComparer.Ordinal)
+                {
+                    ["MaxConcurrent"] = System.Text.Json.Nodes.JsonValue.Create(concurrent),
+                    ["ClaudeModel"] = System.Text.Json.Nodes.JsonValue.Create(
+                        SettingClaudeModel.Trim()),
+                });
+
+            SettingsStatus = SettingsOverridden.Length > 0
+                ? "已保存。注意上面那几项正被集群配置盖着"
+                : "已保存，几秒内自动生效";
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // 人手改坏了配置文件。这时什么都没写 —— 说清楚，别让人以为保存成功了。
+            SettingsStatus = $"{LocalSettingsFile.PathIn(_options)} 不是合法 JSON，没有保存";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            SettingsStatus = "写不进配置文件：" + ex.Message;
+            _logger.LogWarning(ex, "保存本机设置失败");
+        }
+    }
+
+    partial void OnTabChanged(MainTab value)
+    {
+        if (value == MainTab.Settings)
+        {
+            LoadSettings();
+        }
+    }
+
+    /// <summary>进设置页之前停在哪一页。</summary>
+    private MainTab _tabBeforeSettings = MainTab.Queue;
+
+    /// <summary>
+    /// 顶栏齿轮：开设置页，再点一下回到刚才那一页。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 它不在页签栏里，所以必须自己负责「怎么回去」—— 页签是单选组，设置页打开时那一组
+    /// 全不选中，点哪个都能走，但人往往是想回到刚才看的那张表。记一下来路比让人重新找一遍强。
+    /// </para>
+    /// <para>
+    /// 走 <see cref="Select"/> 而不是直接赋值 <see cref="Tab"/>：那里面还要
+    /// <c>SyncLiveTimer</c>（节点页有定时刷新，切走要停）和清通知角标。
+    /// </para>
+    /// </remarks>
+    [RelayCommand]
+    private void ToggleSettings()
+    {
+        if (Tab == MainTab.Settings)
+        {
+            Select(_tabBeforeSettings, true);
+            return;
+        }
+
+        _tabBeforeSettings = Tab;
+        Select(MainTab.Settings, true);
+    }
+
     partial void OnAutoReviewChanged(bool value)
     {
         _options.AutoReview = value;
+        Persist("AutoReview", value);
         Status = value
             ? "自动评审已开启：新发现的 PR 会自动开跑"
             : "自动评审已关闭：只有手动点「评审」才会跑";
@@ -1802,12 +2011,51 @@ public sealed partial class MainViewModel : ViewModelBase
     partial void OnPostToAzureDevOpsChanged(bool value)
     {
         _options.PostToAzureDevOps = value;
+        Persist("PostToAzureDevOps", value);
         Status = value
             ? "投递已开启：公布结论时会往真实 PR 发评论并投票"
             : "投递已关闭：结论只写进本地 Acta";
     }
 
+    /// <summary>
+    /// 把顶栏那两个开关写进 <c>~/.conclave/appsettings.json</c>。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 原先它们只改内存里的 <see cref="ConclaveOptions"/>，重启就打回原形。配置热更新加进来
+    /// 之后更糟：<b>任何</b>一次配置重载（人改了文件、集群同步下来一份）都会把
+    /// <c>live.AutoReview</c> 按文件里的值重设，于是开关会在人没碰它的时候自己跳回去。
+    /// </para>
+    /// <para>
+    /// 落盘就同时解决了这两件事 —— 文件成了唯一事实，重载读回来的还是刚写进去的那个值。
+    /// </para>
+    /// </remarks>
+    private void Persist(string key, bool value)
+    {
+        try
+        {
+            LocalSettingsFile.Save(
+                _options,
+                new Dictionary<string, System.Text.Json.Nodes.JsonNode?>(StringComparer.Ordinal)
+                {
+                    [key] = System.Text.Json.Nodes.JsonValue.Create(value),
+                });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                      or System.Text.Json.JsonException)
+        {
+            // 存不下只是「重启后会变回去」，不该让一次点击弹错误。人手改坏了配置文件
+            // 也走这条 —— 那时设置页里会有更清楚的提示。
+            _logger.LogWarning(ex, "{Key} 存不进本机配置", key);
+        }
+    }
+
 }
+
+/// <summary>模型下拉里的一项：显示成什么、实际值是什么。</summary>
+/// <param name="Label">下拉里显示的文字。</param>
+/// <param name="Value">写进配置的值；空串表示不指定 <c>--model</c>。</param>
+public sealed record ModelChoice(string Label, string Value);
 
 /// <summary>主窗口下半区六张平级的表。</summary>
 public enum MainTab
@@ -1832,4 +2080,7 @@ public enum MainTab
 
     /// <summary>评审积分排行榜。</summary>
     Board,
+
+    /// <summary>本机设置。</summary>
+    Settings,
 }
