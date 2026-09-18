@@ -93,17 +93,31 @@ public sealed class ReviewLogArchiveTests : IDisposable
         Assert.True(File.Exists(_home.Archive.LivePathOf("3000@ffffffff")));
     }
 
+    /// <summary>
+    /// 按最后写入时间判，不是创建时间。
+    /// </summary>
+    /// <remarks>
+    /// 一次评审能跑 45 分钟，而保留期跨过去的那一刻要是按创建时间算，正在写的那份会被删掉。
+    /// <para>
+    /// 两个时间都显式设：Linux 上 <c>File.SetCreationTimeUtc</c> 会<b>连带改掉最后
+    /// 写入时间</b>（Unix 没有设 birth time 的系统调用，.NET 退回去动 mtime），只设创建时间
+    /// 的话这条测试在 Linux 上测的就不再是它想测的东西 —— 文件真的变成三天前写的，被正常
+    /// 清掉，然后断言失败。macOS 的 APFS 有独立 birthtime，所以本地看不出来，CI 上才炸。
+    /// 顺序也不能反。
+    /// </para>
+    /// </remarks>
     [Fact]
     public void A_long_running_review_is_not_swept_out_from_under_itself()
     {
-        // 按最后写入时间判，不是创建时间：一次评审能跑 45 分钟，而保留期跨过去的那一刻
-        // 要是按创建时间算，正在写的那份会被删掉。
         _home.Archive.Append(Rev, "开始");
-        File.SetCreationTimeUtc(_home.Archive.LivePathOf(Rev), DateTime.UtcNow - TimeSpan.FromDays(3));
+
+        var path = _home.Archive.LivePathOf(Rev);
+        File.SetCreationTimeUtc(path, DateTime.UtcNow - TimeSpan.FromDays(3));
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
 
         _home.Archive.Sweep();
 
-        Assert.True(File.Exists(_home.Archive.LivePathOf(Rev)));
+        Assert.True(File.Exists(path));
     }
 
     [Fact]
