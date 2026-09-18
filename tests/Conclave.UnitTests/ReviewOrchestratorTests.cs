@@ -988,16 +988,16 @@ public class ReviewOrchestratorTests
     }
 
     /// <summary>
-    /// 三轮全挂之后公布的那条 Error 结论，不该私聊作者。
+    /// 执行失败也要通知作者。
     /// </summary>
     /// <remarks>
-    /// 「评审没跑出结论」是这边的运维问题，对作者没有可行动信息 —— 投递回 PR 那条路早就
-    /// 按这个理由拦住了（<c>deliverable</c>），而通知曾经是无条件发的。两个出口对同一件事
-    /// 给出相反的判断，且两边都不报错：作者收到「评审结论：执行失败」，回到 PR 上却什么
-    /// 都没有，只能来问「我要改什么」——而答案是「你什么都不用改」。
+    /// 这条曾经反过来 —— 理由是「执行失败对作者没有可行动信息」。那句话没错，但它忽略了
+    /// 作者在<b>等</b>：不通知的话他等到的是一片安静，分不出「还没轮到我」和「评过了但挂了」。
+    /// 所以拦的不该是通知而是措辞，正文里直说「不是你代码的问题」，见
+    /// <c>LarkNotifier.RenderText</c>。投递回 PR 那条仍然拦着：那是往公共位置写。
     /// </remarks>
     [Fact]
-    public async Task A_failed_review_is_not_pushed_to_the_author()
+    public async Task A_failed_review_still_reaches_the_author()
     {
         using var h = new Harness();
         h.Options.AutoReview = true;
@@ -1011,7 +1011,12 @@ public class ReviewOrchestratorTests
 
         var state = await h.StateOfAsync(rev);
         Assert.Equal(ReviewDecision.Error, state.Promulgation!.Decision);
-        Assert.Empty(h.Notifier.Sent);
+
+        var sent = Assert.Single(h.Notifier.Sent);
+        Assert.Equal(ReviewDecision.Error, sent.Result.Decision);
+
+        // 但不投递回 PR —— 那是往公共位置写，跟私聊作者不是一回事。
+        Assert.Empty(h.PrSource.Posted);
     }
 
     /// <summary>
@@ -1036,5 +1041,51 @@ public class ReviewOrchestratorTests
         var sent = Assert.Single(h.Notifier.Sent);
         Assert.Equal(Author, sent.Pr.Author);
         Assert.Equal(ReviewDecision.Reject, sent.Result.Decision);
+    }
+    /// <summary>
+    /// 评审跑到一半 PR 被合/被撤，就地掐断，而且<b>不出票</b>。
+    /// </summary>
+    /// <remarks>
+    /// 出一张 Error 票会让这一轮算作「烧掉了」，席位让给下一个节点重试 —— 为一个已经不存在
+    /// 的 PR 再烧一轮，正好是这个功能要省下来的那部分。
+    /// </remarks>
+    [Fact]
+    public async Task A_review_stops_when_the_pr_is_closed_midway()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.PrStatusCheckInterval = TimeSpan.FromMilliseconds(20);
+
+        // 评审挂住不返回，同时 ADO 那边这个 PR 已经不是 active —— 就是「跑了一半 PR 没了」。
+        var pr = Pr();
+        h.PrSource.ClosedPrIds.Add(pr.PrId);
+        h.Runner.Gate = new TaskCompletionSource();
+
+        var rev = await h.ReportAsync(pr);
+        await h.TickAsync();
+
+        var state = await h.StateOfAsync(rev);
+        Assert.Empty(state.Ballots);
+        Assert.Null(state.Promulgation);
+    }
+
+    /// <summary>
+    /// PR 还活着就别乱掐。
+    /// </summary>
+    /// <remarks>
+    /// 这一条挡的是「问不出来就当死了」那种写法：az 抖一下、发现节点掉个线，都不该让
+    /// 正在跑的评审白烧半小时然后一无所获。
+    /// </remarks>
+    [Fact]
+    public async Task An_active_pr_is_reviewed_to_the_end()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.PrStatusCheckInterval = TimeSpan.FromMilliseconds(20);
+
+        var rev = await h.ReportAsync(Pr());
+        await h.TickAsync();
+
+        Assert.Single((await h.StateOfAsync(rev)).Ballots);
     }
 }

@@ -6,6 +6,15 @@ namespace Conclave.UnitTests;
 
 internal sealed class FakePrSource : IPrSource
 {
+    /// <summary>塞进来的 PR 号，在 ADO 上就当它已经不是 active 了。</summary>
+    internal HashSet<int> ClosedPrIds { get; } = [];
+
+    public Task<bool> IsStillActiveAsync(PrMeta pr, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        return Task.FromResult(!ClosedPrIds.Contains(pr.PrId));
+    }
+
     /// <summary>project → 该 project 下的活跃 PR。</summary>
     internal Dictionary<string, List<PrMeta>> Active { get; } = new(StringComparer.Ordinal);
 

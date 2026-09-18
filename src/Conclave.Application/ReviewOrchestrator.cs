@@ -703,6 +703,11 @@ public sealed class ReviewOrchestrator : BackgroundService
         _ = Task.Run(async () =>
         {
             var acquired = false;
+
+            // PR 被合 / 被撤时掐断这次评审。声明在 try 外面：catch 里要靠它分辨
+            // 「是被掐断的」还是「真失败了」，而这两者的收尾完全不同。
+            using var prClosed = new CancellationTokenSource();
+
             try
             {
                 await _slots.WaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -731,9 +736,22 @@ public sealed class ReviewOrchestrator : BackgroundService
 
                 using var timeout = new CancellationTokenSource(_options.ReviewTimeout);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-                    timeout.Token, _stopping.Token);
+                    timeout.Token, _stopping.Token, prClosed.Token);
 
-                var ballot = await _runner.RunAsync(revision, pr, round, linked.Token).ConfigureAwait(false);
+                // 看门狗跟评审同生共死：评审一结束就把它叫停，不然它会一直问下去。
+                using var watchdogStop = new CancellationTokenSource();
+                var watchdog = WatchPrAsync(pr, revision, prClosed, watchdogStop.Token);
+
+                BallotPayload ballot;
+                try
+                {
+                    ballot = await _runner.RunAsync(revision, pr, round, linked.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    await watchdogStop.CancelAsync().ConfigureAwait(false);
+                    await watchdog.ConfigureAwait(false);
+                }
 
                 // 把人读的评审者身份盖在票上：审计问的是「谁」，ElectorId 只是公钥指纹。
                 // 由评审者自己在签名范围内声明，所以不可否认。
@@ -779,6 +797,23 @@ public sealed class ReviewOrchestrator : BackgroundService
             }
             catch (Exception ex)
             {
+                // PR 关了/撤了导致的中止：<b>不出票</b>。
+                //
+                // 出一张 Error 票会让这一轮算作「烧掉了」，于是席位让给下一个节点重试 ——
+                // 为一个已经不存在的 PR 再烧一轮，正好是这个功能要省下来的那部分。
+                // 队列项本来也会随发现循环消失，所以这里安静收手就够了。
+                if (prClosed.IsCancellationRequested)
+                {
+                    _logger.LogInformation(
+                        "PR {PrId} 已不是 active，{Revision} round={Round} 中止，不出票",
+                        pr.PrId, revision.Id, round);
+                    _state.Notify(
+                        NoticeKind.Info,
+                        $"PR #{pr.PrId} 已关闭，评审中止",
+                        $"{pr.Repo}「{pr.Title}」· 没有出票，这一版不会再评");
+                    return;
+                }
+
                 // 失败也要出票：链上留痕，且计入 quorum 分母，否则这个 PR 会永远等下去。
                 //
                 // 停机取消跟真失败分开记。两者对 quorum 的作用一样（都让出这一轮），
@@ -832,6 +867,57 @@ public sealed class ReviewOrchestrator : BackgroundService
                 completion.SetResult();
             }
         });
+    }
+
+    /// <summary>
+    /// 评审跑着的时候盯住 PR 还是不是 active，被合/被撤就掐断。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 判据只认 ADO（<see cref="IPrSource.IsStillActiveAsync"/>），<b>不</b>看队列项还在不在：
+    /// 发现节点临时掉线、心跳过期，队列项一样会消失，拿它当判据就是误杀，
+    /// 而误杀的代价是白烧一整轮。
+    /// </para>
+    /// <para>
+    /// 问不出来当作还活着（那条规则在端口上），所以 az 抖一下不会掐掉正在跑的评审。
+    /// </para>
+    /// </remarks>
+    private async Task WatchPrAsync(
+        PrMeta pr, Revision revision, CancellationTokenSource closed, CancellationToken ct)
+    {
+        if (_options.PrStatusCheckInterval <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        try
+        {
+            using var timer = new PeriodicTimer(_options.PrStatusCheckInterval);
+
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                LoopInterval.Follow(timer, _options.PrStatusCheckInterval);
+
+                if (await _prSource.IsStillActiveAsync(pr, ct).ConfigureAwait(false))
+                {
+                    continue;
+                }
+
+                _logger.LogInformation(
+                    "PR {PrId} 在评审途中不再是 active，掐断 {Revision}", pr.PrId, revision.Id);
+                await closed.CancelAsync().ConfigureAwait(false);
+                return;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 评审正常结束，叫停看门狗走的就是这条。
+        }
+        catch (Exception ex)
+        {
+            // 看门狗自己挂了不能连累评审 —— 它只是个省额度的优化。
+            _logger.LogWarning(ex, "盯 PR {PrId} 状态的看门狗出错，评审继续", pr.PrId);
+        }
     }
 
     /// <summary>等当前所有在跑的评审收尾。</summary>
@@ -970,24 +1056,26 @@ public sealed class ReviewOrchestrator : BackgroundService
             revision.Id, merged.Decision, merged.Findings.Count,
             merged.ActualQuorum, merged.ExpectedQuorum, merged.Degraded ? "，降级" : string.Empty);
 
-        // 执行失败不通知作者，理由跟上面不投递到 PR 完全一样：「评审没跑出结论」是这边的
-        // 运维问题，对作者没有任何可行动信息。他收到一条「评审结论：执行失败」只会来问
-        // 「我要改什么」，而答案是「你什么都不用改」。
+        // 成功和失败都通知。
         //
-        // 该看到它的是运维：本机的 NoticeKind.Bad 和上面那条日志已经把它摆在面板上了。
-        if (deliverable)
+        // 失败那条曾经被拦掉过，理由是「执行失败对作者没有可行动信息」—— 那句话本身没错，
+        // 但它忽略了更要紧的一件事：作者在<b>等</b>。不通知的话，他等到的是一片安静，
+        // 分不出「还没轮到我」和「评过了但挂了」，只能自己去猜或者来问。
+        // 一条说明白的失败通知，比一片安静强。
+        //
+        // 所以拦的不是通知，是措辞 —— 正文里会写清「这是我们这边没跑出来，不是你代码的问题」，
+        // 见 LarkNotifier.RenderText。投递回 PR 那条仍然按 deliverable 拦着：
+        // 那是往公共位置写，跟私聊作者不是一回事。
+        try
         {
-            try
-            {
-                await _notifier
-                    .NotifyPromulgationAsync(pr, merged with { ThreadId = threadId }, ct)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // 跟投递失败同样处理：结论已经在链上，通知补发的成本远低于让编排循环带着异常退出。
-                _logger.LogError(ex, "通知 {Revision} 的作者失败，结论已公布", revision.Id);
-            }
+            await _notifier
+                .NotifyPromulgationAsync(pr, merged with { ThreadId = threadId }, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 跟投递失败同样处理：结论已经在链上，通知补发的成本远低于让编排循环带着异常退出。
+            _logger.LogError(ex, "通知 {Revision} 的作者失败，结论已公布", revision.Id);
         }
     }
 

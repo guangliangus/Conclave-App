@@ -192,6 +192,40 @@ public sealed class AzCliPrSource(
         }
     }
 
+    public async Task<bool> IsStillActiveAsync(PrMeta pr, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+
+        try
+        {
+            // 只要 status 一个字段，不要整个 PR：这条在评审跑着的时候每分钟打一次。
+            var status = await AzAsync(
+                [
+                    "repos", "pr", "show",
+                    "--id", pr.PrId.ToString(CultureInfo.InvariantCulture),
+                    "--query", "status", "-o", "tsv",
+                ],
+                ct).ConfigureAwait(false);
+
+            var trimmed = status.Trim();
+
+            // 空输出当作「还活着」：它跟 az 报错是同一类情况 —— 什么都没问出来。
+            if (trimmed.Length == 0)
+            {
+                return true;
+            }
+
+            return string.Equals(trimmed, "active", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JsonException)
+        {
+            // 问不出来一律当作还活着。az 偶发失败、网络抖动、token 过期都跟 PR 状态无关，
+            // 返回 false 等于「一断网就把所有在跑的评审掐了」—— 那比多跑一次糟得多。
+            logger.LogDebug(ex, "问不到 PR {PrId} 的状态，当作仍然活跃", pr.PrId);
+            return true;
+        }
+    }
+
     private static PrMeta? ParsePr(JsonElement e)
     {
         if (!e.TryGetProperty("pullRequestId", out var idProp))

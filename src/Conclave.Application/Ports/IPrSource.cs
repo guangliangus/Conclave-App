@@ -80,6 +80,30 @@ public interface IPrSource
     Task<string> GetCloneUrlAsync(PrMeta pr, CancellationToken ct);
 
     /// <summary>
+    /// 这个 PR 在 Azure DevOps 上还是 active 吗。
+    /// </summary>
+    /// <returns>
+    /// 还活着为 <c>true</c>。<b>问不出来时也返回 <c>true</c></b> —— 见下。
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// 给「评审跑到一半 PR 被合了 / 被撤了」用：那种情况下继续跑纯属白烧额度，
+    /// 一次评审能跑 45 分钟。
+    /// </para>
+    /// <para>
+    /// <b>为什么不看队列项有没有消失。</b> 队列是各节点上报的并集，发现节点临时掉线、
+    /// 心跳窗口过期，队列项同样会消失 —— 拿它当判据会把好端端的评审误杀掉，
+    /// 而误杀的代价是白烧一整轮。所以只认 ADO 这一个事实来源。
+    /// </para>
+    /// <para>
+    /// <b>问不出来必须当作「还活着」。</b> az 偶发失败、网络抖动、token 过期都会让这个调用
+    /// 失败，而那些跟 PR 的状态毫无关系。返回 false 就等于「一断网就把所有在跑的评审掐了」。
+    /// 宁可多跑一次，不要误杀。
+    /// </para>
+    /// </remarks>
+    Task<bool> IsStillActiveAsync(PrMeta pr, CancellationToken ct);
+
+    /// <summary>
     /// 组织（collection）地址，形如 <c>https://host/Collection</c>；读不到时返回空串。
     /// </summary>
     /// <remarks>

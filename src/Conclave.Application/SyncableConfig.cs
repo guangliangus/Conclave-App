@@ -34,6 +34,7 @@ public static class SyncableConfig
     private static readonly string[] Scalars =
     [
         "PollInterval", "OrchestratorInterval", "SeatingTimeout", "ReviewTimeout", "CheckoutTimeout",
+        "PrStatusCheckInterval",
         "LogRetention", "MaxConcurrent", "DiscoveryConcurrency", "FetchDepth",
         "ProjectAllowList", "ProjectDenyList", "ExcludedProjectSuffixes",
         "AllowSelfReview", "MaxReviewAttempts", "RetryOnSameNode", "StickyReviewer",
@@ -103,6 +104,7 @@ public static class SyncableConfig
             ["SeatingTimeout"] = options.SeatingTimeout.ToString(),
             ["ReviewTimeout"] = options.ReviewTimeout.ToString(),
             ["CheckoutTimeout"] = options.CheckoutTimeout.ToString(),
+            ["PrStatusCheckInterval"] = options.PrStatusCheckInterval.ToString(),
             ["LogRetention"] = options.LogRetention.ToString(),
             ["MaxConcurrent"] = options.MaxConcurrent,
             ["DiscoveryConcurrency"] = options.DiscoveryConcurrency,

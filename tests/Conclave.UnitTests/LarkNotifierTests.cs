@@ -270,6 +270,28 @@ public sealed class LarkNotifierTests
         Assert.DoesNotContain("contact:user.id:readonly", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// 执行失败的正文要直说「不是你的问题」。
+    /// </summary>
+    /// <remarks>
+    /// 作者拿到它时想知道的是「我要改什么」，而答案是「什么都不用改」—— 不直说的话，
+    /// 他会去读 0 票、降级那些字眼然后自己脑补一个结论。也不能列 finding：失败的票本来
+    /// 就没有 finding，「0 条问题」在这个语境下读起来像「评过了，没问题」。
+    /// </remarks>
+    [Fact]
+    public void A_failed_verdict_says_it_is_not_the_authors_fault()
+    {
+        var text = LarkNotifier.RenderText(
+            Pr(),
+            new PromulgationPayload(
+                "liontrip-order/2954@bdcc84b", ReviewDecision.Error, [],
+                Degraded: true, ActualQuorum: 0, ExpectedQuorum: 1));
+
+        Assert.Contains("不是你代码的问题", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("条问题", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("降级", text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void The_body_carries_the_decision_the_counts_and_a_link_to_the_pr()
     {
