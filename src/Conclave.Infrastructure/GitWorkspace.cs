@@ -246,11 +246,7 @@ public sealed class GitWorkspaceFactory
             "PR {PrId} 的分支在深度 {Depth} 内没有共同祖先，加深到 {Deeper}",
             pr.PrId, _options.FetchDepth, deeper);
 
-        await GitAsync(
-            dir,
-            ["fetch", "--quiet", "--no-tags", "--deepen=" + deeper.ToString(CultureInfo.InvariantCulture),
-             "origin", pr.SourceBranch, pr.TargetBranch],
-            ct).ConfigureAwait(false);
+        await GitAsync(dir, DeepenArgs(deeper, pr), ct).ConfigureAwait(false);
 
         if (await HasMergeBaseAsync(dir, pr, ct).ConfigureAwait(false))
         {
@@ -269,6 +265,39 @@ public sealed class GitWorkspaceFactory
                 $"PR {pr.PrId} 的 {pr.SourceBranch} 与 {pr.TargetBranch} 即使在全量历史下也没有共同祖先，"
                 + "三点 diff 无法成立，拒绝在错误的 diff 上评审");
         }
+    }
+
+    /// <summary>
+    /// 加深到绝对深度 <paramref name="depth"/> 的 fetch 参数。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>必须是 <c>--depth</c>（绝对深度），不能是 <c>--deepen</c>（在现有边界上再加）。</b>
+    /// 相对加深要服务端广播 <c>deepen-relative</c>，而这里面对的 Azure DevOps Server 是协议 v0，
+    /// 能力串只有 <c>multi_ack thin-pack side-band side-band-64k no-progress multi_ack_detailed
+    /// no-done shallow allow-tip-sha1-in-want</c>。客户端一看没这项就直接
+    /// <c>fatal: Server does not support --deepen</c>，请求都不发。
+    /// </para>
+    /// <para>
+    /// 而 <see cref="GitAsync"/> 非零退出即抛 —— 于是下一级的 <c>--unshallow</c> 兜底永远执行不到，
+    /// 本该救回来的评审变成一张 Error 票，还要按 <c>MaxReviewAttempts</c> 把整个拉取重试几遍。
+    /// 三级台阶实际只有一级半。
+    /// </para>
+    /// <para>
+    /// 用本地 <c>file://</c> 测照不出来：本地 git 是新版，这两项能力都有 —— 这也是它活到现在的原因。
+    /// <c>--shallow-since</c> 同理（要 <c>deepen-since</c>，这台同样没有），一并别用。
+    /// </para>
+    /// </remarks>
+    internal static IReadOnlyList<string> DeepenArgs(int depth, PrMeta pr)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+
+        return
+        [
+            "fetch", "--quiet", "--no-tags",
+            "--depth=" + depth.ToString(CultureInfo.InvariantCulture),
+            "origin", pr.SourceBranch, pr.TargetBranch,
+        ];
     }
 
     private async Task<bool> HasMergeBaseAsync(string dir, PrMeta pr, CancellationToken ct)
