@@ -49,9 +49,14 @@ public sealed class ClaudeReviewRunner(
     GitWorkspaceFactory workspaces,
     ClaudeCli claudeCli,
     ReviewProgressLog progress,
+    ReviewSkillDeployer skills,
     ConclaveOptions options,
     ILogger<ClaudeReviewRunner> logger) : IReviewRunner
 {
+    /// <summary>随包分发的评审 skill 铺在哪；铺不出来是 <c>null</c>。</summary>
+    /// <remarks>本类是单例，所以这行等于「进程起来时铺一次」。</remarks>
+    private readonly string? _pluginDirectory = skills.Deploy();
+
     /// <summary>
     /// <see cref="FailureReason"/> 愿意拿去解 JSON 的最大长度。
     /// </summary>
@@ -128,8 +133,10 @@ public sealed class ClaudeReviewRunner(
             "--output-format", "stream-json",
             "--verbose",
             "--session-id", sessionId.ToString(),
-            "--allowedTools", "Bash", "Read", "Grep", "Glob",
         };
+
+        args.AddRange(SandboxArgs(_pluginDirectory));
+        args.AddRange(["--allowedTools", "Bash", "Read", "Grep", "Glob"]);
 
         // 留空就不给这个参数 —— 那时用的是机器上 claude 自己的默认模型，
         // 也就是这个选项加进来之前的行为。
@@ -537,6 +544,51 @@ public sealed class ClaudeReviewRunner(
     /// 和 skill 的第 7 步得一起改。
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// 把评审子进程关进工作区的那几个参数。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 不加这些的时候，子进程能读整个文件系统：实测让它 <c>Glob</c> 一下
+    /// <c>/Users/&lt;人&gt;</c> 会命中一万九千多个文件，macOS 还会因此弹出
+    /// 「Conclave.app 想访问你的媒体资料库」——TCC 按<b>责任进程</b>归因，
+    /// 子进程碰到什么，弹窗上写的都是启动它的那个 app。
+    /// </para>
+    /// <para>
+    /// <c>--restricted</c> 一次解决三件事：忽略 user/project/local 设置文件（于是本机
+    /// 全局 allowlist 里的放行规则漏不进评审）、把文件工具限制在工作目录内、拒绝
+    /// bypassPermissions。代价是它连 <c>~/.claude/skills</c> 里的 skill 也一并屏蔽，
+    /// 所以 skill 必须走 <c>--plugin-dir</c> 自带一份（见 <see cref="ReviewSkillDeployer"/>）。
+    /// </para>
+    /// <para>
+    /// <c>--add-dir</c> 指向同一个目录是<b>必需</b>的，不是冗余：<c>--plugin-dir</c> 只管装载，
+    /// 而 skill 正文会让 claude 去 <c>Read</c> 自己的 <c>references/go.md</c>、
+    /// <c>references/react-ts.md</c>（按改动文件的语言选评审视角）。少了 <c>--add-dir</c>，
+    /// skill 装得上但读不了自己的参考资料，评审会在选视角那步瞎掉。
+    /// </para>
+    /// <para>
+    /// <b>Bash 仍然不受目录限制</b>，这是刻意的：<c>az_pr.sh</c> 就在工作区外。
+    /// 所以这套挡的是无意越界（宽 glob、顺手读到家目录），挡不住蓄意的
+    /// <c>cat ~/…</c>。要连这个一起挡得给 Bash 上限定符（<c>Bash(git *)</c> 之类），
+    /// 而那会让评审该跑的测试和 linter 跑不了 —— 那比权限宽一点更糟。
+    /// </para>
+    /// <para>
+    /// 铺不出 skill 时<b>整套都不加</b>，退回改造之前的行为：宁可少一层隔离，
+    /// 也不能让评审因为拿不到 <c>/az-pr-review</c> 而整个失效。
+    /// </para>
+    /// </remarks>
+    internal static IReadOnlyList<string> SandboxArgs(string? pluginDirectory)
+        => string.IsNullOrWhiteSpace(pluginDirectory)
+            ? []
+            : [
+                "--restricted",
+                "--strict-mcp-config",
+                "--permission-prompts", "none",
+                "--tools", "Bash,Read,Grep,Glob",
+                "--plugin-dir", pluginDirectory,
+                "--add-dir", pluginDirectory,
+            ];
+
     internal static string CollectPrompt(PrMeta pr)
     {
         ArgumentNullException.ThrowIfNull(pr);

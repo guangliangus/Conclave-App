@@ -15,6 +15,22 @@ public sealed class ConclaveOptions
     public string KeyPath => Path.Combine(HomeDirectory, "elector.key");
 
     /// <summary>
+    /// 评审 skill 的落地目录，也就是传给 <c>claude --plugin-dir</c> 的那个路径。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 内容由 <c>ReviewSkillDeployer</c> 每次启动从安装包里铺出来，所以这里<b>不是</b>
+    /// 人手工维护的目录 —— 手改会在下次启动被覆盖。
+    /// </para>
+    /// <para>
+    /// 刻意不直接把 <c>--plugin-dir</c> 指向 app bundle 里那份：更新时
+    /// <c>MacUpdateInstaller</c> 会整个换掉 <c>.app</c>，正在跑的评审会被抽走脚本；
+    /// 而且 <c>dotnet run</c> 起的开发进程根本不在任何 bundle 里。铺到这儿两边都成立。
+    /// </para>
+    /// </remarks>
+    public string SkillsDirectory => Path.Combine(HomeDirectory, "skills");
+
+    /// <summary>
     /// 临时工作区的根目录。每次评审在它下面开一个子目录，评完即删。
     /// </summary>
     /// <remarks>
