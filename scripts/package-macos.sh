@@ -35,6 +35,19 @@ echo "==> 组装 bundle"
 # 整个发布目录都进去：运行时、原生库、appsettings.json 一个不能少
 cp -R dist/publish/. "${APP}/Contents/MacOS/"
 
+# 评审 skill 挪去 Resources。它不能留在 Contents/MacOS 旁边：codesign --deep
+# 会把 review-plugin/.claude-plugin 这个点目录当成嵌套 bundle 去签，报
+#   bundle format unrecognized, invalid, or unsuitable
+#   In subcomponent: .../Contents/MacOS/review-plugin/.claude-plugin
+# 整个打包就挂在这一步（实测最小复现：同一棵树放 Resources 下签名与验签都过，
+# 放 MacOS 下两样都失败）。ReviewSkillDeployer 两个位置都会找。
+if [ -d "${APP}/Contents/MacOS/review-plugin" ]; then
+  mv "${APP}/Contents/MacOS/review-plugin" "${APP}/Contents/Resources/review-plugin"
+else
+  echo "!! dist/publish 里没有 review-plugin —— 评审会拿不到 /az-pr-review" >&2
+  exit 1
+fi
+
 echo "==> 生成 .icns"
 ICONSET=dist/Conclave.iconset
 mkdir -p "${ICONSET}"

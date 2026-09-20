@@ -38,12 +38,15 @@ public sealed class ReviewSkillDeployer(ConclaveOptions options, ILogger<ReviewS
     /// </summary>
     public string? Deploy()
     {
-        var source = Path.Combine(AppContext.BaseDirectory, BundledDirectoryName);
-        if (!File.Exists(Path.Combine(source, ManifestRelativePath)))
+        var candidates = CandidateSources().ToArray();
+        var source = Array.Find(
+            candidates, c => File.Exists(Path.Combine(c, ManifestRelativePath)));
+
+        if (source is null)
         {
             logger.LogWarning(
-                "安装包里没有评审 skill（{Source} 下缺 {Manifest}），评审将拿不到 /az-pr-review",
-                source, ManifestRelativePath);
+                "安装包里没有评审 skill（找过 {Candidates}，都缺 {Manifest}），评审将拿不到 /az-pr-review",
+                string.Join("、", candidates), ManifestRelativePath);
             return null;
         }
 
@@ -67,6 +70,36 @@ public sealed class ReviewSkillDeployer(ConclaveOptions options, ILogger<ReviewS
             logger.LogError(ex, "铺评审 skill 到 {Target} 失败，评审将拿不到 /az-pr-review", target);
             return null;
         }
+    }
+
+    /// <summary>
+    /// 按顺序找随包那份 plugin 可能在的位置。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 两处而不是一处，是因为<b>签名不允许它待在可执行文件旁边</b>。
+    /// <c>Contents/MacOS/</c> 底下出现 <c>review-plugin/.claude-plugin</c> 时，
+    /// <c>codesign --deep</c> 会把那个点目录当成嵌套 bundle 去签，报
+    /// <c>bundle format unrecognized, invalid, or unsuitable</c> 然后整个打包失败
+    /// （实测最小复现：同一棵树放 <c>Contents/Resources</c> 下签名与验签都通过，
+    /// 放 <c>Contents/MacOS</c> 下两样都失败）。所以 <c>package-macos.sh</c> 组完
+    /// bundle 会把它挪进 <c>Contents/Resources</c>。
+    /// </para>
+    /// <para>
+    /// 而 <c>dotnet run</c> 和裸 <c>dotnet publish</c> 的产物里没有 <c>Resources</c>
+    /// 这一层，plugin 就在可执行文件旁边。两种都要能找到。
+    /// </para>
+    /// </remarks>
+    private static IEnumerable<string> CandidateSources()
+    {
+        var baseDirectory = AppContext.BaseDirectory;
+
+        // 开发模式 / publish 产物。
+        yield return Path.Combine(baseDirectory, BundledDirectoryName);
+
+        // 装好的 .app：BaseDirectory 是 Contents/MacOS。
+        yield return Path.GetFullPath(
+            Path.Combine(baseDirectory, "..", "Resources", BundledDirectoryName));
     }
 
     /// <summary>
