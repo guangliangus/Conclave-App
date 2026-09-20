@@ -98,6 +98,25 @@ public sealed class GitWorkspaceTests : IDisposable
         Assert.Equal(["feature.txt"], changed.Select(l => l.Trim()).ToArray());
     }
 
+    /// <summary>
+    /// 加深必须要绝对深度，不能用相对的 <c>--deepen</c>。
+    /// </summary>
+    /// <remarks>
+    /// 行为测试照不出这条：上面那些用的是本地 <c>file://</c>，本地 git 支持
+    /// <c>deepen-relative</c>，而生产上的 Azure DevOps Server（协议 v0）不支持，
+    /// 会在握手阶段 <c>fatal: Server does not support --deepen</c>，把后面
+    /// <c>--unshallow</c> 那级兜底整个掐掉。所以这里直接钉参数本身。
+    /// </remarks>
+    [Fact]
+    public void Deepening_asks_for_an_absolute_depth_because_the_server_has_no_deepen_relative()
+    {
+        var args = GitWorkspaceFactory.DeepenArgs(200, Pr("feature", "develop"));
+
+        Assert.Contains("--depth=200", args);
+        Assert.DoesNotContain(args, a => a.StartsWith("--deepen", StringComparison.Ordinal));
+        Assert.DoesNotContain(args, a => a.StartsWith("--shallow-since", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Disposing_the_workspace_deletes_it()
     {
