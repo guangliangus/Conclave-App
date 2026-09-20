@@ -225,6 +225,32 @@ public sealed class LarkNotifierTests
         Assert.Single(stub.Calls, c => c.Path.Contains("tenant_access_token", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// 缓存窗口不能超过 token 自己的剩余寿命。
+    /// </summary>
+    /// <remarks>
+    /// <c>expire</c> 是剩余寿命而不是固定 7200（实测见过 2106），所以小读数是可达的。
+    /// 用 0 而不是 5 这类小正数来钉：没有可注入的时钟，只有「压根不该进缓存」这个边界
+    /// 能不靠 sleep 就观测到 —— 改坏了的话后面几次都复用那枚 token，这里就只剩一次换取。
+    /// 期望 3 次：查 open_id 一次、两次发送，三个请求都要授权，各自都得现换。
+    /// </remarks>
+    [Fact]
+    public async Task A_token_with_no_life_left_is_not_served_from_the_cache()
+    {
+        using var stub = new Stub(path => path.Contains("tenant_access_token", StringComparison.Ordinal)
+            ? """{"code":0,"msg":"ok","tenant_access_token":"t-abc","expire":0}"""
+            : HappyPath(path));
+
+        using var notifier = new LarkNotifier(Options(), NullLogger<LarkNotifier>.Instance, stub);
+
+        await notifier.NotifyPromulgationAsync(Pr(), Result(), CancellationToken.None);
+        await notifier.NotifyPromulgationAsync(Pr(), Result(), CancellationToken.None);
+
+        Assert.Equal(
+            3,
+            stub.Calls.Count(c => c.Path.Contains("tenant_access_token", StringComparison.Ordinal)));
+    }
+
     /// <summary>飞书用非 0 code 表示失败，HTTP 状态可能仍是 200 —— 不能当成发送成功。</summary>
     [Fact]
     public async Task A_non_zero_code_on_the_send_is_surfaced_as_a_failure()

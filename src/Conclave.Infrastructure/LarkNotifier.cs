@@ -291,8 +291,16 @@ public sealed class LarkNotifier : INotifier, IDisposable
     /// <c>tenant_access_token</c>，带缓存。
     /// </summary>
     /// <remarks>
+    /// <para>
     /// 提前 5 分钟作废：飞书给的有效期是 2 小时，卡着边界用会偶发 99991663，
     /// 而那种偶发失败在「一天几条通知」的频率下极难复现。
+    /// </para>
+    /// <para>
+    /// 但 <c>expire</c> 是这枚 token 的<b>剩余</b>寿命，不是每次都发一枚满 7200 的新的 ——
+    /// 反复换拿回的往往是同一枚，读数一路倒数（实测见过 2106）。所以窗口还要再夹一次
+    /// <c>Math.Min(expire, …)</c>：<c>expire</c> 小于 60 时，单靠 <c>Math.Max(60, …)</c>
+    /// 的下限会把一枚已经死掉的 token 继续用满一分钟，撞上的正是这里想躲的 99991663。
+    /// </para>
     /// </remarks>
     private async Task<string> TokenAsync(CancellationToken ct)
     {
@@ -330,7 +338,8 @@ public sealed class LarkNotifier : INotifier, IDisposable
                 var expire = doc.RootElement.TryGetProperty("expire", out var e)
                     && e.ValueKind == JsonValueKind.Number ? e.GetInt32() : 7200;
 
-                _tokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, expire - 300));
+                _tokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(
+                    Math.Min(expire, Math.Max(60, expire - 300)));
                 _tokenFor = credentials;
             }
 
