@@ -16,6 +16,14 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets/**" />
     <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+
+    <!--
+      评审 skill 随包分发。评审子进程用 plugin-dir 参数装载它（见 ReviewSkillDeployer），
+      于是任何节点都能评审，不必事先往 ~/.claude/skills 里铺东西；skill 的版本也就跟
+      app 的版本绑死了 —— 出票契约（回复末尾那个 json 围栏）同时写在 skill 和
+      ClaudeReviewRunner.CollectPrompt 里，两边漂移会静默出错。
+    -->
+    <None Include="review-plugin/**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

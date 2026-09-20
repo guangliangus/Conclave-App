@@ -123,6 +123,7 @@ public static class ConclaveServiceCollectionExtensions
             archive.Sweep();
             return new ReviewProgressLog(archive);
         });
+        _ = services.AddSingleton<ReviewSkillDeployer>();
         _ = services.AddSingleton<IReviewRunner, ClaudeReviewRunner>();
         _ = services.AddSingleton<SqliteActa>();
         _ = services.AddSingleton<IActaStore>(sp => sp.GetRequiredService<SqliteActa>());

@@ -1,0 +1,5 @@
+{
+  "name": "conclave-review",
+  "version": "1.0.0",
+  "description": "Conclave 随安装包分发的评审 skill。节点跑评审时用 --plugin-dir 装载它，不依赖机器上 ~/.claude/skills 里铺了什么。"
+}
