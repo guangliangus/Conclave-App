@@ -107,8 +107,18 @@ rm -rf dist/publish
 # Gatekeeper 对无效签名的说法是「已损坏，你应该将它移到废纸篓」—— 没有任何出路，
 # 比「无法验证开发者」（那个至少能在系统设置里放行）糟得多。实测同事下载后就撞上这个。
 #
-# 有 Developer ID 就传 CODESIGN_IDENTITY，那时这一步顺带把公证前的准备也做齐了
-# （--options runtime 是公证的硬要求）；没有就 ad-hoc（"-"），至少让签名自洽。
+# 传了 CODESIGN_IDENTITY 就用它签，没传就 ad-hoc（"-"），至少让签名自洽。
+#
+# 两种证书走不同的参数，按身份名字分：
+#
+#   Developer ID —— 要发给别人的那条路。--options runtime（强化运行时）是公证的
+#   硬要求，--timestamp 去 Apple 的时间戳服务器盖章，公证同样要求。
+#
+#   自签证书 —— 只为让 TCC 身份稳定（ad-hoc 的「指定要求」是 cdhash，见
+#   codesign -d -r-，每次构建都变，用户对弹窗的选择于是每版作废一次）。这条路
+#   两个参数都不能要：自签证书拿不到可信时间戳源，--timestamp 会失败；而强化运行时
+#   对没有公证的包没有意义，还可能让 .NET 的运行时起不来。它解决不了 Gatekeeper ——
+#   在别人机器上自签和 ad-hoc 一样不被信任，所以别拿它当分发方案。
 # 先清干净再签，顺序不能反。构建机上的 com.apple.provenance / quarantine 会跟着
 # 扩展属性一路进包，而<b>签名本身也存在扩展属性里</b>（托管 dll 那些）——
 # 反过来先签后清，等于把刚签好的签名擦掉，实测就是这么发出一个「已损坏」的包的。
@@ -117,7 +127,14 @@ xattr -cr "${APP}"
 
 echo "==> 签名（${CODESIGN_IDENTITY:-ad-hoc}）"
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
-  codesign --force --deep --timestamp --options runtime     --sign "${CODESIGN_IDENTITY}" "${APP}"
+  case "${CODESIGN_IDENTITY}" in
+    "Developer ID"*)
+      codesign --force --deep --timestamp --options runtime \
+        --sign "${CODESIGN_IDENTITY}" "${APP}" ;;
+    *)
+      codesign --force --deep --timestamp=none \
+        --sign "${CODESIGN_IDENTITY}" "${APP}" ;;
+  esac
 else
   codesign --force --deep --sign - "${APP}"
 fi

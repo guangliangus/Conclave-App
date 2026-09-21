@@ -54,8 +54,69 @@ jobs:
       - name: 架构守卫真的跑过
         run: scripts/ci/assert-architecture-tests-ran.sh
 
+      # 不导证书的话 package-macos.sh 会退回 ad-hoc 签名，而 ad-hoc 的「指定要求」
+      # 就是 cdhash 本身（codesign -d -r- 可见）—— 每发一版二进制一变，macOS 就当成
+      # 另一个 app，用户之前对 TCC 弹窗的选择全部作废、重新问一遍。绑到证书上才稳定。
+      - name: 导入签名证书
+        env:
+          P12_BASE64: ${{ secrets.CODESIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.CODESIGN_P12_PASSWORD }}
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          if [ -z "${P12_BASE64}" ]; then
+            echo "没配 CODESIGN_P12_BASE64，这次走 ad-hoc 签名"
+            exit 0
+          fi
+
+          KEYCHAIN="${RUNNER_TEMP}/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          echo "${P12_BASE64}" | base64 --decode > "${RUNNER_TEMP}/cert.p12"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          # 默认 5 分钟不用就上锁，打包比这久 —— 锁上之后 codesign 会失败。
+          security set-keychain-settings -lut 21600 "${KEYCHAIN}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security import "${RUNNER_TEMP}/cert.p12" -k "${KEYCHAIN}" \
+            -P "${P12_PASSWORD}" -T /usr/bin/codesign
+          # 不加这句，codesign 取私钥时会弹 UI 授权，而 runner 上没人点，直接卡到超时。
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}" >/dev/null
+
+          # add-trusted-cert 只认证书文件，不吃 .p12，所以把公钥证书单独导出来一份。
+          security find-certificate -c "${CODESIGN_IDENTITY}" -p "${KEYCHAIN}" \
+            > "${RUNNER_TEMP}/cert.cer" 2>/dev/null || true
+          # 加进搜索路径，否则 codesign 按名字找不到这个身份。
+          security list-keychain -d user -s "${KEYCHAIN}" \
+            $(security list-keychains -d user | tr -d '"')
+
+          # 自签名根证书默认不被信任，只 import 的话 find-identity -v 会把它过滤掉，
+          # codesign 跟着报找不到身份。本机建证书时就是先卡在这里：
+          #   1) 73817D86… "Conclave Signing" (CSSMERR_TP_NOT_TRUSTED)
+          #        1 identities found
+          #        0 valid identities found
+          # Developer ID 不需要这步（根在系统信任库里），但多设一次也无害。
+          security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k "${KEYCHAIN}" "${RUNNER_TEMP}/cert.cer" 2>/dev/null \
+            || echo "add-trusted-cert 没成功，若下一步找不到有效身份即为此因"
+
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/cert.cer"
+
+          echo "可用身份："
+          # 这里必须是 -v：没有 -v 的话不受信任的证书也会列出来，看着像成功了，
+          # 而 codesign 实际用不了它。
+          security find-identity -v -p codesigning "${KEYCHAIN}"
+
       - name: 打包两个架构
+        env:
+          # 没配就是空串，package-macos.sh 的 [ -n ... ] 会退回 ad-hoc —— 所以
+          # 这套改动在 secret 填好之前不会让流水线挂。
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: scripts/ci/release-assets.sh "${{ steps.ver.outputs.version }}"
+
+      # 私钥不能留在 runner 上过夜。always() 是为了打包失败时也清。
+      - name: 清掉临时钥匙串
+        if: always()
+        run: security delete-keychain "${RUNNER_TEMP}/signing.keychain-db" 2>/dev/null || true
 
       - name: 发布
         env:
