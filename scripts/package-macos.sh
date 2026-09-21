@@ -87,6 +87,20 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
        这里再写一遍是为了连启动瞬间都不在 Dock 里闪 —— Info.plist 比托管代码先被读。 -->
   <key>LSUIElement</key>              <true/>
   <key>LSApplicationCategoryType</key> <string>public.app-category.developer-tools</string>
+  <!-- conclave:// 深链。飞书「开始评审」通知上那个「在 Conclave 里打开」按钮靠它唤起本机。
+       协议名跟 Conclave.Application.DeepLink.Scheme 必须一致 —— 对不上的表现是
+       「点了按钮没反应」：系统找不到能处理的应用，既不报错也不提示，
+       跟「压根没装 Conclave」一模一样。
+       注册发生在 Launch Services 扫到这个 .app 的时候，所以换了路径或改了这一段之后，
+       要么重新打开一次 .app，要么 lsregister -f 它。 -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>     <string>${BUNDLE_ID}.review</string>
+      <key>CFBundleTypeRole</key>    <string>Viewer</string>
+      <key>CFBundleURLSchemes</key>  <array><string>conclave</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

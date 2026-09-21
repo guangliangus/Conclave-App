@@ -106,24 +106,55 @@ public sealed class LarkNotifier : INotifier, IDisposable
         _http.Timeout = Timeout.InfiniteTimeSpan;
     }
 
-    public async Task NotifyPromulgationAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct)
+    public Task NotifyPromulgationAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pr);
         ArgumentNullException.ThrowIfNull(result);
 
+        return SendCardAsync(
+            pr, "结论", () => LarkCard.Render(pr, result, _conclave.AzureDevOpsOrgUrl), ct);
+    }
+
+    public Task NotifyReviewStartedAsync(PrMeta pr, ReviewStarted started, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        ArgumentNullException.ThrowIfNull(started);
+
+        return SendCardAsync(
+            pr, "开始评审", () => LarkCard.RenderStarted(pr, started, _conclave.AzureDevOpsOrgUrl), ct);
+    }
+
+    /// <summary>
+    /// 把一张卡片私聊给某个人。
+    /// </summary>
+    /// <param name="pr">PR 快照。</param>
+    /// <param name="what">这是哪一类通知，只进日志 —— 一个 PR 会收到两条，日志里得分得出来。</param>
+    /// <param name="card">
+    /// 卡片正文，<b>延迟求值</b>：通知关掉或换不出收件人时一行都不该渲染。
+    /// </param>
+    /// <param name="ct">取消令牌。</param>
+    /// <param name="azIdentity">
+    /// 收件人的 <c>az</c> 身份；<c>null</c> 表示发给 PR 作者。
+    /// <para>
+    /// 指派类通知的收件人<b>不是</b>作者，而是指派的两端。这个参数就是为它们留的。
+    /// </para>
+    /// </param>
+    private async Task SendCardAsync(
+        PrMeta pr, string what, Func<string> card, CancellationToken ct, string? azIdentity = null)
+    {
         if (!Options.IsConfigured)
         {
             return;
         }
 
-        var recipient = Options.RecipientFor(pr.Author);
+        var recipient = Options.RecipientFor(azIdentity ?? pr.Author);
         if (recipient is null)
         {
             // 不要静默跳过：配错域名或漏配 UserMap 的表现就是「结论出了但没人收到」，
             // 而那跟「通知功能没开」在外部看来一模一样。
             _logger.LogWarning(
-                "PR {PrId} 的作者 {Author} 换不出飞书收件人（UserMap 没有，EmailDomain 也没配），跳过通知",
-                pr.PrId, pr.Author);
+                "PR {PrId} 的 {Who} 换不出飞书收件人（UserMap 没有，EmailDomain 也没配），跳过通知",
+                pr.PrId, azIdentity ?? pr.Author);
             return;
         }
 
@@ -132,7 +163,7 @@ public sealed class LarkNotifier : INotifier, IDisposable
         {
             ReceiveId = id,
             MsgType = "interactive",
-            Content = LarkCard.Render(pr, result, _conclave.AzureDevOpsOrgUrl),
+            Content = card(),
         };
 
         var (code, msg, doc) = await PostAsync(
@@ -147,7 +178,22 @@ public sealed class LarkNotifier : INotifier, IDisposable
             }
         }
 
-        _logger.LogInformation("已飞书通知 PR {PrId} 的作者 {Recipient}（{IdType}）", pr.PrId, recipient, idType);
+        // 不写「的作者」：指派类通知发给的是指派的两端，而这行日志是「谁收到了」的唯一痕迹。
+        _logger.LogInformation(
+            "已飞书通知 {Recipient} 关于 PR {PrId}（{IdType}，{What}）", recipient, pr.PrId, idType, what);
+    }
+
+    public Task NotifyAssignmentAsync(PrMeta pr, AssignmentNotice notice, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        ArgumentNullException.ThrowIfNull(notice);
+
+        return SendCardAsync(
+            pr,
+            notice.Accepted switch { null => "指派", true => "指派已接受", _ => "指派被拒绝" },
+            () => LarkCard.RenderAssignment(pr, notice, _conclave.AzureDevOpsOrgUrl),
+            ct,
+            notice.Recipient);
     }
 
     /// <summary>

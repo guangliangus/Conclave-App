@@ -128,8 +128,20 @@ internal sealed class FakeNotifier : INotifier
 {
     internal List<(PrMeta Pr, PromulgationPayload Result)> Sent { get; } = [];
 
+    /// <summary>开评通知，按发出的顺序。一个 revision 只该出现一次。</summary>
+    internal List<(PrMeta Pr, ReviewStarted Started)> Started { get; } = [];
+
+    /// <summary>指派与答复通知，按发出的顺序。</summary>
+    internal List<(PrMeta Pr, AssignmentNotice Notice)> Assignments { get; } = [];
+
     /// <summary>非 null 时直接抛出，用来验证通知失败不能把公布带崩。</summary>
     internal Exception? Throw { get; set; }
+
+    /// <summary>非 null 时开评通知直接抛出，用来验证它不能把评审带崩。</summary>
+    internal Exception? ThrowOnStart { get; set; }
+
+    /// <summary>非 null 时指派通知直接抛出，用来验证它不能把指派带崩。</summary>
+    internal Exception? ThrowOnAssignment { get; set; }
 
     public Task NotifyPromulgationAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct)
     {
@@ -139,6 +151,28 @@ internal sealed class FakeNotifier : INotifier
         }
 
         Sent.Add((pr, result));
+        return Task.CompletedTask;
+    }
+
+    public Task NotifyReviewStartedAsync(PrMeta pr, ReviewStarted started, CancellationToken ct)
+    {
+        if (ThrowOnStart is not null)
+        {
+            throw ThrowOnStart;
+        }
+
+        Started.Add((pr, started));
+        return Task.CompletedTask;
+    }
+
+    public Task NotifyAssignmentAsync(PrMeta pr, AssignmentNotice notice, CancellationToken ct)
+    {
+        if (ThrowOnAssignment is not null)
+        {
+            throw ThrowOnAssignment;
+        }
+
+        Assignments.Add((pr, notice));
         return Task.CompletedTask;
     }
 }
@@ -309,6 +343,8 @@ internal sealed class FakeMesh : IMesh
         return Task.FromResult(AssignmentDelivers);
     }
 
+    public event Action? StateChanged;
+
     public void UpdateState(Func<LiveState, LiveState> mutate)
     {
         ArgumentNullException.ThrowIfNull(mutate);
@@ -325,6 +361,9 @@ internal sealed class FakeMesh : IMesh
 
             _state = next with { Version = _state.Version + 1 };
         }
+
+        // 锁外发：订阅方会回头读 State。
+        StateChanged?.Invoke();
     }
 
     public Task BroadcastAsync(Block block, CancellationToken ct)

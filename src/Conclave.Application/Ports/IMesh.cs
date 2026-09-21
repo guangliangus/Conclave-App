@@ -50,6 +50,20 @@ public interface IMesh
     void UpdateState(Func<LiveState, LiveState> mutate);
 
     /// <summary>
+    /// 实时状态真的变了（空操作不发）。
+    /// </summary>
+    /// <remarks>
+    /// 存在的理由是「<see cref="LiveState.Pending"/> 变了要立刻让菜单栏图标跟上」。
+    /// 原先是在三个写入点各手工同步一次 —— 而 <see cref="UpdateState"/> 本来就是这份状态
+    /// <b>唯一</b>的写入口，在那里发一次事件，就把「哪天多一个写入点忘了同步」
+    /// 这整类 bug 去掉了。而那类 bug 的表现是图标停在上一个状态不动，没有任何一处会报错。
+    /// <para>
+    /// 实现必须在<b>释放锁之后</b>发：订阅方会回头读 <see cref="State"/>。
+    /// </para>
+    /// </remarks>
+    event Action? StateChanged;
+
+    /// <summary>
     /// mesh 里所有节点的实时状态，含自己。
     /// </summary>
     /// <remarks>

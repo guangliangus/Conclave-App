@@ -6,6 +6,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using Conclave.App.Interop;
 using Conclave.Application;
 using Conclave.App.ViewModels;
@@ -24,6 +25,9 @@ public partial class App : global::Avalonia.Application
     /// <summary>菜单栏两张模板图：空闲闭眼打盹，评审中睁眼。</summary>
     private const string TrayIdleAsset = "avares://conclave/Assets/conclave-tray-idle.png";
     private const string TrayBusyAsset = "avares://conclave/Assets/conclave-tray-busy.png";
+
+    /// <summary>有指派等着确认时挂的那张：空闲那只鸟 + 右上角一枚角标。</summary>
+    private const string TrayAlertAsset = "avares://conclave/Assets/conclave-tray-alert.png";
 
     /// <summary>
     /// 「评审中」那套呼吸帧的张数（<c>conclave-tray-busy-0..6.png</c>）。
@@ -64,9 +68,10 @@ public partial class App : global::Avalonia.Application
     /// <summary>解到磁盘上的两张托盘图的路径（macOS 的 NSImage 走文件）。</summary>
     private string? _trayIdlePath;
     private string? _trayBusyPath;
+    private string? _trayAlertPath;
 
     /// <summary>菜单栏当前画的是哪张，换图只在真的变了时做。</summary>
-    private bool? _trayShowsBusy;
+    private TrayFace? _trayFace;
     private MainWindow? _dashboard;
     private DateTimeOffset _deactivatedAt = DateTimeOffset.MinValue;
     private bool _quitting;
@@ -129,6 +134,7 @@ public partial class App : global::Avalonia.Application
                 {
                     _trayIdlePath = ExtractTrayIcon(TrayIdleAsset, "tray-idle.png");
                     _trayBusyPath = ExtractTrayIcon(TrayBusyAsset, "tray-busy.png");
+                    _trayAlertPath = ExtractTrayIcon(TrayAlertAsset, "tray-alert.png");
                     _statusItem = new MacStatusItem(_trayIdlePath, "Conclave · 空闲");
                     _statusItem.Clicked += ToggleDashboard;
 
@@ -165,6 +171,7 @@ public partial class App : global::Avalonia.Application
             }
 
             WatchReviewingState();
+            HookDeepLinks();
 
             if (SelfTest)
             {
@@ -173,6 +180,73 @@ public partial class App : global::Avalonia.Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>
+    /// 接住飞书「开始评审」通知里那个 <c>conclave://</c> 深链。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 拿不到 <see cref="IActivatableLifetime"/> 就安静地不接。深链是锦上添花，
+    /// 而这个进程的本职是后台评审 —— 为一个按钮把启动搞崩是最差的结果，
+    /// 托盘图标那一段已经踩过同样的坑。
+    /// </para>
+    /// <para>
+    /// 协议要在 <c>Info.plist</c> 的 <c>CFBundleURLTypes</c> 里注册过，系统才会把 URL
+    /// 转交过来（见 <c>scripts/package-macos.sh</c>）。<b>从 dotnet run 直接跑是收不到的</b>，
+    /// 那时候没有 .app 包，系统不知道谁处理 <c>conclave://</c>。
+    /// </para>
+    /// <para>
+    /// 先开面板再找那一行：<see cref="MainViewModel"/> 是跟窗口一起建起来的，
+    /// 队列也要它建起来才填得上。
+    /// </para>
+    /// </remarks>
+    private void HookDeepLinks()
+    {
+        // ⚠️ 不能写成 `ApplicationLifetime is IActivatableLifetime`。
+        //
+        // 桌面进程走的是 StartWithClassicDesktopLifetime，拿到的是
+        // ClassicDesktopStyleApplicationLifetime，而它<b>不</b>实现 IActivatableLifetime
+        // （实测它的接口只有 IClassicDesktopStyleApplicationLifetime / IControlledApplicationLifetime /
+        // IApplicationLifetime / ISetupApplicationLifetime / IDisposable）。URL 激活在 Avalonia 里
+        // 是一项「特性」，由平台后端各自提供（macOS 上是 MacOSActivatableLifetime），
+        // 只能从 TryGetFeature 取。
+        //
+        // 那个类型判断恒为假，所以它不会报错、不会崩，只是<b>一条深链都收不到</b> ——
+        // 表现成「点了按钮没反应」，跟压根没注册协议一模一样。
+        if (TryGetFeature(typeof(IActivatableLifetime)) is not IActivatableLifetime activatable)
+        {
+            Console.Error.WriteLine("这个平台不支持 URL 激活，conclave:// 深链不可用");
+            return;
+        }
+
+        activatable.Activated += (_, e) =>
+        {
+            if (e is not ProtocolActivatedEventArgs { Kind: ActivationKind.OpenUri } protocol)
+            {
+                return;
+            }
+
+            if (DeepLink.Parse(protocol.Uri) is not { } link)
+            {
+                return;
+            }
+
+            var (target, revision) = link;
+
+            // 系统可能在任意线程转交，而下面要碰窗口和 ObservableCollection。
+            Dispatcher.UIThread.Post(() =>
+            {
+                ShowDashboard();
+
+                if (_dashboard?.DataContext is not MainViewModel vm)
+                {
+                    return;
+                }
+
+                _ = target == DeepLinkTarget.Review ? vm.OpenLogFor(revision) : vm.RevealPr(revision);
+            });
+        };
     }
 
     /// <summary>
@@ -406,44 +480,111 @@ public partial class App : global::Avalonia.Application
 
         state.Changed += (_, _) =>
         {
-            var busy = state.Reviewing;
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() => ApplyTrayState(busy));
+            // 一次取齐再算：分两次读 NodeState 会撕出「图标挂着角标 + 提示说空闲」。
+            var snapshot = state.Attention;
+            global::Avalonia.Threading.Dispatcher.UIThread.Post(
+                () => ApplyTrayState(FaceOf(snapshot), TipFor(snapshot)));
         };
-        ApplyTrayState(state.Reviewing);
+
+        var initial = state.Attention;
+        ApplyTrayState(FaceOf(initial), TipFor(initial));
     }
 
-    private void ApplyTrayState(bool busy)
+    /// <summary>菜单栏图标的三张脸。</summary>
+    internal enum TrayFace
     {
-        if (_trayShowsBusy == busy)
+        Idle,
+        Busy,
+        Pending,
+    }
+
+    /// <summary>
+    /// 待确认压过评审中。
+    /// </summary>
+    /// <remarks>
+    /// 两者同时成立时只能显示一张脸，而这两件事对人的要求完全不同：评审会自己跑完，
+    /// 待确认不会 —— 没人点，那个 PR 就一直卡着。所以要人动手的那个优先。
+    /// 被盖掉的那件事在提示语里补回来（见 <see cref="TipFor"/>），不会丢。
+    /// </remarks>
+    internal static TrayFace FaceOf((int PendingAssignments, bool Reviewing) state) => state switch
+    {
+        { PendingAssignments: > 0 } => TrayFace.Pending,
+        { Reviewing: true } => TrayFace.Busy,
+        _ => TrayFace.Idle,
+    };
+
+    /// <summary>悬浮提示。图标只有三张脸，两件事同时发生时这里要把两件都说全。</summary>
+    internal static string TipFor((int PendingAssignments, bool Reviewing) state)
+    {
+        var parts = new List<string>(2);
+
+        if (state.PendingAssignments > 0)
+        {
+            parts.Add($"{state.PendingAssignments.ToString(CultureInfo.InvariantCulture)} 条指派待确认");
+        }
+
+        if (state.Reviewing)
+        {
+            parts.Add("评审中");
+        }
+
+        return "Conclave · " + (parts.Count > 0 ? string.Join(" · ", parts) : "空闲");
+    }
+
+    private void ApplyTrayState(TrayFace face, string tip)
+    {
+        // 提示语无条件更新，放在换图之前：脸没变而条数变了（两条里处理掉一条）时，
+        // 要动的只有它。写在这里一处，下面换图的两条分支就不必各自再写一遍。
+        if (OperatingSystem.IsMacOS())
+        {
+            _statusItem?.SetToolTip(tip);
+        }
+        else if (_tray is not null)
+        {
+            _tray.ToolTipText = tip;
+        }
+
+        if (_trayFace == face)
         {
             return;
         }
 
-        _trayShowsBusy = busy;
-        var tip = busy ? "Conclave · 评审中" : "Conclave · 空闲";
+        _trayFace = face;
 
         if (OperatingSystem.IsMacOS() && _statusItem is not null
-            && _trayIdlePath is not null && _trayBusyPath is not null)
+            && _trayIdlePath is not null && _trayBusyPath is not null && _trayAlertPath is not null)
         {
+            var rest = face == TrayFace.Pending ? _trayAlertPath : _trayIdlePath;
+
             if (_trayAnimator is null)
             {
-                _statusItem.SetIcon(busy ? _trayBusyPath : _trayIdlePath);
+                _statusItem.SetIcon(face switch
+                {
+                    TrayFace.Busy => _trayBusyPath,
+                    TrayFace.Pending => _trayAlertPath,
+                    _ => _trayIdlePath,
+                });
             }
-            else if (busy)
+            else if (face == TrayFace.Busy)
             {
                 _trayAnimator.Start();
             }
             else
             {
-                _trayAnimator.Stop(_trayIdlePath);
+                // 从「评审中」切走时呼吸动画必须停，否则它会继续按帧改图、
+                // 把刚设上去的角标图一帧就覆盖掉 —— 表现成「角标闪了一下就没了」。
+                _trayAnimator.Stop(rest);
             }
 
-            _statusItem.SetToolTip(tip);
         }
         else if (_tray is not null)
         {
-            _tray.Icon = new WindowIcon(AssetLoader.Open(new Uri(busy ? TrayBusyAsset : TrayIdleAsset)));
-            _tray.ToolTipText = tip;
+            _tray.Icon = new WindowIcon(AssetLoader.Open(new Uri(face switch
+            {
+                TrayFace.Busy => TrayBusyAsset,
+                TrayFace.Pending => TrayAlertAsset,
+                _ => TrayIdleAsset,
+            })));
         }
     }
 

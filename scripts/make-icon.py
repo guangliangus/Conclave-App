@@ -52,6 +52,14 @@ TRAY_APERTURE_MIN = 0.45    # 最眯那一帧的眼睑开度。再小就跟空�
 # 只能做浓淡不能做彩色 —— 模板图的颜色被 macOS 整个丢掉，见 vertical_fade。
 # 0.65 是下限：再淡下去菜单栏上就读成「图标没画完」，而不是「渐变」。
 TRAY_FADE = (1.0, 0.65)
+# 「有指派待确认」那张的角标：右上角一枚实心点。
+# 模板图只有黑与透明，角标没法靠颜色区分 —— 所以先用一圈透明把它从鸟身上切开，
+# 那道缝才是让它读成「角标」而不是「鸟身上多了个疙瘩」的东西。
+# 半径 0.105 在 36px 上约 3.8px —— 再小在菜单栏里糊成一粒毛刺，再大就把右耳羽整个吃掉，
+# 那只鸟在余光里就不是猫头鹰了。
+TRAY_BADGE_AT = (0.835, 0.145)
+TRAY_BADGE_R = 0.105
+TRAY_BADGE_GAP = 0.045
 # 渐隐的上下沿取字形的真实上下沿（SVG y=52 的耳羽尖 → y=234 的横杆底），不是画布边，
 # 否则渐变两端会浪费在空白上。式子跟 build_shapes 里的 at() 同一条（scale=1.2）。
 TRAY_GLYPH_TOP = 0.5 + ((52 - 8) / 256.0 - 0.5) * 1.2
@@ -497,6 +505,21 @@ if __name__ == "__main__":
             plate=False, scale=1.2, glyph=fade, hole=None, tray=True, eyes=eyes))
         n = write_png(out_dir / name, TRAY_SIZE, tray)
         print(f"  {name}  {n:,} 字节（{TRAY_SIZE}px 模板图，{eyes}）")
+
+    # 「有指派待确认」：空闲那只鸟 + 右上角一枚角标。
+    #
+    # 为什么以闭眼那张为底而不是睁眼：睁眼在这套图里已经是「评审中」了，拿它当底会让
+    # 两个状态在余光里撞车。角标本身才是信号，底不该再说一遍话。
+    #
+    # 角标画成实心黑（不走 fade）：它要在 18pt 的菜单栏里一眼看见，而那道渐变是给
+    # 字形做层次的，给一枚 5px 的点做渐变只会把它抹淡。
+    alert = build_shapes(
+        plate=False, scale=1.2, glyph=fade, hole=None, tray=True, eyes="closed")
+    alert.append((circle(*TRAY_BADGE_AT, TRAY_BADGE_R + TRAY_BADGE_GAP), None))
+    alert.append((circle(*TRAY_BADGE_AT, TRAY_BADGE_R), TEMPLATE))
+    n = write_png(
+        out_dir / "conclave-tray-alert.png", TRAY_SIZE, render(TRAY_SIZE, TRAY_SS, alert))
+    print(f"  conclave-tray-alert.png  {n:,} 字节（{TRAY_SIZE}px 模板图，closed + 角标）")
 
     # 评审中的呼吸帧：眼睑一张一合，就是「它正在看」。
     # 只渲半个周期（全睁 → 最眯），回程由 TrayAnimator 倒着放，合起来 2*(N-1)=12 拍一轮。

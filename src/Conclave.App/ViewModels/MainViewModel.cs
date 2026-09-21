@@ -1569,6 +1569,82 @@ public sealed partial class MainViewModel : ViewModelBase
             _mesh, _progress, _logArchive, row.RevisionId, row.ReviewerId, row.Subject);
     }
 
+    /// <summary>
+    /// 在表里找到这个 PR 并切到它所在的那一张 —— 指派类通知的深链点进来时走这里。
+    /// </summary>
+    /// <remarks>
+    /// 不开日志：指派那一刻评审还没开跑，没有日志可看。收件人要做的是接受、拒绝，
+    /// 或者先看一眼这是哪个 PR —— 待确认的那条本来就摆在面板上，把窗口打开就够了。
+    /// </remarks>
+    /// <returns>找到了没有。</returns>
+    internal bool RevealPr(string revisionId)
+    {
+        if (RowFor(revisionId) is not { } row)
+        {
+            return NotInAnyTable(revisionId);
+        }
+
+        Tab = Mine.Contains(row) ? MainTab.Mine : MainTab.Queue;
+        ShowToast(row.Subject);
+        return true;
+    }
+
+    /// <summary>
+    /// 按 revision 打开实时日志 —— 飞书「开始评审」通知里那个深链点进来时走这里。
+    /// </summary>
+    /// <remarks>
+    /// 本节点在评就直读本地缓冲，别的节点在评就走 <c>GET /log</c> 现问，
+    /// 都取不到就退到盘上那份留档 —— 这个分流在 <see cref="ReviewLogViewModel"/> 里。
+    /// </remarks>
+    /// <returns>找到并打开了没有。</returns>
+    internal bool OpenLogFor(string revisionId)
+    {
+        if (RowFor(revisionId) is not { } row)
+        {
+            return NotInAnyTable(revisionId);
+        }
+
+        ShowLog(row);
+        return true;
+    }
+
+    /// <summary>
+    /// 按 revision 在两张表里找那一行。
+    /// </summary>
+    /// <remarks>
+    /// 两个深链目标必须落在<b>同一行</b>上。早先它们各查各的、优先级还相反
+    /// （一个先看 Mine、一个先看 Pipeline）—— 同一个 revision 同时出现在两张表里时
+    /// （作者本人的 PR 又正好排在本机队列里），<c>conclave://pr</c> 开的是「我的」那行、
+    /// <c>conclave://review</c> 开的是队列那行，而两行的 <c>ReviewerId</c> 和 <c>Subject</c>
+    /// 可以不一样，且会被原样喂给 <see cref="ReviewLogViewModel"/>。
+    /// <para>
+    /// 队列那张优先：它才是带评审状态的那一份。
+    /// </para>
+    /// </remarks>
+    private PrRow? RowFor(string revisionId)
+        => string.IsNullOrWhiteSpace(revisionId)
+            ? null
+            : Pipeline.Concat(Mine).FirstOrDefault(
+                r => string.Equals(r.RevisionId, revisionId, StringComparison.Ordinal));
+
+    /// <summary>
+    /// 深链点进来但表里没有那一行。
+    /// </summary>
+    /// <remarks>
+    /// 这是常态而不是异常：队列每 15 秒刷一次，深链可能比本节点看见这个 revision 更早到；
+    /// PR 评完之后它也会退场。所以要说一句，而不是静默什么都不做 ——
+    /// 点了按钮没反应跟「深链没注册」是同一个表现。
+    /// </remarks>
+    private bool NotInAnyTable(string revisionId)
+    {
+        if (!string.IsNullOrWhiteSpace(revisionId))
+        {
+            ShowToast($"队列里没有 {revisionId}，可能已经评完或还没同步过来", BadgeTone.Gold);
+        }
+
+        return false;
+    }
+
     [RelayCommand]
     private void CloseLog()
     {

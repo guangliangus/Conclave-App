@@ -92,6 +92,8 @@ public sealed class HttpMesh : IMesh, IDisposable
         }
     }
 
+    public event Action? StateChanged;
+
     public void UpdateState(Func<LiveState, LiveState> mutate)
     {
         ArgumentNullException.ThrowIfNull(mutate);
@@ -111,6 +113,9 @@ public sealed class HttpMesh : IMesh, IDisposable
             // 而那种失效是静默的 —— 界面上看是「别人的队列一直不更新」。
             _state = next with { Version = _state.Version + 1 };
         }
+
+        // 锁外发：订阅方会回头读 State。
+        StateChanged?.Invoke();
     }
 
     public IReadOnlyDictionary<string, LiveState> PeerStates

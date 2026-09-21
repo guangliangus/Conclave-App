@@ -20,4 +20,23 @@ public interface INotifier
 {
     /// <summary>通知 PR 作者：他的这一版评审出结论了。</summary>
     Task NotifyPromulgationAsync(PrMeta pr, PromulgationPayload result, CancellationToken ct);
+
+    /// <summary>
+    /// 通知 PR 作者：有节点开始评他这一版了。
+    /// </summary>
+    /// <remarks>
+    /// 跟 <see cref="NotifyPromulgationAsync"/> 一样，失败绝不能影响评审本身 ——
+    /// 这条通知连链上都不留痕，没有任何理由让它掀掉一次已经开跑的评审。
+    /// 调用方负责吞掉异常，见 <c>ReviewOrchestrator.StartReview</c>。
+    /// </remarks>
+    Task NotifyReviewStartedAsync(PrMeta pr, ReviewStarted started, CancellationToken ct);
+
+    /// <summary>
+    /// 通知指派的对面那个人：指派来了，或者对方答复了。
+    /// </summary>
+    /// <remarks>
+    /// 收件人<b>不是</b> PR 作者，而是 <see cref="AssignmentNotice.Recipient"/> ——
+    /// 指派发给被指派者，答复发回给指派者。跟另外两条一样，失败不许影响指派本身。
+    /// </remarks>
+    Task NotifyAssignmentAsync(PrMeta pr, AssignmentNotice notice, CancellationToken ct);
 }

@@ -86,6 +86,27 @@ public sealed class ReviewOrchestrator : BackgroundService
     /// <summary>UI 手动点过「评审」的 Revision。绕过 <see cref="ConclaveOptions.AutoReview"/>。</summary>
     private readonly ConcurrentDictionary<string, byte> _requested = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// 已经给作者发过「开始评审」的那些 revision。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 按 revision 记而不是按轮次：同一台机器上失败重试、换一轮再跑，作者要的信息
+    /// 只有一个 ——「有人接手了」，那件事对他只发生一次。
+    /// </para>
+    /// <para>
+    /// ⚠️ <b>这是进程内的去重，不是全网的。</b> 每个节点各有一份空字典，所以
+    /// quorum≥2（N 个节点各评一遍）或重试换了机器时，作者会收到 N 条 ——
+    /// 各自来自真的开跑了的那台。要压成一条得让「已通知」这件事跟着实时状态走，
+    /// 而那是给一条锦上添花的通知加一份全网状态，目前不值。
+    /// 默认配置是全 1（见 <c>QuorumPolicy</c>），所以常态下就是一条。
+    /// </para>
+    /// <para>
+    /// 跟 <see cref="_requested"/> 在同样的两处清掉，免得长跑的进程里只涨不落。
+    /// </para>
+    /// </remarks>
+    private readonly ConcurrentDictionary<string, byte> _announced = new(StringComparer.Ordinal);
+
     private readonly SemaphoreSlim _slots;
 
     public ReviewOrchestrator(
@@ -110,7 +131,19 @@ public sealed class ReviewOrchestrator : BackgroundService
         _options = options;
         _logger = logger;
         _slots = new SemaphoreSlim(Math.Max(1, options.MaxConcurrent));
+
+        // 菜单栏那枚角标的<b>唯一</b>同步点。
+        //
+        // 原先是在三个写入点各手工调一次（收到指派、答复、TTL 过期清理）—— 而那三处
+        // 分处 mesh 服务和编排器，少调一处的表现是图标停在上一个状态不动，不报错、不打日志。
+        // LiveState 的写入口只有 IMesh.UpdateState 一个，订在它发的事件上，
+        // 「哪天多一个写入点忘了同步」这整类 bug 就不存在了。
+        _mesh.StateChanged += SyncPendingBadge;
+        SyncPendingBadge();
     }
+
+    /// <summary>把「有几条指派等着确认」同步给菜单栏图标。没变时 NodeState 自己会吞掉。</summary>
+    private void SyncPendingBadge() => _state.SetPendingAssignments(_mesh.State.Pending.Count);
 
     /// <summary>UI 手动触发某个 Revision 的评审（不改认领状态，只是本节点这一轮想跑）。</summary>
     public void RequestReview(string revisionId)
@@ -182,6 +215,12 @@ public sealed class ReviewOrchestrator : BackgroundService
         if (sent)
         {
             _state.SetAssignmentSent(request.Id, revisionId, toElectorId);
+
+            // 只在真送达之后才通知。送不到还发一条「指派给你了」，对方会去面板上找一条
+            // 根本不存在的待确认。
+            await AnnounceAssignmentAsync(
+                revisionId, peer.AzIdentity, _mesh.Self.AzIdentity, accepted: null, note)
+                .ConfigureAwait(false);
         }
 
         return sent;
@@ -217,10 +256,30 @@ public sealed class ReviewOrchestrator : BackgroundService
         var requester = _mesh.Members.FirstOrDefault(m => m.Id == request.From);
         if (requester is not null)
         {
-            _ = await _mesh.SendAssignmentReplyAsync(
+            var delivered = await _mesh.SendAssignmentReplyAsync(
                 requester,
                 new AssignmentReply(request.Id, request.RevisionId, accepted, reason),
                 ct).ConfigureAwait(false);
+
+            if (!delivered)
+            {
+                // 原先这个返回值是被丢掉的。送不到意味着对方的面板会一直停在「等待确认」，
+                // 而那是个只能靠人发现的死局 —— 至少要在日志里留下痕迹。
+                _logger.LogWarning(
+                    "对 {Elector} 的答复没送到（{Revision}），他那边的「等待确认」不会自己解开",
+                    request.From, request.RevisionId);
+            }
+
+            // 送不到也照发通知，这里<b>刻意</b>跟 AssignAsync 的「只在真送达之后才通知」相反。
+            //
+            // 两边不对称是因为两种失败的后果不一样：指派送不到，对方那儿根本没有待确认，
+            // 通知他「有活给你」会让他去面板上找一条不存在的东西；而答复送不到时，
+            // 认领已经落进本节点的实时状态、评审马上就要开跑 —— 那件事是真的发生了，
+            // 只是 mesh 那条路没通。这时候飞书反而是对方唯一能知道结果的渠道，
+            // 恰恰最不该跟着一起哑掉。
+            await AnnounceAssignmentAsync(
+                request.RevisionId, requester.AzIdentity, _mesh.Self.AzIdentity, accepted, reason)
+                .ConfigureAwait(false);
         }
 
         _logger.LogInformation(
@@ -422,6 +481,7 @@ public sealed class ReviewOrchestrator : BackgroundService
             if (entry.Finished)
             {
                 _ = _requested.TryRemove(entry.Revision.Id, out _);
+                _ = _announced.TryRemove(entry.Revision.Id, out _);
                 continue;
             }
 
@@ -689,6 +749,111 @@ public sealed class ReviewOrchestrator : BackgroundService
     private static string SlotKey(string revisionId, int round) => $"{revisionId}#{round}";
 
     /// <summary>
+    /// 把一次指派或它的答复推到对面那个人眼前。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 指派是整套流程里唯一要人当场做决定的一步，而那条待确认<b>只在面板上</b> ——
+    /// 不开面板就不知道有活等着自己。反过来指派出去的人也一样：对方接没接受，
+    /// 他得自己去看。两边都在等对方，而两边都不知道要等。
+    /// </para>
+    /// <para>
+    /// 刻意 await 而不是甩出去：调用它的两个方法本来就各自 await 了一次跨节点 HTTP
+    /// （<c>SendAssignmentAsync</c> / <c>SendAssignmentReplyAsync</c>，同样是十秒量级），
+    /// 再加一次不改变这个操作的性质，却换来可确定性测试。真正要紧的状态改动
+    /// —— 认领、<c>SetAssignmentSent</c> —— 都排在这之前，所以这里慢了只是界面多转一会儿，
+    /// 不影响指派本身是否生效。
+    /// </para>
+    /// <para>
+    /// 失败只记一行日志。指派已经在 mesh 上送到了，为一条通知把它回滚或者抛出去都说不通。
+    /// </para>
+    /// </remarks>
+    private async Task AnnounceAssignmentAsync(
+        string revisionId, string recipientAz, string counterpartAz, bool? accepted, string? note)
+    {
+        var pr = PrFor(revisionId);
+        if (pr is null)
+        {
+            // 没有 PR 快照就拼不出标题和链接，那张卡片只剩一句空话。
+            // 这不是错误：队列项会随 PR 合并/关闭退场，而答复可能晚于那一刻。
+            _logger.LogDebug("{Revision} 不在任何节点的队列里，跳过指派通知", revisionId);
+            return;
+        }
+
+        try
+        {
+            await _notifier.NotifyAssignmentAsync(
+                pr,
+                new AssignmentNotice(revisionId, recipientAz, counterpartAz, accepted, note),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                ex, "通知 {Recipient} 关于 {Revision} 的指派失败", recipientAz, revisionId);
+        }
+    }
+
+    /// <summary>
+    /// 按 revision 找那份 PR 快照。
+    /// </summary>
+    /// <remarks>
+    /// 队列是各节点各自发现、互相广播的，本机手上那份未必有 —— 指派的场景里尤其常见：
+    /// 作者自己的 PR 在他那台上没有合格节点，队列项却正是他发现并播出去的。
+    /// 所以本机找不到还要问一遍邻居。
+    /// </remarks>
+    private PrMeta? PrFor(string revisionId)
+    {
+        var mine = _mesh.State.Discovered
+            .FirstOrDefault(q => string.Equals(q.Revision.Id, revisionId, StringComparison.Ordinal));
+
+        return mine?.Pr ?? _mesh.PeerStates.Values
+            .SelectMany(state => state.Discovered)
+            .FirstOrDefault(q => string.Equals(q.Revision.Id, revisionId, StringComparison.Ordinal))?.Pr;
+    }
+
+    /// <summary>
+    /// 告诉作者有人接手了。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 放在评审真正开跑<b>之前</b>：这条通知的全部价值就是把那段十几分钟的静默填上，
+    /// 评完再发等于没发。
+    /// </para>
+    /// <para>
+    /// 失败只记一行日志并把去重标记撤掉 —— 它连链上都不留痕，没有任何理由让它掀掉
+    /// 一次已经开跑的评审；撤掉标记是为了让下一轮还有机会补上这条。
+    /// </para>
+    /// <para>
+    /// 用 <see cref="CancellationToken.None"/> 而不是停机 token：那个 token 一响，
+    /// 这里抛的是 <c>OperationCanceledException</c>，而它会穿过下面那道
+    /// <c>when (ex is not OperationCanceledException)</c> 的护栏 —— 一条发不出去的通知
+    /// 就能掀掉整次评审。通知器自己有 10 秒的请求超时，不会真的挂住。
+    /// </para>
+    /// </remarks>
+    private async Task AnnounceStartAsync(Revision revision, PrMeta pr)
+    {
+        if (!_announced.TryAdd(revision.Id, 0))
+        {
+            return;
+        }
+
+        try
+        {
+            var self = _mesh.Self;
+            await _notifier.NotifyReviewStartedAsync(
+                pr,
+                new ReviewStarted(revision.Id, self.AzIdentity, self.Endpoint),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _ = _announced.TryRemove(revision.Id, out _);
+            _logger.LogWarning(ex, "通知 {Revision} 的作者「已开始评审」失败", revision.Id);
+        }
+    }
+
+    /// <summary>
     /// 后台跑评审。刻意不 await —— 一次评审可能十几分钟，编排循环必须马上继续转。
     /// </summary>
     private void StartReview(Revision revision, PrMeta pr, int round)
@@ -703,6 +868,9 @@ public sealed class ReviewOrchestrator : BackgroundService
         _ = Task.Run(async () =>
         {
             var acquired = false;
+
+            // 声明在 try 外：finally 里要收它。评审还没开跑就返回时它仍是 null。
+            Task? announced = null;
 
             // PR 被合 / 被撤时掐断这次评审。声明在 try 外面：catch 里要靠它分辨
             // 「是被掐断的」还是「真失败了」，而这两者的收尾完全不同。
@@ -733,6 +901,12 @@ public sealed class ReviewOrchestrator : BackgroundService
                 });
 
                 _logger.LogInformation("开始评审 {Revision} round={Round} {Repo}", revision.Id, round, pr.Repo);
+
+                // 刻意<b>不</b> await：此刻正握着并发闸，而一次飞书往返最坏是三段十秒
+                // （换 token、查 open_id、发送）叠起来 —— 那 30 秒里这台机器一个 token
+                // 都没烧，只是占着一个评审位干等。通知本身已经发出去了，时机正是这里；
+                // 它的结果在下面的 finally 里收，那时评审早跑完了，await 是白拿的。
+                announced = AnnounceStartAsync(revision, pr);
 
                 using var timeout = new CancellationTokenSource(_options.ReviewTimeout);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(
@@ -850,6 +1024,13 @@ public sealed class ReviewOrchestrator : BackgroundService
             }
             finally
             {
+                // 通知早就跑完了（它自己吞异常，见 AnnounceStartAsync）。这里 await 只是
+                // 把它收干净，免得留一个没人观察的 Task —— 也让测试能确定性地断言它发过。
+                if (announced is not null)
+                {
+                    await announced.ConfigureAwait(false);
+                }
+
                 if (acquired)
                 {
                     UpdateLoad(-1);
@@ -1033,6 +1214,7 @@ public sealed class ReviewOrchestrator : BackgroundService
 
         await _mesh.BroadcastAsync(block, ct).ConfigureAwait(false);
         _ = _requested.TryRemove(revision.Id, out _);
+        _ = _announced.TryRemove(revision.Id, out _);
 
         // 失败那条要说清楚「试了几台、为什么停」。原先写的是 ActualQuorum ——
         // 而那个数只数有效票，全失败时恒为 0，于是通知上永远是「0 轮都失败了」。

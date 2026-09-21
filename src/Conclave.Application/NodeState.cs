@@ -132,6 +132,7 @@ public sealed class NodeState
     private IReadOnlyList<Block> _blocks = [];
     private string _status = "启动中";
     private bool _reviewing;
+    private int _pendingAssignments;
     private string? _toolProblem;
     private UsageReading? _usage;
     private readonly List<AssignmentOutcome> _assignments = [];
@@ -465,6 +466,35 @@ public sealed class NodeState
     }
 
     /// <summary>
+    /// 此刻有几条指派等着本节点确认。
+    /// </summary>
+    /// <remarks>
+    /// 跟 <see cref="Reviewing"/> 完全同一个道理：菜单栏图标要用它，而那条待确认原本
+    /// 只在 <c>mesh.State.Pending</c> 上 —— 界面是每 15 秒从投影重建一次的，
+    /// 指派进来十几秒之后图标才会变。这里在收到/答复的那一刻直接设，立刻生效。
+    /// <para>
+    /// 记个数而不是 bool：两条指派处理掉一条，图标不该就此恢复。
+    /// </para>
+    /// </remarks>
+    public int PendingAssignments
+    {
+        get { lock (_gate) { return _pendingAssignments; } }
+    }
+
+    /// <summary>
+    /// 菜单栏图标要的那两件事，一次取齐。
+    /// </summary>
+    /// <remarks>
+    /// 分两次读会撕：两次之间插进一个 <see cref="SetPendingAssignments"/>(0)，
+    /// 发给界面的就是「图标挂着角标 + 提示语说空闲」——
+    /// 恰恰是这枚角标本来要避免的那种自相矛盾。
+    /// </remarks>
+    public (int PendingAssignments, bool Reviewing) Attention
+    {
+        get { lock (_gate) { return (_pendingAssignments, _reviewing); } }
+    }
+
+    /// <summary>
     /// 更新队列。内容没变就<b>不发事件</b>。
     /// </summary>
     /// <remarks>
@@ -513,6 +543,31 @@ public sealed class NodeState
             }
 
             _blocks = blocks;
+        }
+
+        Raise();
+    }
+
+    /// <summary>
+    /// 待确认的指派条数变了。没变就不发事件。
+    /// </summary>
+    /// <remarks>
+    /// 只有一个调用点：<c>ReviewOrchestrator</c> 订在 <c>IMesh.StateChanged</c> 上。
+    /// 收到指派、答复、TTL 过期清理都走 <c>IMesh.UpdateState</c>，所以订那一个事件就够了 ——
+    /// 早先是三处各手工调一次，而少调一处的表现是图标停在上一个状态不动，不报错也不打日志。
+    /// </remarks>
+    public void SetPendingAssignments(int count)
+    {
+        var normalized = Math.Max(0, count);
+
+        lock (_gate)
+        {
+            if (_pendingAssignments == normalized)
+            {
+                return;
+            }
+
+            _pendingAssignments = normalized;
         }
 
         Raise();

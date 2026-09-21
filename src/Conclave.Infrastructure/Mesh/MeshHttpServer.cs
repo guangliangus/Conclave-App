@@ -278,6 +278,22 @@ public sealed class MeshHttpServer : IDisposable
             return;
         }
 
+        if (method == "GET" && path == "/log/live")
+        {
+            // /log 的人读版：一页会自己轮询 /log 的 HTML，给飞书「开始评审」卡片上那个按钮用。
+            // 作者不必装 Conclave —— 评审跑在别人的机器上，要求他先装个客户端才能看
+            // 自己 PR 的进度，这个门槛比它解决的问题还高。见 LiveLogPage。
+            var wantedLive = context.Request.QueryString["revision"];
+            if (string.IsNullOrWhiteSpace(wantedLive))
+            {
+                TrySetStatus(context, HttpStatusCode.BadRequest);
+                return;
+            }
+
+            await WriteHtmlAsync(context, LiveLogPage.Html(wantedLive), ct).ConfigureAwait(false);
+            return;
+        }
+
         if (method == "GET" && path == "/log")
         {
             // 本节点正在跑（或刚跑完）的那次评审的实时日志。作者想知道自己的 PR
@@ -411,11 +427,27 @@ public sealed class MeshHttpServer : IDisposable
         await context.Response.OutputStream.WriteAsync(bytes, ct).ConfigureAwait(false);
     }
 
+    private static Task WriteHtmlAsync(HttpListenerContext context, string html, CancellationToken ct)
+        => WriteBodyAsync(context, html, "text/html; charset=utf-8", ct);
+
     /// <summary>纯文本原样发。日志不是 JSON —— 包一层只会让 curl 出来的东西没法直接读。</summary>
-    private static async Task WriteTextAsync(HttpListenerContext context, string text, CancellationToken ct)
+    private static Task WriteTextAsync(HttpListenerContext context, string text, CancellationToken ct)
+        => WriteBodyAsync(context, text, "text/plain; charset=utf-8", ct);
+
+    /// <summary>
+    /// 把一段文本当响应体发出去。
+    /// </summary>
+    /// <remarks>
+    /// <c>nosniff</c> 是为 <c>/log/live</c> 加的：那条路不校验身份，而 revision 参数由请求方给 ——
+    /// 浏览器自己去猜类型的话，一个精心构造的参数能让本该是纯文本的响应被当成 HTML 执行。
+    /// 三条路共用一个写入口，这类响应头加一次就都有了，不必逐条记得。
+    /// </remarks>
+    private static async Task WriteBodyAsync(
+        HttpListenerContext context, string body, string contentType, CancellationToken ct)
     {
-        var bytes = Encoding.UTF8.GetBytes(text);
-        context.Response.ContentType = "text/plain; charset=utf-8";
+        var bytes = Encoding.UTF8.GetBytes(body);
+        context.Response.ContentType = contentType;
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
         context.Response.ContentLength64 = bytes.Length;
         await context.Response.OutputStream.WriteAsync(bytes, ct).ConfigureAwait(false);
     }

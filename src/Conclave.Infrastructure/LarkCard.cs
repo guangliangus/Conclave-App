@@ -83,39 +83,136 @@ internal static class LarkCard
         var url = PrLink.For(pr, orgUrl);
         if (url is not null)
         {
-            elements.Add(new
-            {
-                Tag = "action",
-                Actions = new object[]
-                {
-                    new
-                    {
-                        Tag = "button",
-                        Text = new { Tag = "plain_text", Content = "打开 PR" },
-                        Type = "default",
-                        Url = url,
-                    },
-                },
-            });
+            elements.Add(new { Tag = "action", Actions = new List<object> { Button("打开 PR", url) } });
         }
 
-        var card = new
+        return Card(
+            Tone(result.Decision),
+            $"📝 代码评审 · PR #{pr.PrId.ToString(CultureInfo.InvariantCulture)} {pr.Title}",
+            elements);
+    }
+
+    /// <summary>
+    /// 「已开始评审」那张卡片。
+    /// </summary>
+    /// <remarks>
+    /// 它要回答的问题只有一个：有人接手了没有。所以正文刻意很短 —— 结论卡片那套
+    /// 条数、票数、finding 在这一刻全都还不存在，摆个「0 条问题」上去只会误导。
+    /// 剩下的空间给按钮：作者此刻真正想做的是去看它评到哪一步了。
+    /// </remarks>
+    internal static string RenderStarted(PrMeta pr, ReviewStarted started, string? orgUrl = null)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        ArgumentNullException.ThrowIfNull(started);
+
+        var reviewer = AzIdentity.Normalize(started.ReviewerAz);
+        var who = reviewer.Length > 0 ? $"**已开始评审** · 评审人：{reviewer}" : "**已开始评审**";
+
+        var endpoint = started.LogEndpoint.Trim().TrimEnd('/');
+
+        // 那个端点是评审节点的<b>内网</b>地址（MeshHttpServer.Endpoint 拼的是本机 IP），
+        // 手机上、用流量、或者人不在 VPN 上，点开只会是一个没有任何解释的连接超时。
+        // 修不了 —— 要从外面访问得有中转 —— 但至少别让人对着转圈的页面自己猜。
+        var hint = "评审通常十几分钟。跑完会再发一条结论通知，不用守着。"
+            + (endpoint.Length > 0
+                ? "\n「在 web 里查看实时日志」连的是评审那台机器，要在公司网络内。"
+                : string.Empty);
+
+        var elements = new List<object>
         {
-            Config = new { WideScreenMode = true },
-            Header = new
-            {
-                Template = Tone(result.Decision),
-                Title = new
-                {
-                    Tag = "plain_text",
-                    Content = $"📝 代码评审 · PR #{pr.PrId.ToString(CultureInfo.InvariantCulture)} {pr.Title}",
-                },
-            },
-            Elements = elements,
+            Div(who + $"\n{BranchLine(pr)}"),
+            Div(hint),
         };
 
-        // 必须带上运行时类型：card 是匿名类型，按 object 序列化会得到一个空的 {}。
-        return JsonSerializer.Serialize(card, card.GetType(), Json);
+        // 深链排第一并且是主按钮：装了 Conclave 的人拿到的是带完整上下文的面板
+        // （队列、这个 PR 的历史、别的节点在干什么），比浏览器里那页纯日志有用得多。
+        // 它不依赖任何端点，所以无条件给 —— 没装的人点了不会有反应，而那种人正是
+        // 第二个按钮服务的对象。
+        var buttons = new List<object>
+        {
+            Button("在 Conclave 里打开", DeepLink.ForReview(started.RevisionId), primary: true),
+        };
+
+        // 没装 Conclave 的人走这条。日志在评审那台机器上，不在作者这台 ——
+        // 没有 mesh 就没有这个端点，那种情况下评审者必然是本机，作者自己打开面板就看得到，
+        // 不必给个点不开的按钮。
+        if (endpoint.Length > 0)
+        {
+            buttons.Add(Button(
+                "在 web 里查看实时日志",
+                $"{endpoint}/log/live?revision={Uri.EscapeDataString(started.RevisionId)}"));
+        }
+
+        var url = PrLink.For(pr, orgUrl);
+        if (url is not null)
+        {
+            buttons.Add(Button("打开 PR", url));
+        }
+
+        elements.Add(new { Tag = "action", Actions = buttons });
+
+        return Card("blue", $"🔍 开始评审 · PR #{pr.PrId.ToString(CultureInfo.InvariantCulture)} {pr.Title}", elements);
+    }
+
+    /// <summary>
+    /// 指派卡片：指派本身、接受、拒绝三种。
+    /// </summary>
+    /// <remarks>
+    /// 拒绝用橙不用红。红在这套卡片里已经有确定含义了 ——「你的代码被驳回」，
+    /// 而一个节点不接活跟代码好不好毫无关系，染成红的会让收件人白紧张一下。
+    /// </remarks>
+    internal static string RenderAssignment(PrMeta pr, AssignmentNotice notice, string? orgUrl = null)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        ArgumentNullException.ThrowIfNull(notice);
+
+        var other = AzIdentity.Normalize(notice.Counterpart);
+        var who = other.Length > 0 ? $"**{other}**" : "某个节点";
+
+        var (tone, icon, headline, hint) = notice.Accepted switch
+        {
+            null => ("turquoise", "📥", $"{who} 把这个 PR 指派给你评",
+                     "到 Conclave 里接受或拒绝 —— 在那之前它不会开跑。"),
+            true => ("green", "✅", $"{who} 接受了你的指派，马上开跑",
+                     "开评和出结论时还会各来一条通知，不用守着。"),
+            _ => ("orange", "↩️", $"{who} 拒绝了你的指派",
+                  "换一台机器再指派一次，或者交回自动分配。"),
+        };
+
+        var title = notice.Accepted switch
+        {
+            null => "指派给你",
+            true => "指派已接受",
+            _ => "指派被拒绝",
+        };
+
+        var elements = new List<object> { Div(headline + "\n" + BranchLine(pr)) };
+
+        // 指派的留言和拒绝的理由是同一个位置上的两种东西，都是对面手打的一句话。
+        // 没有就不摆空行 —— 「理由：」后面跟着空白比不写更像出了错。
+        if (!string.IsNullOrWhiteSpace(notice.Note))
+        {
+            elements.Add(Div($"{(notice.Accepted == false ? "理由" : "留言")}：{notice.Note.Trim()}"));
+        }
+
+        elements.Add(Div(hint));
+
+        // 深链指向 PR 本身而不是日志：这一刻评审还没开跑，没有日志可看，
+        // 而收件人要做的正是去面板上处理它。
+        var buttons = new List<object> { Button("在 Conclave 里打开", DeepLink.ForPr(notice.RevisionId), primary: true) };
+
+        var url = PrLink.For(pr, orgUrl);
+        if (url is not null)
+        {
+            buttons.Add(Button("打开 PR", url));
+        }
+
+        elements.Add(new { Tag = "action", Actions = buttons });
+
+        return Card(
+            tone,
+            $"{icon} {title} · PR #{pr.PrId.ToString(CultureInfo.InvariantCulture)} {pr.Title}",
+            elements);
     }
 
     /// <summary>
@@ -163,12 +260,7 @@ internal static class LarkCard
             head += $" · 投票 `{AzVote.For(result.Decision)} ({points})`";
         }
 
-        // 老区块里没有分支名，那时的快照只有 project/repo。缺了就只说 repo，不占一行空话。
-        var branches = pr.SourceBranch.Length > 0 && pr.TargetBranch.Length > 0
-            ? $"{pr.SourceBranch} → {pr.TargetBranch} · "
-            : string.Empty;
-
-        return head + $"\n{branches}repo `{pr.Repo}`";
+        return head + "\n" + BranchLine(pr);
     }
 
     /// <summary>按严重度分档的条数、评审人、票数。</summary>
@@ -227,4 +319,39 @@ internal static class LarkCard
 
     private static object Div(string markdown)
         => new { Tag = "div", Text = new { Tag = "lark_md", Content = markdown } };
+
+    private static object Button(string label, string url, bool primary = false) => new
+    {
+        Tag = "button",
+        Text = new { Tag = "plain_text", Content = label },
+        Type = primary ? "primary" : "default",
+        Url = url,
+    };
+
+    /// <summary>「哪个分支进哪个分支」。老区块里没有分支名，缺了就只说 repo，不占一行空话。</summary>
+    private static string BranchLine(PrMeta pr)
+    {
+        var branches = pr.SourceBranch.Length > 0 && pr.TargetBranch.Length > 0
+            ? $"{pr.SourceBranch} → {pr.TargetBranch} · "
+            : string.Empty;
+
+        return $"{branches}repo `{pr.Repo}`";
+    }
+
+    private static string Card(string tone, string title, List<object> elements)
+    {
+        var card = new
+        {
+            Config = new { WideScreenMode = true },
+            Header = new
+            {
+                Template = tone,
+                Title = new { Tag = "plain_text", Content = title },
+            },
+            Elements = elements,
+        };
+
+        // 必须带上运行时类型：card 是匿名类型，按 object 序列化会得到一个空的 {}。
+        return JsonSerializer.Serialize(card, card.GetType(), Json);
+    }
 }

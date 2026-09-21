@@ -54,6 +54,8 @@ public sealed class LocalMesh : IMesh
     public IReadOnlyDictionary<string, LiveState> PeerStates
         => new Dictionary<string, LiveState>(StringComparer.Ordinal) { [Self.Id] = State };
 
+    public event Action? StateChanged;
+
     public void UpdateState(Func<LiveState, LiveState> mutate)
     {
         ArgumentNullException.ThrowIfNull(mutate);
@@ -70,6 +72,9 @@ public sealed class LocalMesh : IMesh
 
             _state = next with { Version = _state.Version + 1 };
         }
+
+        // 锁外发：订阅方会回头读 State。
+        StateChanged?.Invoke();
     }
 
     /// <summary>单机无对等节点，空操作。</summary>
