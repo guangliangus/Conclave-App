@@ -211,6 +211,17 @@ internal sealed class Program
             o.TimestampFormat = "HH:mm:ss ";
         });
 
+        // 控制台那份在装成 .app 之后是写给 /dev/null 的：LaunchServices 起的进程
+        // stdout/stderr 都接空设备（lsof 实测 fd1/fd2 皆为 /dev/null），统一日志里
+        // 也查不到。所以再落一份到 ~/.conclave/logs/app/，否则生产上出事只能靠链上
+        // 的时间戳倒推（PIM#3261 那次查超时就是这么查的）。
+        //
+        // 用工厂而不是直接 new：LogRetention 和 LogDirectory 都来自绑定好的
+        // ConclaveOptions，而那是下一行 AddConclaveNode 才注册的。ILoggerProvider
+        // 到真正要写日志时才解析，那时容器已经建好了。
+        _ = builder.Logging.Services.AddSingleton<ILoggerProvider>(
+            sp => new FileLoggerProvider(sp.GetRequiredService<ConclaveOptions>()));
+
         return builder;
     }
 

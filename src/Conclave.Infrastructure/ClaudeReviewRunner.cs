@@ -98,6 +98,26 @@ public sealed class ClaudeReviewRunner(
                 .ConfigureAwait(false);
             progress.Append(revision.Id, "工作区就绪（merge-base 已验证）");
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // 走到这里只有一种可能：CheckoutAsync 内部那个 CheckoutTimeout 的 CTS 到点了。
+            // 上层要求停（PR 关了、进程要退）时 ct 自己会是 canceled，那种必须原样往上抛，
+            // 不能变成一张 Error 票 —— 所以用 ct.IsCancellationRequested 把两者分开。
+            //
+            // 这条分支以前落在下面那个 `when (ex is not OperationCanceledException)` 的
+            // 外面，于是超时既不写进度日志也不记 logger：界面显示「执行失败」，点进日志只有
+            // 「拉取工作区」孤零零一行，什么都没说。PIM#3261 就是这么查了半天 ——
+            // 最后是靠链上 Ballot 的时间戳与开始时间正好差 10 分钟才认出是超时。
+            var limit = options.CheckoutTimeout;
+            logger.LogError(
+                "拉 {Repo} 的临时工作区超时（{Revision} round={Round}，上限 {Limit}）",
+                pr.Repo, revision.Id, round, limit);
+            progress.End(revision.Id, $"拉取工作区超时（超过 {limit:g}）");
+            return new BallotPayload(
+                revision.Id, round, ReviewDecision.Error, [], "n/a", 0, ReviewUsage.None,
+                Error: $"拉取 {pr.Repo} 的临时工作区超时：超过 {limit:g} 仍未就绪"
+                    + "（这条链路带宽有限，深度不够时的加深会很慢；可调大 Conclave:CheckoutTimeout）");
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // 拉不下来就出 Error 票：计入 quorum 分母、链上留原因，PR 不会永远等下去。
