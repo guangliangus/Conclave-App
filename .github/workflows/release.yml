@@ -82,29 +82,29 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: \
             -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}" >/dev/null
 
-          # add-trusted-cert 只认证书文件，不吃 .p12，所以把公钥证书单独导出来一份。
-          security find-certificate -c "${CODESIGN_IDENTITY}" -p "${KEYCHAIN}" \
-            > "${RUNNER_TEMP}/cert.cer" 2>/dev/null || true
           # 加进搜索路径，否则 codesign 按名字找不到这个身份。
           security list-keychain -d user -s "${KEYCHAIN}" \
             $(security list-keychains -d user | tr -d '"')
 
-          # 自签名根证书默认不被信任，只 import 的话 find-identity -v 会把它过滤掉，
-          # codesign 跟着报找不到身份。本机建证书时就是先卡在这里：
-          #   1) 73817D86… "Conclave Signing" (CSSMERR_TP_NOT_TRUSTED)
-          #        1 identities found
-          #        0 valid identities found
-          # Developer ID 不需要这步（根在系统信任库里），但多设一次也无害。
-          security add-trusted-cert -d -r trustRoot -p codeSign \
-            -k "${KEYCHAIN}" "${RUNNER_TEMP}/cert.cer" 2>/dev/null \
-            || echo "add-trusted-cert 没成功，若下一步找不到有效身份即为此因"
+          rm -f "${RUNNER_TEMP}/cert.p12"
 
-          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/cert.cer"
+          # 刻意不用 -v。自签名根证书在 runner 这种干净机器上不受信任，
+          # -v 会把它过滤掉、打出 "0 valid identities found" —— 但那不是故障：
+          # 信任只影响验证，不影响签名，codesign --sign 用未受信任的证书照签不误。
+          # v1.1.1 实测如此：导入步骤报 0 valid，打包照常出包，产物的指定要求
+          # 就是 certificate leaf = H"73817d86…"，codesign -v --deep --strict 通过。
+          #
+          # 所以这里也不该去 add-trusted-cert：那要 sudo 写 System.keychain，
+          # 为一个不影响结果的显示问题动系统信任库，不值当。
+          echo "钥匙串里的签名身份："
+          security find-identity -p codesigning "${KEYCHAIN}"
 
-          echo "可用身份："
-          # 这里必须是 -v：没有 -v 的话不受信任的证书也会列出来，看着像成功了，
-          # 而 codesign 实际用不了它。
-          security find-identity -v -p codesigning "${KEYCHAIN}"
+          # 门禁只认「身份在不在」，不认「受不受信任」——后者会误杀。
+          if ! security find-identity -p codesigning "${KEYCHAIN}" \
+               | grep -q "${CODESIGN_IDENTITY}"; then
+            echo "::error::.p12 导入了但找不到 ${CODESIGN_IDENTITY} 这个身份" >&2
+            exit 1
+          fi
 
       - name: 打包两个架构
         env:
