@@ -152,13 +152,16 @@ public sealed class LarkNotifierTests
 
         using var sent = JsonDocument.Parse(send.Body);
         Assert.Equal(OpenId, sent.RootElement.GetProperty("receive_id").GetString());
-        Assert.Equal("text", sent.RootElement.GetProperty("msg_type").GetString());
+        Assert.Equal("interactive", sent.RootElement.GetProperty("msg_type").GetString());
 
         // content 是一个 JSON 字符串而不是嵌套对象，发错会被飞书直接拒。
         var content = sent.RootElement.GetProperty("content").GetString();
         Assert.NotNull(content);
         using var inner = JsonDocument.Parse(content);
-        Assert.Contains("PR #2954", inner.RootElement.GetProperty("text").GetString()!, StringComparison.Ordinal);
+        Assert.Contains(
+            "PR #2954",
+            inner.RootElement.GetProperty("header").GetProperty("title").GetProperty("content").GetString()!,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -304,41 +307,194 @@ public sealed class LarkNotifierTests
     /// 他会去读 0 票、降级那些字眼然后自己脑补一个结论。也不能列 finding：失败的票本来
     /// 就没有 finding，「0 条问题」在这个语境下读起来像「评过了，没问题」。
     /// </remarks>
+    /// <summary>
+    /// 执行失败的卡片要直说「不是你的问题」。
+    /// </summary>
+    /// <remarks>
+    /// 作者拿到它时想知道的是「我要改什么」，而答案是「什么都不用改」—— 不直说的话，
+    /// 他会去读 0 票、降级那些字眼然后自己脑补一个结论。也不能列 finding：失败的票本来
+    /// 就没有 finding，「0 条问题」在这个语境下读起来像「评过了，没问题」。
+    /// 标题栏也不能染红 —— 红色在这张卡上等于「驳回」。
+    /// </remarks>
     [Fact]
     public void A_failed_verdict_says_it_is_not_the_authors_fault()
     {
-        var text = LarkNotifier.RenderText(
+        using var card = JsonDocument.Parse(LarkCard.Render(
             Pr(),
             new PromulgationPayload(
                 "liontrip-order/2954@bdcc84b", ReviewDecision.Error, [],
-                Degraded: true, ActualQuorum: 0, ExpectedQuorum: 1));
+                Degraded: true, ActualQuorum: 0, ExpectedQuorum: 1)));
 
+        Assert.Equal("grey", card.RootElement.GetProperty("header").GetProperty("template").GetString());
+
+        var text = Flatten(card.RootElement);
         Assert.Contains("不是你代码的问题", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("条问题", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("🔴", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("票", text, StringComparison.Ordinal);
         Assert.DoesNotContain("降级", text, StringComparison.Ordinal);
+
+        // Error 不在 PR 上投票，写个 none 只会让人去找那一票在哪。
+        Assert.DoesNotContain("投票", text, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void The_body_carries_the_decision_the_counts_and_a_link_to_the_pr()
+    public void The_card_carries_the_decision_the_vote_the_counts_and_a_button()
     {
-        var text = LarkNotifier.RenderText(Pr(), Result(findings: 5));
+        using var card = JsonDocument.Parse(LarkCard.Render(Pr(), Result(findings: 5)));
+        var root = card.RootElement;
 
-        Assert.Contains("驳回", text, StringComparison.Ordinal);
-        Assert.Contains("5 条问题 · 2/2 票", text, StringComparison.Ordinal);
-        Assert.Contains("· 还有 2 条，见 PR", text, StringComparison.Ordinal);
-        Assert.Contains(
+        Assert.Equal("red", root.GetProperty("header").GetProperty("template").GetString());
+        Assert.Equal(
+            "📝 代码评审 · PR #2954 feat(voucher): embed 小程序码",
+            root.GetProperty("header").GetProperty("title").GetProperty("content").GetString());
+
+        var text = Flatten(root);
+        Assert.Contains("**结论**：驳回", text, StringComparison.Ordinal);
+
+        // 投票串必须跟 PR 上真正留下的那一票是同一个词，见 AzVote。
+        Assert.Contains("投票 `reject (-10)`", text, StringComparison.Ordinal);
+        Assert.Contains("🔴 0 · 🟡 5 · 🔵 0", text, StringComparison.Ordinal);
+        Assert.Contains("2/2 票", text, StringComparison.Ordinal);
+        Assert.Contains("🟡 `src/A0.cs:12` — 问题 0", text, StringComparison.Ordinal);
+
+        Assert.Equal(
             "https://azdevops.liontravel.com/LionTechShanghai/liontrip-order/_git/liontrip-order/pullrequest/2954",
-            text, StringComparison.Ordinal);
+            Button(root).GetProperty("url").GetString());
     }
 
-    /// <summary>老 Summons 块里没有 RemoteUrl，那种通知不带链接但仍要发得出去。</summary>
+    /// <summary>三档圆点跟评审 skill 的 severity 契约对齐；info 并进蓝的那一档。</summary>
     [Fact]
-    public void A_snapshot_without_a_remote_url_still_renders()
+    public void Severities_collapse_onto_three_dots()
     {
-        var text = LarkNotifier.RenderText(Pr() with { RemoteUrl = string.Empty }, Result());
+        var findings = new[] { Severity.Critical, Severity.Major, Severity.Minor, Severity.Info }
+            .Select((sev, i) => new MergedFinding(new Finding($"src/S{i}.cs", i, sev, $"t{i}", "d"), 1, 1.0))
+            .ToArray();
 
-        Assert.DoesNotContain("pullrequest", text, StringComparison.Ordinal);
-        Assert.Contains("PR #2954", text, StringComparison.Ordinal);
+        var text = Flatten(JsonDocument.Parse(LarkCard.Render(
+            Pr(),
+            new PromulgationPayload("r", ReviewDecision.Reject, findings, false, 1, 1))).RootElement);
+
+        Assert.Contains("🔴 1 · 🟡 1 · 🔵 2", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>超过 8 条就折起来 —— 到那个量级该看的是 PR 本身。</summary>
+    [Fact]
+    public void Findings_beyond_the_cap_are_folded_into_one_line()
+    {
+        var text = Flatten(JsonDocument.Parse(LarkCard.Render(Pr(), Result(findings: 11))).RootElement);
+
+        Assert.Contains("`src/A7.cs:19`", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("`src/A8.cs:20`", text, StringComparison.Ordinal);
+        Assert.Contains("…… 还有 3 条，见 PR", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 评审人取自公布块的转述，老块上没有这个字段。
+    /// </summary>
+    /// <remarks>
+    /// 没有就整段不出现：「评审人：—」比不写还糟，它看起来像「没人评」。
+    /// 有就按 az 账号显示，同一个人写成什么形态都收敛到一份。
+    /// </remarks>
+    [Fact]
+    public void Reviewers_are_normalised_and_dropped_when_the_block_has_none()
+    {
+        Assert.DoesNotContain(
+            "评审人",
+            Flatten(JsonDocument.Parse(LarkCard.Render(Pr(), Result())).RootElement),
+            StringComparison.Ordinal);
+
+        var named = Result() with { Reviewers = [@"LIONMAIL\tobeyhuang", "tobeyhuang"] };
+        Assert.Contains(
+            "评审人：tobeyhuang  |  ",
+            Flatten(JsonDocument.Parse(LarkCard.Render(Pr(), named)).RootElement),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>降级要写在票数后面，不能让它看起来像跑满了。</summary>
+    [Fact]
+    public void A_degraded_verdict_says_so_next_to_the_vote_count()
+    {
+        var degraded = Result() with { Degraded = true, ActualQuorum = 1, ExpectedQuorum = 2 };
+        var text = Flatten(JsonDocument.Parse(LarkCard.Render(Pr(), degraded)).RootElement);
+
+        Assert.Contains("1/2 票（降级：合格节点不足）", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>分支名在老 Summons 块里没有；缺了就只说 repo，不占一行空话。</summary>
+    [Fact]
+    public void Branches_show_up_when_the_snapshot_has_them()
+    {
+        var bare = Flatten(JsonDocument.Parse(LarkCard.Render(Pr(), Result())).RootElement);
+        Assert.Contains("repo `liontrip-order`", bare, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", bare, StringComparison.Ordinal);
+
+        var branched = Pr() with { SourceBranch = "fix/refund", TargetBranch = "develop" };
+        Assert.Contains(
+            "fix/refund → develop · repo `liontrip-order`",
+            Flatten(JsonDocument.Parse(LarkCard.Render(branched, Result())).RootElement),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>老 Summons 块里没有 RemoteUrl，那种卡片不带按钮但仍要渲染得出来。</summary>
+    [Fact]
+    public void A_snapshot_without_a_remote_url_renders_without_a_button()
+    {
+        using var card = JsonDocument.Parse(
+            LarkCard.Render(Pr() with { RemoteUrl = string.Empty }, Result()));
+
+        Assert.Equal(JsonValueKind.Undefined, Button(card.RootElement).ValueKind);
+        Assert.Contains("PR #2954", Flatten(card.RootElement), StringComparison.Ordinal);
+    }
+
+    /// <summary>「打开 PR」那个按钮；没有则返回 <c>default</c>。</summary>
+    private static JsonElement Button(JsonElement card)
+    {
+        foreach (var element in card.GetProperty("elements").EnumerateArray())
+        {
+            if (element.TryGetProperty("actions", out var actions))
+            {
+                return actions[0];
+            }
+        }
+
+        return default;
+    }
+
+    /// <summary>把卡片里所有 content 串起来 —— 断言正文时不必关心它落在哪个 element 上。</summary>
+    private static string Flatten(JsonElement card)
+    {
+        var parts = new List<string>();
+        Walk(card);
+        return string.Join('\n', parts);
+
+        void Walk(JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var property in element.EnumerateObject())
+                    {
+                        if (property.Name == "content" && property.Value.ValueKind == JsonValueKind.String)
+                        {
+                            parts.Add(property.Value.GetString()!);
+                        }
+                        else
+                        {
+                            Walk(property.Value);
+                        }
+                    }
+
+                    break;
+
+                case JsonValueKind.Array:
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        Walk(item);
+                    }
+
+                    break;
+            }
+        }
     }
 
     [Theory]

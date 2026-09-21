@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -50,9 +49,6 @@ public sealed class LarkNotifier : INotifier, IDisposable
     /// 见 <see cref="BuildSendError"/>。
     /// </remarks>
     private const int FieldValidationFailed = 99992402;
-
-    /// <summary>正文里最多列几条 finding。再多就该去看 PR 本身了。</summary>
-    private const int MaxListedFindings = 3;
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -135,9 +131,8 @@ public sealed class LarkNotifier : INotifier, IDisposable
         var body = new
         {
             ReceiveId = id,
-            MsgType = "text",
-            Content = JsonSerializer.Serialize(
-                new { text = RenderText(pr, result, _conclave.AzureDevOpsOrgUrl) }, Json),
+            MsgType = "interactive",
+            Content = LarkCard.Render(pr, result, _conclave.AzureDevOpsOrgUrl),
         };
 
         var (code, msg, doc) = await PostAsync(
@@ -416,73 +411,6 @@ public sealed class LarkNotifier : INotifier, IDisposable
         var msg = root.TryGetProperty("msg", out var m) ? m.GetString() ?? string.Empty : string.Empty;
 
         return (code, msg, doc);
-    }
-
-    /// <summary>
-    /// 通知正文。纯函数，测试直接断言它的形状。
-    /// </summary>
-    /// <param name="pr">PR 快照。</param>
-    /// <param name="result">公布的结论。</param>
-    /// <param name="orgUrl">
-    /// Azure DevOps 组织地址，只用来兜底拼 PR 链接（老区块里没有 <c>RemoteUrl</c>）。
-    /// 两者都没有时正文里就不带链接。
-    /// </param>
-    internal static string RenderText(PrMeta pr, PromulgationPayload result, string? orgUrl = null)
-    {
-        var lines = new List<string>(MaxListedFindings + 5)
-        {
-            $"【Conclave】PR #{pr.PrId.ToString(CultureInfo.InvariantCulture)} 评审结论："
-                + DecisionLabels.Decision(result.Decision),
-            $"{pr.Project}/{pr.Repo} · {pr.Title}",
-        };
-
-        // 执行失败的正文跟出了结论的完全不一样。
-        //
-        // 作者拿到它时最想知道的是「我要改什么」，而答案是「你什么都不用改」—— 这句话
-        // 必须直接说出来，否则他会去读那些 0 票、降级之类的字眼，然后自己脑补出一个结论。
-        // 也不列 finding：失败的那一票本来就没有 finding，列出来只会是一行「0 条问题」，
-        // 而那在这个语境下读起来像「评过了，没问题」。
-        if (result.Decision == ReviewDecision.Error)
-        {
-            lines.Add("评审没能跑出结论，是我们这边的问题，不是你代码的问题 —— 不用改什么。");
-            lines.Add("已经在排查，修好后会重新评这一版。");
-
-            var errorUrl = PrLink.For(pr, orgUrl);
-            if (errorUrl is not null)
-            {
-                lines.Add(errorUrl);
-            }
-
-            return string.Join('\n', lines);
-        }
-
-        lines.Add(
-            $"{result.Findings.Count.ToString(CultureInfo.InvariantCulture)} 条问题 · "
-            + $"{result.ActualQuorum.ToString(CultureInfo.InvariantCulture)}/"
-            + $"{result.ExpectedQuorum.ToString(CultureInfo.InvariantCulture)} 票"
-            + (result.Degraded ? "（降级：合格节点不足）" : string.Empty));
-
-        foreach (var finding in result.Findings.Take(MaxListedFindings))
-        {
-            lines.Add(
-                $"· [{DecisionLabels.Severity(finding.Best.Severity)}] "
-                + $"{finding.Best.File}:{finding.Best.Line.ToString(CultureInfo.InvariantCulture)} "
-                + finding.Best.Title);
-        }
-
-        if (result.Findings.Count > MaxListedFindings)
-        {
-            var rest = result.Findings.Count - MaxListedFindings;
-            lines.Add($"· 还有 {rest.ToString(CultureInfo.InvariantCulture)} 条，见 PR");
-        }
-
-        var url = PrLink.For(pr, orgUrl);
-        if (url is not null)
-        {
-            lines.Add(url);
-        }
-
-        return string.Join('\n', lines);
     }
 
     public void Dispose()

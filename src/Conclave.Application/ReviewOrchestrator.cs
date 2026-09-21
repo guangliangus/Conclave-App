@@ -1064,7 +1064,7 @@ public sealed class ReviewOrchestrator : BackgroundService
         // 一条说明白的失败通知，比一片安静强。
         //
         // 所以拦的不是通知，是措辞 —— 正文里会写清「这是我们这边没跑出来，不是你代码的问题」，
-        // 见 LarkNotifier.RenderText。投递回 PR 那条仍然按 deliverable 拦着：
+        // 见 LarkCard.Render。投递回 PR 那条仍然按 deliverable 拦着：
         // 那是往公共位置写，跟私聊作者不是一回事。
         try
         {

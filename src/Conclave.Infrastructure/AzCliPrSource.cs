@@ -267,24 +267,6 @@ public sealed class AzCliPrSource(
     private static string ShortBranch(string refName)
         => refName.StartsWith("refs/heads/", StringComparison.Ordinal) ? refName["refs/heads/".Length..] : refName;
 
-    /// <summary>
-    /// 结论转成 <c>az repos pr set-vote --vote</c> 接受的字符串。
-    /// </summary>
-    /// <remarks>
-    /// 这个映射刻意放在这里而不是领域层：取值是 <c>az</c> 的命令行词汇，
-    /// 换个 ADO 客户端就得跟着换，而 <see cref="ReviewDecision"/> 不该跟着动。
-    /// <c>none</c> 表示不投票 —— <see cref="ReviewDecision.Error"/> 是本机跑挂了，
-    /// 不是一个评审意见，不该在 PR 上留下任何一票。
-    /// </remarks>
-    private static string AzVote(ReviewDecision decision) => decision switch
-    {
-        ReviewDecision.Approve => "approve",
-        ReviewDecision.ApproveWithSuggestions => "approve-with-suggestions",
-        ReviewDecision.WaitForAuthor => "wait-for-author",
-        ReviewDecision.Reject => "reject",
-        _ => "none",
-    };
-
     public async Task<PrMeta> EnrichWithChangeStatsAsync(PrMeta pr, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pr);
@@ -492,7 +474,7 @@ public sealed class AzCliPrSource(
                 }
             }
 
-            var vote = AzVote(result.Decision);
+            var vote = AzVote.For(result.Decision);
             if (vote != "none")
             {
                 _ = await AzAsync([
