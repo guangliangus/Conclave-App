@@ -100,7 +100,8 @@ internal static class LarkCard
     /// 条数、票数、finding 在这一刻全都还不存在，摆个「0 条问题」上去只会误导。
     /// 剩下的空间给按钮：作者此刻真正想做的是去看它评到哪一步了。
     /// </remarks>
-    internal static string RenderStarted(PrMeta pr, ReviewStarted started, string? orgUrl = null)
+    internal static string RenderStarted(
+        PrMeta pr, ReviewStarted started, int localPort, string? orgUrl = null)
     {
         ArgumentNullException.ThrowIfNull(pr);
         ArgumentNullException.ThrowIfNull(started);
@@ -130,7 +131,10 @@ internal static class LarkCard
         // 第二个按钮服务的对象。
         var buttons = new List<object>
         {
-            Button("在 Conclave 里打开", DeepLink.ForReview(started.RevisionId), primary: true),
+            Button(
+                "在 Conclave 里打开",
+                LocalOpenLink.For(localPort, DeepLinkTarget.Review, started.RevisionId),
+                primary: true),
         };
 
         // 没装 Conclave 的人走这条。日志在评审那台机器上，不在作者这台 ——
@@ -138,9 +142,11 @@ internal static class LarkCard
         // 不必给个点不开的按钮。
         if (endpoint.Length > 0)
         {
+            // 不用 Uri.EscapeDataString：它会把 / 和 @ 转成 %2F / %40，而飞书会把百分号编码
+            // 吃掉 —— 实测点过去之后 revision= 后面整段消失，服务端收到空值回 400。
             buttons.Add(Button(
                 "在 web 里查看实时日志",
-                $"{endpoint}/log/live?revision={Uri.EscapeDataString(started.RevisionId)}"));
+                $"{endpoint}/log/live?revision={LocalOpenLink.QueryValue(started.RevisionId)}"));
         }
 
         var url = PrLink.For(pr, orgUrl);
@@ -161,7 +167,8 @@ internal static class LarkCard
     /// 拒绝用橙不用红。红在这套卡片里已经有确定含义了 ——「你的代码被驳回」，
     /// 而一个节点不接活跟代码好不好毫无关系，染成红的会让收件人白紧张一下。
     /// </remarks>
-    internal static string RenderAssignment(PrMeta pr, AssignmentNotice notice, string? orgUrl = null)
+    internal static string RenderAssignment(
+        PrMeta pr, AssignmentNotice notice, int localPort, string? orgUrl = null)
     {
         ArgumentNullException.ThrowIfNull(pr);
         ArgumentNullException.ThrowIfNull(notice);
@@ -197,9 +204,15 @@ internal static class LarkCard
 
         elements.Add(Div(hint));
 
-        // 深链指向 PR 本身而不是日志：这一刻评审还没开跑，没有日志可看，
+        // 指向 PR 本身而不是日志：这一刻评审还没开跑，没有日志可看，
         // 而收件人要做的正是去面板上处理它。
-        var buttons = new List<object> { Button("在 Conclave 里打开", DeepLink.ForPr(notice.RevisionId), primary: true) };
+        var buttons = new List<object>
+        {
+            Button(
+                "在 Conclave 里打开",
+                LocalOpenLink.For(localPort, DeepLinkTarget.Pr, notice.RevisionId),
+                primary: true),
+        };
 
         var url = PrLink.For(pr, orgUrl);
         if (url is not null)

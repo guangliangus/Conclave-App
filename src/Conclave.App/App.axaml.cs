@@ -172,6 +172,7 @@ public partial class App : global::Avalonia.Application
 
             WatchReviewingState();
             HookDeepLinks();
+            HookLocalOpen();
 
             if (SelfTest)
             {
@@ -233,21 +234,47 @@ public partial class App : global::Avalonia.Application
             }
 
             var (target, revision) = link;
-
-            // 系统可能在任意线程转交，而下面要碰窗口和 ObservableCollection。
-            Dispatcher.UIThread.Post(() =>
-            {
-                ShowDashboard();
-
-                if (_dashboard?.DataContext is not MainViewModel vm)
-                {
-                    return;
-                }
-
-                _ = target == DeepLinkTarget.Review ? vm.OpenLogFor(revision) : vm.RevealPr(revision);
-            });
+            OpenFromOutside(target, revision);
         };
     }
+
+    /// <summary>
+    /// 接住浏览器点过来的「在 Conclave 里打开」。
+    /// </summary>
+    /// <remarks>
+    /// 跟 <see cref="HookDeepLinks"/> 是同一件事的两条路：<c>conclave://</c> 由系统转交，
+    /// 这条由本机的 <c>GET /open</c> 转交（见 <c>MeshHttpServer</c>）。
+    /// 之所以两条都要，是因为<b>飞书客户端把自定义协议静默丢掉</b> ——
+    /// 卡片上的按钮只能走 http 那条，而协议那条留给终端和别的工具。
+    /// </remarks>
+    private void HookLocalOpen()
+    {
+        var state = Services?.GetService<NodeState>();
+        if (state is null)
+        {
+            return;
+        }
+
+        state.RevealRequested += (revision, target) => OpenFromOutside(target, revision);
+    }
+
+    /// <summary>把面板叫到前面并定位到某一版。两个外部入口共用。</summary>
+    /// <remarks>
+    /// 系统转交和 mesh 的 HTTP 线程都可能在任意线程上来，而下面要碰窗口和
+    /// <c>ObservableCollection</c>，所以统一回 UI 线程。
+    /// </remarks>
+    private void OpenFromOutside(DeepLinkTarget target, string revision)
+        => Dispatcher.UIThread.Post(() =>
+        {
+            ShowDashboard();
+
+            if (_dashboard?.DataContext is not MainViewModel vm)
+            {
+                return;
+            }
+
+            _ = target == DeepLinkTarget.Review ? vm.OpenLogFor(revision) : vm.RevealPr(revision);
+        });
 
     /// <summary>
     /// 点一下图标：没开就开，在前台就收起，被别的窗口压住就提到前面。

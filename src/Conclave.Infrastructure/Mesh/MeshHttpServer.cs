@@ -68,6 +68,9 @@ public sealed class MeshHttpServer : IDisposable
     private readonly Func<string, long, LogChunk> _readLog;
     private readonly Func<string, string?> _readFullLog;
 
+    /// <summary>浏览器点了「在 Conclave 里打开」。</summary>
+    private readonly Action<string, DeepLinkTarget> _onOpen;
+
     /// <summary>按请求方的公钥应答一份配置；本机手上还没有配置时返回 null。</summary>
     private readonly Func<string, ConfigOffer?> _offerConfig;
 
@@ -82,6 +85,7 @@ public sealed class MeshHttpServer : IDisposable
         Func<Block, CancellationToken, Task> onBlock,
         Func<string, long, LogChunk> readLog,
         Func<string, string?> readFullLog,
+        Action<string, DeepLinkTarget> onOpen,
         Func<string, ConfigOffer?> offerConfig,
         ILogger<MeshHttpServer> logger)
     {
@@ -94,6 +98,7 @@ public sealed class MeshHttpServer : IDisposable
         _onBlock = onBlock;
         _readLog = readLog;
         _readFullLog = readFullLog;
+        _onOpen = onOpen;
         _offerConfig = offerConfig;
         _logger = logger;
 
@@ -278,6 +283,41 @@ public sealed class MeshHttpServer : IDisposable
             return;
         }
 
+        if (method == "GET" && path == LocalOpenLink.Path)
+        {
+            // 飞书卡片上那个「在 Conclave 里打开」。走 http 而不是 conclave:// ——
+            // 飞书客户端把自定义协议静默丢掉（三种写法都实测过），见 LocalOpenLink。
+            //
+            // ⚠️ 只接回环，这是唯一一个会造成<b>本机 UI 动作</b>的接口。其余几个 GET
+            // 最多泄露信息，而这个能让别人把你的面板弹出来。
+            //
+            // 用回环而不是 HttpListenerRequest.IsLocal：后者的语义是「回环<b>或者</b>
+            // 等于本机任意一个地址」，于是从本机打自己的内网 IP 也算数。而卡片上的链接
+            // 永远是 127.0.0.1，那一档放宽换不来任何功能，只是把面放大。
+            //
+            // 单独监听 127.0.0.1 做不到：mesh 要对邻居可达，HttpListener 已经绑了 +:47708
+            // （即 0.0.0.0），再绑 127.0.0.1:47708 是冲突的；隔离就得再开一个端口，
+            // 多一个要配、要同步、要过防火墙的东西。一次判断换同样的保证，值。
+            if (!IsLoopback(context.Request.RemoteEndPoint?.Address))
+            {
+                TrySetStatus(context, HttpStatusCode.Forbidden);
+                return;
+            }
+
+            var wantedOpen = context.Request.QueryString[LocalOpenLink.RevisionKey];
+            if (string.IsNullOrWhiteSpace(wantedOpen))
+            {
+                TrySetStatus(context, HttpStatusCode.BadRequest);
+                return;
+            }
+
+            _onOpen(wantedOpen, LocalOpenLink.ViewFrom(context.Request.QueryString[LocalOpenLink.ViewKey]));
+
+            // 不回显 revision：这一页不需要它，而不回显就不存在转义对不对的问题。
+            await WriteHtmlAsync(context, OpenedPage, ct).ConfigureAwait(false);
+            return;
+        }
+
         if (method == "GET" && path == "/log/live")
         {
             // /log 的人读版：一页会自己轮询 /log 的 HTML，给飞书「开始评审」卡片上那个按钮用。
@@ -426,6 +466,64 @@ public sealed class MeshHttpServer : IDisposable
         context.Response.ContentLength64 = bytes.Length;
         await context.Response.OutputStream.WriteAsync(bytes, ct).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// 这个请求是不是从本机回环来的。
+    /// </summary>
+    /// <remarks>
+    /// 拿地址而不是 <c>HttpListenerRequest</c> 当参数，纯粹是为了能测 ——
+    /// <c>HttpListenerRequest</c> 造不出来。
+    /// <para>
+    /// 拿不到远端地址时判否：这里的默认值必须是「拒绝」。
+    /// </para>
+    /// </remarks>
+    internal static bool IsLoopback(IPAddress? address)
+    {
+        if (address is null)
+        {
+            return false;
+        }
+
+        // IPv4 映射进 IPv6 的形态（::ffff:127.0.0.1）要先拆回去再判，
+        // 否则回环从 IPv6 栈进来会被当成外部请求挡掉。
+        var plain = address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+        return IPAddress.IsLoopback(plain);
+    }
+
+    /// <summary>
+    /// <c>GET /open</c> 的回执。
+    /// </summary>
+    /// <remarks>
+    /// 人要看的东西已经在面板上了，这一页只是浏览器不得不显示的那个落点 ——
+    /// 所以它只说一句话，并且不回显任何来自请求的内容。
+    /// </remarks>
+    private const string OpenedPage = """
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>已在 Conclave 中打开</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+         background:#f6f7f9; color:#24292f; }
+  @media (prefers-color-scheme: dark) { body { background:#12141a; color:#d7dae0; } }
+  main { text-align:center; padding:24px; }
+  h1 { font-size:17px; margin:0 0 8px; }
+  p { margin:0; opacity:.65; font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>已在 Conclave 中打开</h1>
+  <p>可以关掉这个标签页了。</p>
+</main>
+</body>
+</html>
+""";
 
     private static Task WriteHtmlAsync(HttpListenerContext context, string html, CancellationToken ct)
         => WriteBodyAsync(context, html, "text/html; charset=utf-8", ct);

@@ -147,6 +147,16 @@ public sealed class NodeState
     public event EventHandler? Changed;
 
     /// <summary>
+    /// 有人从浏览器点了「在 Conclave 里打开」。
+    /// </summary>
+    /// <remarks>
+    /// 事件而不是直接调界面：收到请求的是 mesh 的 HTTP 线程（<c>MeshHttpServer</c>，
+    /// 在 Infrastructure 层），而面板在 App 层 —— 让前者去碰后者会把依赖方向掉过来。
+    /// <c>NodeState</c> 本来就是这两层之间的那块板子。
+    /// </remarks>
+    public event Action<string, DeepLinkTarget>? RevealRequested;
+
+    /// <summary>
     /// 额度读数变了。跟 <see cref="Changed"/> 分开，是因为它的节奏和影响面都不一样。
     /// </summary>
     /// <remarks>
@@ -571,6 +581,22 @@ public sealed class NodeState
         }
 
         Raise();
+    }
+
+    /// <summary>
+    /// 请求把面板叫到前面并定位到某一版。
+    /// </summary>
+    /// <remarks>
+    /// 只由 <c>GET /open</c> 调，而那条路由只接本机请求 —— 见 <c>MeshHttpServer</c>。
+    /// </remarks>
+    public void RequestReveal(string revisionId, DeepLinkTarget target)
+    {
+        if (string.IsNullOrWhiteSpace(revisionId))
+        {
+            return;
+        }
+
+        RevealRequested?.Invoke(revisionId, target);
     }
 
     /// <summary>编排器在评审开跑/收尾时调。没变就不发事件。</summary>

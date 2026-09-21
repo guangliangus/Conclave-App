@@ -458,7 +458,8 @@ public sealed class LarkNotifierTests
     {
         using var card = JsonDocument.Parse(LarkCard.RenderStarted(
             Pr() with { SourceBranch = "fix/refund", TargetBranch = "develop" },
-            new ReviewStarted("liontrip-order/2954@bdcc84b", @"LIONMAIL\tobeyhuang", "http://10.0.0.7:47708/")));
+            new ReviewStarted("liontrip-order/2954@bdcc84b", @"LIONMAIL\tobeyhuang", "http://10.0.0.7:47708/"),
+            47708));
 
         var root = card.RootElement;
         Assert.Equal("blue", root.GetProperty("header").GetProperty("template").GetString());
@@ -480,12 +481,12 @@ public sealed class LarkNotifierTests
         // 深链排第一并且是主按钮：面板比浏览器里那页纯日志有用得多。
         Assert.Equal("primary", buttons[0].GetProperty("type").GetString());
 
-        // revision id 里的 / 和 @ 两头都要挺过转义。
+        // / 和 @ 在 query 里合法，必须原样留着 —— 飞书会把 %2F / %40 吃掉（实测）。
         Assert.Equal(
-            "conclave://review?revision=liontrip-order%2F2954%40bdcc84b",
+            "http://127.0.0.1:47708/open?revision=liontrip-order/2954@bdcc84b&view=review",
             buttons[0].GetProperty("url").GetString());
         Assert.Equal(
-            "http://10.0.0.7:47708/log/live?revision=liontrip-order%2F2954%40bdcc84b",
+            "http://10.0.0.7:47708/log/live?revision=liontrip-order/2954@bdcc84b",
             buttons[1].GetProperty("url").GetString());
     }
 
@@ -500,7 +501,7 @@ public sealed class LarkNotifierTests
     public void Without_a_mesh_endpoint_there_is_no_live_log_button()
     {
         using var card = JsonDocument.Parse(LarkCard.RenderStarted(
-            Pr(), new ReviewStarted("liontrip-order/2954@bdcc84b", "alan", string.Empty)));
+            Pr(), new ReviewStarted("liontrip-order/2954@bdcc84b", "alan", string.Empty), 47708));
 
         Assert.Equal(["在 Conclave 里打开", "打开 PR"], Labels(Buttons(card.RootElement)));
     }
@@ -516,21 +517,21 @@ public sealed class LarkNotifierTests
     public void The_network_caveat_shows_up_only_with_the_web_button()
     {
         var withButton = Flatten(JsonDocument.Parse(LarkCard.RenderStarted(
-            Pr(), new ReviewStarted("r", "alan", "http://10.0.0.7:47708"))).RootElement);
+            Pr(), new ReviewStarted("r", "alan", "http://10.0.0.7:47708"), 47708)).RootElement);
         Assert.Contains("要在公司网络内", withButton, StringComparison.Ordinal);
 
         var without = Flatten(JsonDocument.Parse(LarkCard.RenderStarted(
-            Pr(), new ReviewStarted("r", "alan", string.Empty))).RootElement);
+            Pr(), new ReviewStarted("r", "alan", string.Empty), 47708)).RootElement);
         Assert.DoesNotContain("公司网络", without, StringComparison.Ordinal);
     }
 
-    /// <summary>老区块没有 RemoteUrl 时连「打开 PR」也拼不出来，但深链永远在。</summary>
+    /// <summary>老区块没有 RemoteUrl 时连「打开 PR」也拼不出来，但「在 Conclave 里打开」永远在。</summary>
     [Fact]
-    public void The_deep_link_is_the_one_button_that_never_needs_anything()
+    public void The_local_open_button_is_the_one_that_never_needs_anything()
     {
         using var card = JsonDocument.Parse(LarkCard.RenderStarted(
             Pr() with { RemoteUrl = string.Empty },
-            new ReviewStarted("liontrip-order/2954@bdcc84b", "alan", string.Empty)));
+            new ReviewStarted("liontrip-order/2954@bdcc84b", "alan", string.Empty), 47708));
 
         Assert.Equal(["在 Conclave 里打开"], Labels(Buttons(card.RootElement)));
     }
@@ -545,7 +546,7 @@ public sealed class LarkNotifierTests
     {
         using var card = JsonDocument.Parse(LarkCard.RenderAssignment(
             Pr(),
-            new AssignmentNotice("liontrip-order/2954@bdcc84b", "alan", @"LIONMAIL\tobeyhuang", accepted, null)));
+            new AssignmentNotice("liontrip-order/2954@bdcc84b", "alan", @"LIONMAIL\tobeyhuang", accepted, null), 47708));
 
         var root = card.RootElement;
         Assert.Equal(tone, root.GetProperty("header").GetProperty("template").GetString());
@@ -567,7 +568,7 @@ public sealed class LarkNotifierTests
     public void A_declined_assignment_is_never_painted_like_a_rejected_pr()
     {
         using var declined = JsonDocument.Parse(LarkCard.RenderAssignment(
-            Pr(), new AssignmentNotice("r", "alan", "tobeyhuang", false, null)));
+            Pr(), new AssignmentNotice("r", "alan", "tobeyhuang", false, null), 47708));
         using var rejected = JsonDocument.Parse(LarkCard.Render(Pr(), Result()));
 
         Assert.Equal("red", rejected.RootElement.GetProperty("header").GetProperty("template").GetString());
@@ -575,7 +576,7 @@ public sealed class LarkNotifierTests
     }
 
     /// <summary>
-    /// 深链指向 PR 而不是日志。
+    /// 按钮指向 PR 而不是日志。
     /// </summary>
     /// <remarks>
     /// 指派那一刻评审还没开跑，没有日志可看，而收件人要做的正是去面板上处理它。
@@ -584,13 +585,13 @@ public sealed class LarkNotifierTests
     public void The_assignment_card_links_to_the_pr_not_the_log()
     {
         using var card = JsonDocument.Parse(LarkCard.RenderAssignment(
-            Pr(), new AssignmentNotice("liontrip-order/2954@bdcc84b", "alan", "tobeyhuang", null, null)));
+            Pr(), new AssignmentNotice("liontrip-order/2954@bdcc84b", "alan", "tobeyhuang", null, null), 47708));
 
         var buttons = Buttons(card.RootElement);
         Assert.Equal(["在 Conclave 里打开", "打开 PR"], Labels(buttons));
         Assert.Equal("primary", buttons[0].GetProperty("type").GetString());
         Assert.Equal(
-            "conclave://pr?revision=liontrip-order%2F2954%40bdcc84b",
+            "http://127.0.0.1:47708/open?revision=liontrip-order/2954@bdcc84b&view=pr",
             buttons[0].GetProperty("url").GetString());
     }
 
@@ -605,7 +606,7 @@ public sealed class LarkNotifierTests
         Assert.Contains(
             expected,
             Flatten(JsonDocument.Parse(LarkCard.RenderAssignment(
-                Pr(), new AssignmentNotice("r", "alan", "tobeyhuang", accepted, note))).RootElement),
+                Pr(), new AssignmentNotice("r", "alan", "tobeyhuang", accepted, note), 47708)).RootElement),
             StringComparison.Ordinal);
     }
 
@@ -614,7 +615,7 @@ public sealed class LarkNotifierTests
     public void An_empty_note_leaves_no_dangling_label()
     {
         var text = Flatten(JsonDocument.Parse(LarkCard.RenderAssignment(
-            Pr(), new AssignmentNotice("r", "alan", "tobeyhuang", false, "   "))).RootElement);
+            Pr(), new AssignmentNotice("r", "alan", "tobeyhuang", false, "   "), 47708)).RootElement);
 
         Assert.DoesNotContain("理由：", text, StringComparison.Ordinal);
     }

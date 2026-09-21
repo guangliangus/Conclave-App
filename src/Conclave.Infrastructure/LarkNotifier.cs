@@ -121,7 +121,8 @@ public sealed class LarkNotifier : INotifier, IDisposable
         ArgumentNullException.ThrowIfNull(started);
 
         return SendCardAsync(
-            pr, "开始评审", () => LarkCard.RenderStarted(pr, started, _conclave.AzureDevOpsOrgUrl), ct);
+            pr, "开始评审", () => LarkCard.RenderStarted(
+                pr, started, _conclave.Mesh.HttpPort, _conclave.AzureDevOpsOrgUrl), ct);
     }
 
     /// <summary>
@@ -191,7 +192,8 @@ public sealed class LarkNotifier : INotifier, IDisposable
         return SendCardAsync(
             pr,
             notice.Accepted switch { null => "指派", true => "指派已接受", _ => "指派被拒绝" },
-            () => LarkCard.RenderAssignment(pr, notice, _conclave.AzureDevOpsOrgUrl),
+            () => LarkCard.RenderAssignment(
+                pr, notice, _conclave.Mesh.HttpPort, _conclave.AzureDevOpsOrgUrl),
             ct,
             notice.Recipient);
     }

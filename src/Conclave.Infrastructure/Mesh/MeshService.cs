@@ -90,7 +90,7 @@ public sealed class MeshService(
         using var server = new MeshHttpServer(
             options.Mesh, acta, () => mesh.Self, mesh.SignedState,
             OnAssignmentReceivedAsync, OnBlockReceivedAsync,
-            progress.Read, progress.ReadAll, OfferConfig, serverLogger);
+            progress.Read, progress.ReadAll, state.RequestReveal, OfferConfig, serverLogger);
         _server = server;
 
         try
