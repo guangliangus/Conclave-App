@@ -33,10 +33,8 @@ public sealed class ReviewLogViewModelTests : IDisposable
     /// 建一个已经在跑的日志面板。
     /// </summary>
     /// <remarks>
-    /// 必须<b>先</b>往日志里写一行再建 ViewModel：构造函数会立刻 poll 一次，而
-    /// <see cref="ReviewProgressLog.Read"/> 对一个还不存在的 revision 返回的是
-    /// <c>Running: false</c>，面板会据此判定「评完了」并停掉轮询。
-    /// 这一行也会被第一次 poll 收走，所以累计计数从 1 起。
+    /// 先往日志里写一行再建 ViewModel，构造函数那次 poll 就已经跟上了这条日志。
+    /// 这一行会被第一次 poll 收走，所以累计计数从 1 起。
     /// </remarks>
     private (ReviewLogViewModel Vm, ReviewProgressLog Log, int Seeded) Make()
     {
@@ -45,8 +43,92 @@ public sealed class ReviewLogViewModelTests : IDisposable
         log.Append(Rev, "拉代码进临时工作区");
 
         var vm = new ReviewLogViewModel(
-            new FakeMesh(self), log, _home.Archive, Rev, self.Id, "edison-test!2878");
+            new FakeMesh(self), log, _home.Archive, Rev, () => self.Id, "edison-test!2878");
         return (vm, log, 1);
+    }
+
+    [Fact]
+    public void Opening_the_panel_before_the_local_review_starts_keeps_waiting_for_it()
+    {
+        // 本机的内存缓冲还没建：Read 给的是空块、Running=false。早先这就被当成「评完了」，
+        // 定时器永久停掉，之后只能手点「拉取日志」才看得到新行。
+        var self = TestElectors.Make("alan");
+        var log = new ReviewProgressLog();
+        var vm = new ReviewLogViewModel(
+            new FakeMesh(self), log, _home.Archive, Rev, () => self.Id, "edison-test!2878");
+
+        Assert.Empty(vm.Lines);
+        Assert.DoesNotContain("已结束", vm.Status, StringComparison.Ordinal);
+
+        log.Begin(Rev, "评审 edison-test#2878 round=0");
+        log.Append(Rev, "拉取工作区");
+        Poll(vm);
+
+        Assert.Equal(2, vm.Lines.Count);
+        Assert.Contains("正在评", vm.Status, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_row_that_did_not_know_the_reviewer_yet_switches_to_live_once_it_does()
+    {
+        // 飞书「开始评审」的深链常常比表格先到：打开时那一行的评审者还是空的，
+        // 面板只能先摆出本机留档。等表格跟上，它得自己切到实时，而不是冻在那份快照上。
+        var self = TestElectors.Make("alan");
+        string? reviewer = null;
+        _home.Archive.Append(Rev, "上一轮留下的一行");
+
+        var log = new ReviewProgressLog();
+        var vm = new ReviewLogViewModel(
+            new FakeMesh(self), log, _home.Archive, Rev, () => reviewer, "edison-test!2878");
+
+        Assert.Contains(vm.Lines, l => l.Contains("上一轮留下的一行", StringComparison.Ordinal));
+        Assert.Equal("—", vm.Reviewer);
+
+        log.Begin(Rev, "评审开始");
+        reviewer = self.Id;
+        Poll(vm);
+
+        Assert.Equal("本节点", vm.Reviewer);
+        Assert.Contains("正在评", vm.Status, StringComparison.Ordinal);
+        Assert.Contains(vm.Lines, l => l.Contains("评审开始", StringComparison.Ordinal));
+
+        // 留档快照要先清掉：真实场景里它和实时缓冲是同一批行，接着追加会重一遍。
+        Assert.DoesNotContain(vm.Lines, l => l.Contains("上一轮留下的一行", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_remote_reviewer_that_has_no_log_yet_is_asked_again_instead_of_given_up_on()
+    {
+        var self = TestElectors.Make("alan");
+        var peer = TestElectors.Make("peer-a");
+        var mesh = new FakeMesh(self, [peer]);
+
+        var vm = new ReviewLogViewModel(
+            mesh, new ReviewProgressLog(), _home.Archive, Rev, () => peer.Id, "edison-test!2878");
+
+        Assert.Empty(vm.Lines);
+
+        mesh.PeerLogs[Rev] = new LogChunk(Rev, 0, 2, ["10:00:01 评审开始", "10:00:02 拉取工作区"], Running: true);
+        Poll(vm);
+
+        Assert.Equal(2, vm.Lines.Count);
+        Assert.Contains("正在评", vm.Status, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_followed_review_that_ends_stops_the_polling()
+    {
+        // 停轮询的条件只剩这一个：真跟上过的那条日志自己报了收尾。
+        var (vm, log, _) = Make();
+
+        log.End(Rev, "评审结束");
+        Poll(vm);
+        Assert.Contains("已结束", vm.Status, StringComparison.Ordinal);
+
+        log.Append(Rev, "收尾之后的一行");
+        Poll(vm);
+
+        Assert.DoesNotContain(vm.Lines, l => l.Contains("收尾之后的一行", StringComparison.Ordinal));
     }
 
     private static void Fill(ReviewProgressLog log, int from, int count)
@@ -101,7 +183,7 @@ public sealed class ReviewLogViewModelTests : IDisposable
 
     /// <summary>没有节点在评这一版时的面板：实时那条路是空的，只能靠留档。</summary>
     private ReviewLogViewModel Orphan(FakeMesh mesh, string? reviewerId = null)
-        => new(mesh, new ReviewProgressLog(), _home.Archive, Rev, reviewerId, "edison-test!2878");
+        => new(mesh, new ReviewProgressLog(), _home.Archive, Rev, () => reviewerId, "edison-test!2878");
 
     [Fact]
     public void A_review_that_is_over_falls_back_to_the_copy_on_disk()

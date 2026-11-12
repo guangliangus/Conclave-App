@@ -20,8 +20,15 @@ namespace Conclave.App.ViewModels;
 /// </para>
 /// <para>
 /// 按序号取增量，不是每次全量重来：一次评审几百行，而这里两秒轮一次。
-/// 对端报 <see cref="LogChunk.Running"/> = false 就停轮询 —— 评完了日志不再长，
+/// 跟上的那条日志报 <see cref="LogChunk.Running"/> = false 就停轮询 —— 评完了日志不再长，
 /// 继续问只是白发请求。
+/// </para>
+/// <para>
+/// <b>「此刻没有实时日志可跟」不等于「评完了」。</b> 面板打开那一刻，表里那一行可能还是开评之前的
+/// 样子（评审者为空 —— 飞书「开始评审」的深链常常比表格先到），本机的内存缓冲也可能还没建
+/// （<see cref="ReviewProgressLog.Read"/> 对不存在的 revision 给的是空块、<c>Running: false</c>）。
+/// 早先这两种都被当成收尾、定时器永久停掉，面板从此冻在一份留档快照上，只能靠手点「拉取日志」刷新。
+/// 所以还没跟上时每一轮都重新问一次「现在谁在评」，只有真跟上过一条日志、它自己报了收尾才停。
 /// </para>
 /// <para>
 /// <b>实时那条路断了不等于没日志。</b> 评审失败、跑了一半进程重启、或者那台机器
@@ -40,8 +47,11 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     private readonly ReviewProgressLog _local;
     private readonly ReviewLogArchive _archive;
     private readonly string _revisionId;
-    private readonly string? _reviewerId;
+    private readonly Func<string?> _reviewerOf;
     private readonly DispatcherTimer _timer;
+
+    /// <summary>当前跟的评审者。还没跟上实时日志之前每轮都按 <see cref="_reviewerOf"/> 刷新。</summary>
+    private string? _reviewerId;
 
     private long _from;
     private bool _polling;
@@ -49,37 +59,45 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     /// <summary>这次评审一共收到过多少行。<see cref="Lines"/> 有上限，这个没有。</summary>
     private long _received;
 
-    /// <summary>日志已经收尾（对端报 Running=false，或者压根取不到）。恢复时不必再起定时器。</summary>
+    /// <summary>已经跟上了一条实时日志。之后不再换评审者，直到它报收尾。</summary>
+    private bool _following;
+
+    /// <summary><see cref="Lines"/> 里现在是一份留档快照。切到实时之前要先清掉，否则同样的行会出现两遍。</summary>
+    private bool _showingArchive;
+
+    /// <summary>跟上的那条日志已经收尾。恢复时不必再起定时器。</summary>
     private bool _done;
 
     /// <summary>面板被隐藏了。见 <see cref="Suspend"/>。</summary>
     private bool _suspended;
 
+    /// <remarks>
+    /// <c>reviewerOf</c> 是「现在谁在评这一版」，每轮现问。不能是打开面板那一刻的快照：
+    /// 那一刻表里那一行可能还没反映出评审已经开始。
+    /// </remarks>
     public ReviewLogViewModel(
         IMesh mesh,
         ReviewProgressLog local,
         ReviewLogArchive archive,
         string revisionId,
-        string? reviewerId,
+        Func<string?> reviewerOf,
         string subject)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         ArgumentNullException.ThrowIfNull(local);
         ArgumentNullException.ThrowIfNull(archive);
         ArgumentException.ThrowIfNullOrWhiteSpace(revisionId);
+        ArgumentNullException.ThrowIfNull(reviewerOf);
 
         _mesh = mesh;
         _local = local;
         _archive = archive;
         _revisionId = revisionId;
-        _reviewerId = reviewerId;
+        _reviewerOf = reviewerOf;
+        _reviewerId = reviewerOf();
 
         Subject = subject;
-        Reviewer = reviewerId is null
-            ? "—"
-            : reviewerId == mesh.Self.Id
-                ? "本节点"
-                : Name(reviewerId);
+        Reviewer = DisplayName(_reviewerId);
 
         Status = "正在取日志…";
 
@@ -94,7 +112,8 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     public string Subject { get; }
 
     /// <summary>谁在评。</summary>
-    public string Reviewer { get; }
+    [ObservableProperty]
+    public partial string Reviewer { get; set; }
 
     /// <summary>面板上显示的行，最多 <see cref="ReviewProgressLog.MaxLines"/> 条，超了从头挤掉。</summary>
     public ObservableCollection<string> Lines { get; } = [];
@@ -157,26 +176,45 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
         _polling = true;
         try
         {
-            var chunk = _reviewerId == _mesh.Self.Id
-                ? _local.Read(_revisionId, _from)
-                : await FetchAsync().ConfigureAwait(true);
+            // 还没跟上时每轮都重新问一次：评审可能刚开始，表里那一行还没跟上。
+            if (!_following)
+            {
+                Retarget(_reviewerOf());
+            }
+
+            var chunk = _reviewerId is null
+                ? null
+                : _reviewerId == _mesh.Self.Id
+                    ? _local.Read(_revisionId, _from)
+                    : await FetchAsync().ConfigureAwait(true);
+
+            if (!_following && (chunk is null || (!chunk.Running && chunk.Lines.Count == 0)))
+            {
+                // 此刻没有实时日志可跟：还没开跑、表里的评审者还是旧的，或者早就评完了。
+                // 都不是「结束」—— 先把盘上那份摆出来，定时器接着转，开跑了自动切到实时。
+                Wait();
+                return;
+            }
 
             if (chunk is null)
             {
-                // 实时那条路断了：没人在评这一版，或者对端离线/是旧版本。
-                // 先看盘上有没有 —— 评完的、失败的、跑了一半重启过的，本机都还留着一天。
-                _done = true;
-                _timer.Stop();
-
-                if (ShowArchived())
-                {
-                    return;
-                }
-
-                Status = _reviewerId is null
-                    ? "没有节点在评这一版，本机也没有留档 —— 点「拉取日志」去其它节点找"
-                    : $"{Reviewer} 那边取不到实时日志 —— 点「拉取日志」要它留的那份";
+                // 跟到一半对端没了（离线、重启、暂时连不上）。留着已经收到的行，下一轮接着问 ——
+                // 评审多半还在跑，只是这一跳没问到。
+                Status = $"{Reviewer} 暂时取不到实时日志，正在重试 · 已收到 {_received} 行";
                 return;
+            }
+
+            if (!_following)
+            {
+                _following = true;
+
+                // 留档和实时缓冲记的是同一批行，接在快照后面追加会重一遍。
+                if (_showingArchive)
+                {
+                    Lines.Clear();
+                    _received = 0;
+                    _showingArchive = false;
+                }
             }
 
             // 对端把序号倒回去了 —— 同一版重试时 ReviewProgressLog.Begin 会丢掉旧缓冲、
@@ -225,6 +263,37 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
         }
     }
 
+    /// <summary>换跟的评审者（只在还没跟上实时日志时）。</summary>
+    private void Retarget(string? reviewerId)
+    {
+        if (string.Equals(reviewerId, _reviewerId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _reviewerId = reviewerId;
+        Reviewer = DisplayName(reviewerId);
+    }
+
+    /// <summary>
+    /// 没有实时日志可跟时的样子：本机有留档就摆出来，没有就说清楚在等什么。
+    /// </summary>
+    /// <remarks>
+    /// 留档只铺一次：它会随评审往后长，但这时候人等的是实时那条路，
+    /// 每两秒把整份文件重读重铺一遍既费又闪。想要最新的全文点「拉取日志」。
+    /// </remarks>
+    private void Wait()
+    {
+        if (_showingArchive || ShowArchived())
+        {
+            return;
+        }
+
+        Status = _reviewerId is null
+            ? "还没有节点在评这一版 —— 开评后这里会自动显示；早就评完了的话点「拉取日志」去其它节点找"
+            : $"等 {Reviewer} 开始输出日志…";
+    }
+
     /// <summary>
     /// 把本机盘上那份显示出来。
     /// </summary>
@@ -262,7 +331,7 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
     [RelayCommand]
     private async Task PullAsync()
     {
-        var live = !_done;
+        var live = _following && !_done;
 
         if (_archive.Read(_revisionId) is { } local)
         {
@@ -349,6 +418,7 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
 
         _received = all.Count(l => l.Length > 0);
         IsEmpty = Lines.Count == 0;
+        _showingArchive = true;
     }
 
     private async Task<LogChunk?> FetchAsync()
@@ -359,6 +429,13 @@ public sealed partial class ReviewLogViewModel : ViewModelBase, IDisposable
             : await _mesh.FetchLogAsync(peer, _revisionId, _from, CancellationToken.None)
                 .ConfigureAwait(true);
     }
+
+    private string DisplayName(string? electorId)
+        => electorId is null
+            ? "—"
+            : electorId == _mesh.Self.Id
+                ? "本节点"
+                : Name(electorId);
 
     private string Name(string electorId)
     {
