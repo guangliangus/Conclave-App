@@ -36,6 +36,16 @@ public sealed record PrMeta
     /// </remarks>
     public string RemoteUrl { get; init; } = string.Empty;
 
+    /// <summary>
+    /// ADO 预合并的结果（<c>mergeStatus</c>）：<c>succeeded</c>、<c>conflicts</c>、<c>queued</c>、
+    /// <c>failure</c>、<c>rejectedByPolicy</c>、<c>notSet</c>。
+    /// </summary>
+    /// <remarks>
+    /// 拉工作区时用它决定要不要先试 ADO 的 PR 合并提交：明确合并不了的就不去白拉一遍（大仓库上
+    /// 一次约 90 秒）。不是 <c>required</c>，老 Summons 块里没有它 —— 空值按「未知」处理，照样尝试。
+    /// </remarks>
+    public string MergeStatus { get; init; } = string.Empty;
+
     public bool IsDraft { get; init; }
 
     public string SourceBranch { get; init; } = string.Empty;

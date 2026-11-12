@@ -78,8 +78,8 @@ Weight(n) = 1/(1+RunningJobs) / (1+Reviews24h*0.1) * (1-Utilization)
 低于换一个节点从头看。HRW 的种子是 PR 而不是 revision，外加从投影反查上一次有效评审的
 节点让它直接坐 round=0。重试轮次必须换人 —— 上一个已经失败过了。
 
-**评审前现拉代码，评完即删。** `~/.conclave/work/` 下 `git init` + 浅 fetch 源/目标分支，
-校验 merge-base（不够就加深，`az-pr-review` 靠三点 diff，浅到共同祖先之外会硬失败），
+**评审前现拉代码，评完即删。** `~/.conclave/work/` 下 `git init` 后，首选只拉 ADO 预先算好的 PR 合并提交（`refs/pull/<id>/merge`，`--depth=2`，diff 不需要 merge-base）；
+PR 有冲突时退回按分支浅拉取并校验 merge-base（不够就逐级加深，三点 diff 浅到共同祖先之外会硬失败），
 跑完删掉。任何节点都能评任何仓库，不必预先 clone，也不碰本机正在用的工作副本。
 
 **子进程跑 `REVIEW_MODE=collect`**：skill 在这个模式下跳过发评论与投票，只在回复末尾输出
