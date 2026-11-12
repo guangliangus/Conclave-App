@@ -27,9 +27,21 @@ case "$cmd" in
     pr_json="$(pr_show "$pr_id")"
     src="$(jq -r '.sourceRefName' <<<"$pr_json" | sed 's#^refs/heads/##')"
     tgt="$(jq -r '.targetRefName' <<<"$pr_json" | sed 's#^refs/heads/##')"
-    git fetch --quiet origin "$src" "$tgt" || die "git fetch failed for $src / $tgt (wrong repo checked out?)"
+    # Prefer Azure DevOps' own pre-merged commit when the workspace already has it
+    # (Conclave fetches refs/pull/<id>/merge at --depth=2 instead of branch history):
+    # its first parent is the target, so <merge>^1..<merge> is exactly what the PR
+    # brings in — no merge-base, hence no deep history, needed. Only trusted when its
+    # second parent is the checked-out HEAD, i.e. it was built from this very source.
+    merge_ref="refs/pull/${pr_id}/merge"
+    if git rev-parse -q --verify "${merge_ref}^2" >/dev/null 2>&1 \
+       && [ "$(git rev-parse "${merge_ref}^2")" = "$(git rev-parse HEAD)" ]; then
+      range=("${merge_ref}^1" "${merge_ref}")
+    else
+      git fetch --quiet origin "$src" "$tgt" || die "git fetch failed for $src / $tgt (wrong repo checked out?)"
+      range=("origin/${tgt}...origin/${src}")
+    fi
     diff_file="$(mktemp -t "az-pr-${pr_id}-diff.XXXXXX")"
-    git diff "origin/${tgt}...origin/${src}" >"$diff_file"
+    git diff "${range[@]}" >"$diff_file"
     # Machine-readable summary the skill parses.
     jq -n --argjson pr "$pr_json" --arg diff "$diff_file" '{
       id: $pr.pullRequestId, title: $pr.title, isDraft: $pr.isDraft, status: $pr.status,
@@ -38,7 +50,7 @@ case "$cmd" in
       author: $pr.createdBy.displayName, description: $pr.description, diffFile: $diff
     }'
     echo "--- changed files ---" >&2
-    git diff --name-only "origin/${tgt}...origin/${src}" >&2
+    git diff --name-only "${range[@]}" >&2
     ;;
   comment)
     pr_id="${1:?usage: az_pr.sh comment <pr-id> <markdown-file>}"

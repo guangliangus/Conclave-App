@@ -32,17 +32,117 @@ public sealed class GitWorkspaceTests : IDisposable
     private GitWorkspaceFactory Factory(ConclaveOptions options) => new(
         options, new ExecutableResolver(options), NullLogger<GitWorkspaceFactory>.Instance);
 
-    private static PrMeta Pr(string source, string target) => new()
+    private string SeedPath => Path.Combine(_root, "seed");
+
+    private static PrMeta Pr(string source, string target, string srcCommit = "0000000") => new()
     {
         PrId = 2880,
         Project = "edison-test",
         Repo = "edison-test",
         Title = "feat: x",
         Author = @"LIONMAIL\someone",
-        SrcCommit = "0000000",
+        SrcCommit = srcCommit,
         SourceBranch = source,
         TargetBranch = target,
     };
+
+    [Fact]
+    public async Task Checkout_uses_the_pr_merge_commit_instead_of_branch_history()
+    {
+        // depth=1 + divergeAfter=6：按分支拉的话要加深好几级才碰得到 merge-base。
+        // 有合并提交时这些都不该发生 —— 只拉 M 和它的两个父提交。
+        var options = Options(depth: 1);
+        BuildOrigin(divergeAfter: 6);
+        var (merge, source) = PublishPrMerge();
+
+        // ADO 算完合并之后 develop 又往前走了：工作区的基准应当仍是合并时的那个 develop。
+        Git(SeedPath, "checkout", "--quiet", "develop");
+        Commit(SeedPath, "develop.txt", "develop after merge");
+        Git(SeedPath, "push", "--quiet", "origin", "develop");
+
+        await using var ws = await Factory(options)
+            .CheckoutAsync(Pr("feature", "develop", source), OriginUrl, "pr", CancellationToken.None);
+
+        Assert.Equal(source, Git(ws.Path, "rev-parse", "HEAD").Trim());
+        Assert.True(File.Exists(Path.Combine(ws.Path, "feature.txt")));
+        Assert.Equal(merge, Git(ws.Path, "rev-parse", "refs/pull/2880/merge").Trim());
+        Assert.Equal(
+            Git(ws.Path, "rev-parse", "refs/pull/2880/merge^1").Trim(),
+            Git(ws.Path, "rev-parse", "origin/develop").Trim());
+
+        // 一共就三个提交：没有拉任何分支历史。
+        Assert.Equal("3", Git(ws.Path, "rev-list", "--count", "--all").Trim());
+
+        // az_pr.sh 在这种工作区里用的就是这条命令。
+        var changed = Git(ws.Path, "diff", "--name-only", "refs/pull/2880/merge^1", "refs/pull/2880/merge")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .ToArray();
+
+        Assert.Equal(["feature.txt"], changed);
+    }
+
+    [Fact]
+    public async Task A_merge_commit_built_from_an_older_source_commit_is_not_trusted()
+    {
+        // ADO 在推送后异步重算合并提交：这段时间里 refs/pull/<id>/merge 还是旧源提交的结果。
+        // 用它就会在别的版本上评审，而票记在新 revision 名下。
+        var options = Options();
+        BuildOrigin(divergeAfter: 2);
+        _ = PublishPrMerge();
+
+        Git(SeedPath, "checkout", "--quiet", "feature");
+        Commit(SeedPath, "feature2.txt", "feature follow-up");
+        Git(SeedPath, "push", "--quiet", "origin", "feature");
+        var newSource = Git(SeedPath, "rev-parse", "feature").Trim();
+
+        await using var ws = await Factory(options)
+            .CheckoutAsync(Pr("feature", "develop", newSource), OriginUrl, "pr", CancellationToken.None);
+
+        Assert.Equal(newSource, Git(ws.Path, "rev-parse", "HEAD").Trim());
+
+        // 旧的合并提交不能留在工作区里，否则 az_pr.sh 会去用它。
+        var leftover = await ProcessRunner.RunAsync(
+            "git", ["-C", ws.Path, "rev-parse", "-q", "--verify", "refs/pull/2880/merge"], workingDirectory: ws.Path);
+        Assert.False(leftover.Success);
+
+        var changed = Git(ws.Path, "diff", "--name-only", "origin/develop...origin/feature")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(["feature.txt", "feature2.txt"], changed);
+    }
+
+    [Fact]
+    public async Task A_pr_that_ado_could_not_merge_skips_the_merge_commit_entirely()
+    {
+        // 有冲突时 ADO 不生成新的合并提交，ref 可能还留着旧的。大仓库上白拉一次约 90 秒，
+        // 所以 ADO 已经说了合并不了，就不该再去拉 —— 哪怕那个 ref 看上去还对得上。
+        var options = Options(depth: 1);
+        BuildOrigin(divergeAfter: 2);
+        var (_, source) = PublishPrMerge();
+
+        var pr = Pr("feature", "develop", source) with { MergeStatus = "conflicts" };
+        await using var ws = await Factory(options)
+            .CheckoutAsync(pr, OriginUrl, "pr", CancellationToken.None);
+
+        var mergeRef = await ProcessRunner.RunAsync(
+            "git", ["-C", ws.Path, "rev-parse", "-q", "--verify", "refs/pull/2880/merge"], workingDirectory: ws.Path);
+        Assert.False(mergeRef.Success);
+        Assert.NotEmpty(Git(ws.Path, "merge-base", "origin/develop", "origin/feature").Trim());
+    }
+
+    [Fact]
+    public void Deepening_doubles_step_by_step_instead_of_jumping_far()
+    {
+        // 一步跳到 200 在大仓库上是几百 MB，而 merge-base 只在深度 6。
+        Assert.Equal([16, 32, 64, 128, 256], GitWorkspaceFactory.DeepenLadder(8));
+        Assert.Equal([100, 200], GitWorkspaceFactory.DeepenLadder(50));
+        Assert.Equal(2, GitWorkspaceFactory.DeepenLadder(1).First());
+        Assert.Empty(GitWorkspaceFactory.DeepenLadder(GitWorkspaceFactory.MaxLadderDepth));
+    }
 
     [Fact]
     public async Task Checkout_puts_the_source_branch_files_on_disk()
@@ -173,6 +273,23 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     /// <summary>
+    /// 像 ADO 那样在 origin 上建 <c>refs/pull/2880/merge</c>：develop 与 feature 的 <c>--no-ff</c> 合并。
+    /// </summary>
+    /// <returns>合并提交与源提交（feature 尖端）的 SHA。</returns>
+    private (string Merge, string Source) PublishPrMerge()
+    {
+        var source = Git(SeedPath, "rev-parse", "feature").Trim();
+
+        Git(SeedPath, "checkout", "--quiet", "--detach", "develop");
+        Git(SeedPath, "merge", "--quiet", "--no-ff", "--no-edit", "feature");
+        var merge = Git(SeedPath, "rev-parse", "HEAD").Trim();
+        Git(SeedPath, "push", "--quiet", "origin", "HEAD:refs/pull/2880/merge");
+        Git(SeedPath, "checkout", "--quiet", "develop");
+
+        return (merge, source);
+    }
+
+    /// <summary>
     /// 建一个裸仓库当 origin：<c>develop</c> 上若干提交，<c>feature</c> 从第
     /// <paramref name="divergeAfter"/> 个提交处分叉。
     /// </summary>
@@ -182,7 +299,7 @@ public sealed class GitWorkspaceTests : IDisposable
     /// </remarks>
     private void BuildOrigin(int divergeAfter)
     {
-        var work = Path.Combine(_root, "seed");
+        var work = SeedPath;
         _ = Directory.CreateDirectory(work);
         _ = Directory.CreateDirectory(OriginPath);
 

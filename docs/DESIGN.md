@@ -445,24 +445,39 @@ token 量级，而 Conclave 自己只有 180 万 —— **低报约三个数量�
 ```
 mkdir  ~/.conclave/work/2880@a6478fa5-r0-3f9c1a2b
 git init && git remote add origin <repository.remoteUrl>
-git fetch --no-tags --depth=50 origin <source> <target>
-git merge-base origin/<target> origin/<source>     ← 必须校验！
+
+# 首选：ADO 预先算好的 PR 合并提交 M，只拉 M 和它的两个父提交
+git fetch --no-tags --depth=2 origin +refs/pull/<id>/merge:refs/pull/<id>/merge
+校验 M^2 == SrcCommit                               ← 对不上就走退路
+origin/<target> := M^1，origin/<source> := M^2
+（az_pr.sh 见到 refs/pull/<id>/merge 且 M^2 == HEAD，就用 git diff M^1 M）
+
+# 退路：PR 有冲突（mergeStatus=conflicts 等）或合并提交还没跟上源提交
+git fetch --no-tags --depth=8 origin <source> <target>
+git merge-base origin/<target> origin/<source>     ← 必须校验！不够就 16、32…256 逐级加深
+
 git checkout -B <source> origin/<source>
 … claude -p 在这个目录里跑 …
 rm -rf ~/.conclave/work/2880@a6478fa5-r0-3f9c1a2b
 ```
 
-三个实测结论决定了这套流程的形状：
+四个实测结论决定了这套流程的形状：
 
-1. **必须校验 merge-base。** `az-pr-review` 靠 `git diff origin/target...origin/source`
+1. **拉的历史越少越好，因为这台 ADO Server 发 pack 几乎不做 delta。** 某前端仓库的一个 PR 按分支
+   `--depth=50` 要 220 MiB / 955 秒（线上 10 分钟超时）：深度遇上合并提交成倍展开，50 层实际是
+   539 个提交；7 个 2.4 MB 的语言包每个约 90 个版本被整份发送，本地 repack 同样内容只有 17.9 MiB。
+   而 merge-base 只在深度 6。拉 PR 合并提交是 23 MiB / 88 秒，`git diff M^1 M` 的 49 个文件与
+   ADO 报的改动文件数一致；退路 depth=8 是 39 MiB / 190 秒。
+2. **按分支拉时必须校验 merge-base。** `az-pr-review` 靠 `git diff origin/target...origin/source`
    取三点 diff。浅到共同祖先不在历史里时，`git merge-base` 退出码 1、输出为空，
    紧接着 `git diff a...b` 以**退出码 128** 报 `fatal: no merge base` —— 仓库白拉一遍、
-   claude 白起一个，最后只落下一张 Error 票。所以拉完先校验，不够就 `--deepen`，
+   claude 白起一个，最后只落下一张 Error 票。所以拉完先校验，不够就逐级翻倍加深（绝对深度
+   `--depth`，服务端不支持 `--deepen`；在已有浅历史上加深是增量的，不重传），
    再不够退到 `--unshallow`，真的没有共同祖先才明确失败。
-2. **部分克隆在这台 ADO Server 上无效。** `--filter=blob:none` 只会打印
+3. **部分克隆在这台 ADO Server 上无效。** `--filter=blob:none` 只会打印
    `warning: filtering not recognized by server, ignoring` 然后退化成全量传输 ——
-   省流量只能靠深度，不能靠 filter。
-3. **`az repos pr list` 不给 `remoteUrl`**（返回 null，只有 `az repos pr show` 才给真值）。
+   省流量只能靠少拉历史，不能靠 filter。
+4. **`az repos pr list` 不给 `remoteUrl`**（返回 null，只有 `az repos pr show` 才给真值）。
    所以 `PrMeta.RemoteUrl` 刻意不是 `required`（否则老 Summons 块反序列化会直接抛），
    为空时按 `<组织地址>/<project>/_git/<repo>` 兜底拼出来，组织地址读
    `az devops configure --list` 的 `organization`。

@@ -76,17 +76,26 @@ public sealed class GitWorkspace(string path, ILogger logger) : IAsyncDisposable
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>为什么不能只拉 <c>--depth=1</c>。</b> <c>az-pr-review</c> 靠
-/// <c>git diff origin/target...origin/source</c> 取三点 diff，而三点 diff 需要 merge-base。
-/// 实测浅到两个分支的共同祖先不在历史里时，<c>git merge-base</c> 退出码 1、输出为空，
-/// 紧接着 <c>git diff a...b</c> 以退出码 128 报 <c>fatal: no merge base</c> ——
-/// 评审在读 diff 那一步就死掉，白起一个 claude 子进程、只落下一张 Error 票。
-/// 所以拉完必须校验 merge-base，不够就加深，真的拿不到才明确失败。
+/// <b>首选：拉 ADO 预先算好的 PR 合并提交。</b> ADO 给每个无冲突的 PR 维护
+/// <c>refs/pull/&lt;id&gt;/merge</c>，即「目标分支 + 源分支」的合并提交 M。只拉 M 和它的两个父提交
+/// （<c>--depth=2</c>），<c>git diff M^1 M</c> 就是这个 PR 合进目标分支会带来的改动，不需要 merge-base。
+/// 实测某前端仓库的一个 PR：按分支 <c>--depth=50</c> 要 220 MiB / 955 秒（线上 10 分钟超时），
+/// 合并提交只要 23 MiB / 88 秒，diff 出的 49 个文件与 ADO 报的改动文件数一致。
+/// 这么悬殊是因为这台 ADO Server 发 pack 几乎不做 delta（同样的对象本地 repack 能小 12 倍），
+/// 而深度遇上合并提交会成倍展开（depth=50 实际拉进 539 个提交），传的历史越多亏得越多。
+/// </para>
+/// <para>
+/// <b>退路：按分支浅拉取 + 校验 merge-base。</b> PR 有冲突时 ADO 不生成合并提交；推送之后
+/// 它也可能还指着旧的源提交。这两种情况退回老路：按 <see cref="ConclaveOptions.FetchDepth"/>
+/// 拉两个分支，<c>az-pr-review</c> 用 <c>git diff origin/target...origin/source</c> 取三点 diff。
+/// 三点 diff 需要 merge-base：浅到两个分支的共同祖先不在历史里时，<c>git merge-base</c>
+/// 退出码 1、输出为空，紧接着 <c>git diff a...b</c> 以退出码 128 报 <c>fatal: no merge base</c>
+/// —— 评审在读 diff 那一步就死掉。所以拉完必须校验 merge-base，不够就逐级加深，真的拿不到才明确失败。
 /// </para>
 /// <para>
 /// <b>部分克隆在这台服务器上没用。</b> 实测 <c>--filter=blob:none</c> 只会打印
 /// <c>warning: filtering not recognized by server, ignoring</c> 然后退化成全量传输，
-/// 所以省流量只能靠深度，不能靠 filter。
+/// 所以省流量只能靠少拉历史，不能靠 filter。
 /// </para>
 /// </remarks>
 public sealed class GitWorkspaceFactory
@@ -186,8 +195,12 @@ public sealed class GitWorkspaceFactory
             // refs/remotes/origin/<branch> —— az_pr.sh 用的正是 origin/<branch> 这种写法。
             await GitAsync(dir, ["remote", "add", "origin", cloneUrl], cct).ConfigureAwait(false);
 
-            await FetchAsync(dir, pr, _options.FetchDepth, cct).ConfigureAwait(false);
-            await EnsureMergeBaseAsync(dir, pr, cct).ConfigureAwait(false);
+            var viaMerge = await TryFetchPrMergeAsync(dir, pr, cct).ConfigureAwait(false);
+            if (!viaMerge)
+            {
+                await FetchAsync(dir, pr, _options.FetchDepth, cct).ConfigureAwait(false);
+                await EnsureMergeBaseAsync(dir, pr, cct).ConfigureAwait(false);
+            }
 
             // 检出源分支：Read/Grep 这些工具要能在磁盘上看到文件，光有 git 对象不够。
             await GitAsync(
@@ -196,7 +209,9 @@ public sealed class GitWorkspaceFactory
                 cct).ConfigureAwait(false);
 
             _logger.LogInformation(
-                "工作区就绪 {Dir}（{Repo} {Source} → {Target}）", dir, pr.Repo, pr.SourceBranch, pr.TargetBranch);
+                "工作区就绪 {Dir}（{Repo} {Source} → {Target}，{Mode}）",
+                dir, pr.Repo, pr.SourceBranch, pr.TargetBranch,
+                viaMerge ? "PR 合并提交" : "按分支浅拉取");
 
             return workspace;
         }
@@ -206,6 +221,100 @@ public sealed class GitWorkspaceFactory
             await workspace.DisposeAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// ADO 为 PR 维护的合并提交的 ref 名，本地与远端同名。
+    /// </summary>
+    /// <remarks>
+    /// <c>az_pr.sh</c> 认的就是这个名字：本地有它、且它的第二个父提交就是 HEAD，
+    /// 就用 <c>git diff &lt;ref&gt;^1 &lt;ref&gt;</c> 取 diff，不再自己 fetch、也不算三点 diff。
+    /// </remarks>
+    internal static string PrMergeRef(int prId)
+        => "refs/pull/" + prId.ToString(CultureInfo.InvariantCulture) + "/merge";
+
+    /// <summary>
+    /// ADO 明确表示「合并不出来」的 <see cref="PrMeta.MergeStatus"/>：这时不去试合并提交。
+    /// </summary>
+    /// <remarks>
+    /// 只列确定失败的几种。<c>queued</c>、<c>notSet</c> 和空值（老 Summons 块）都照样尝试 ——
+    /// 试错的代价是白拉一次，而合并提交对不对得上，由第二个父提交那道校验兜底。
+    /// </remarks>
+    private static readonly HashSet<string> NoMergeCommitStatuses =
+        new(["conflicts", "failure", "rejectedByPolicy"], StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 尝试只拉 ADO 的 PR 合并提交及其两个父提交。
+    /// </summary>
+    /// <returns>
+    /// 成功且合并提交对应的正是本次评审的源提交时返回 <see langword="true"/>，此时
+    /// <c>origin/&lt;source&gt;</c> 指向源提交、<c>origin/&lt;target&gt;</c> 指向合并时的目标提交；
+    /// 否则返回 <see langword="false"/>，调用方退回按分支拉取。
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// 拿不到合并提交不是错误：PR 有冲突时 ADO 根本不生成它。所以这里任何一步不对都只记日志、
+    /// 返回 false，由老路兜底 —— 真正的网络或认证故障会在老路上以原样的错误再报一次。
+    /// </para>
+    /// <para>
+    /// <b>必须核对第二个父提交等于 <see cref="PrMeta.SrcCommit"/>。</b> ADO 在推送后异步重算合并提交；
+    /// PR 有冲突时 ref 也可能还留着上一次成功合并的结果。不核对就会在别的版本的代码上评审，
+    /// 而票是记在 <c>SrcCommit</c> 这个 revision 名下的。对不上时把本地 ref 删掉，免得
+    /// <c>az_pr.sh</c> 误用它。
+    /// </para>
+    /// <para>
+    /// <c>origin/&lt;target&gt;</c> 指向合并提交的第一个父提交，也就是 ADO 计算合并时的目标分支，
+    /// 不一定是目标分支此刻的最新提交；基准也就不是分叉点，而是那一刻的目标分支。
+    /// </para>
+    /// </remarks>
+    private async Task<bool> TryFetchPrMergeAsync(string dir, PrMeta pr, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(pr.SrcCommit))
+        {
+            return false;
+        }
+
+        if (NoMergeCommitStatuses.Contains(pr.MergeStatus))
+        {
+            _logger.LogInformation(
+                "PR {PrId} 的 ADO 预合并结果是 {MergeStatus}，没有可用的合并提交，直接按分支拉取",
+                pr.PrId, pr.MergeStatus);
+            return false;
+        }
+
+        var mergeRef = PrMergeRef(pr.PrId);
+        var fetch = await RunAsync(
+            dir, ["fetch", "--quiet", "--no-tags", "--depth=2", "origin", "+" + mergeRef + ":" + mergeRef], ct)
+            .ConfigureAwait(false);
+
+        if (!fetch.Success)
+        {
+            _logger.LogInformation(
+                "PR {PrId} 拿不到合并提交 {Ref}（多半是有冲突），退回按分支拉取：{Error}",
+                pr.PrId, mergeRef, fetch.StdErr.Trim());
+            return false;
+        }
+
+        var parents = await RunAsync(dir, ["rev-parse", mergeRef + "^1", mergeRef + "^2"], ct)
+            .ConfigureAwait(false);
+        var shas = parents.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (!parents.Success || shas.Length != 2
+            || !string.Equals(shas[1], pr.SrcCommit.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation(
+                "PR {PrId} 的合并提交不对应本次源提交 {SrcCommit}（第二个父提交 {Actual}），退回按分支拉取",
+                pr.PrId, pr.SrcCommit, shas.Length == 2 ? shas[1] : "无");
+            _ = await RunAsync(dir, ["update-ref", "-d", mergeRef], ct).ConfigureAwait(false);
+            return false;
+        }
+
+        await GitAsync(dir, ["update-ref", "refs/remotes/origin/" + pr.TargetBranch, shas[0]], ct)
+            .ConfigureAwait(false);
+        await GitAsync(dir, ["update-ref", "refs/remotes/origin/" + pr.SourceBranch, shas[1]], ct)
+            .ConfigureAwait(false);
+
+        return true;
     }
 
     private async Task FetchAsync(string dir, PrMeta pr, int depth, CancellationToken ct)
@@ -231,7 +340,12 @@ public sealed class GitWorkspaceFactory
     /// <para>
     /// 不加深的后果是评审在读 diff 那一步硬失败（<c>git diff a...b</c> 退出码 128、
     /// <c>fatal: no merge base</c>）—— 已经拉完一整个仓库、起了一个 claude 子进程，
-    /// 最后只落下一张 Error 票。宁可多两次网络往返也要在这里补上。
+    /// 最后只落下一张 Error 票。宁可多几次网络往返也要在这里补上。
+    /// </para>
+    /// <para>
+    /// 加深按 <see cref="DeepenLadder"/> 逐级翻倍，而不是一步跳到很深。实测在已有的浅历史上
+    /// 再加深是增量的（8→10 只收新增的 410 个对象），所以多一级只多一次往返；反过来一步跳到 200
+    /// 在多语言大文件频繁改动的仓库上是几百 MB —— merge-base 往往近在深度 6，那一跳几乎全是白拉。
     /// </para>
     /// </remarks>
     private async Task EnsureMergeBaseAsync(string dir, PrMeta pr, CancellationToken ct)
@@ -241,29 +355,59 @@ public sealed class GitWorkspaceFactory
             return;
         }
 
-        var deeper = Math.Max(200, _options.FetchDepth * 4);
-        _logger.LogInformation(
-            "PR {PrId} 的分支在深度 {Depth} 内没有共同祖先，加深到 {Deeper}",
-            pr.PrId, _options.FetchDepth, deeper);
-
-        await GitAsync(dir, DeepenArgs(deeper, pr), ct).ConfigureAwait(false);
-
-        if (await HasMergeBaseAsync(dir, pr, ct).ConfigureAwait(false))
+        if (_options.FetchDepth <= 0)
         {
-            return;
+            // 本来就是全量历史，加深没有意义（对完整仓库 --unshallow 还会直接报错）。
+            throw NoMergeBase(pr);
+        }
+
+        var reached = _options.FetchDepth;
+        foreach (var deeper in DeepenLadder(_options.FetchDepth))
+        {
+            _logger.LogInformation(
+                "PR {PrId} 的分支在深度 {Depth} 内没有共同祖先，加深到 {Deeper}",
+                pr.PrId, reached, deeper);
+
+            await GitAsync(dir, DeepenArgs(deeper, pr), ct).ConfigureAwait(false);
+            reached = deeper;
+
+            if (await HasMergeBaseAsync(dir, pr, ct).ConfigureAwait(false))
+            {
+                return;
+            }
         }
 
         _logger.LogWarning(
-            "PR {PrId} 加深到 {Deeper} 仍无共同祖先，退到全量历史（--unshallow）", pr.PrId, deeper);
+            "PR {PrId} 加深到 {Deeper} 仍无共同祖先，退到全量历史（--unshallow）", pr.PrId, reached);
 
         await GitAsync(dir, ["fetch", "--quiet", "--no-tags", "--unshallow", "origin"], ct)
             .ConfigureAwait(false);
 
         if (!await HasMergeBaseAsync(dir, pr, ct).ConfigureAwait(false))
         {
-            throw new InvalidOperationException(
-                $"PR {pr.PrId} 的 {pr.SourceBranch} 与 {pr.TargetBranch} 即使在全量历史下也没有共同祖先，"
-                + "三点 diff 无法成立，拒绝在错误的 diff 上评审");
+            throw NoMergeBase(pr);
+        }
+    }
+
+    private static InvalidOperationException NoMergeBase(PrMeta pr) => new(
+        $"PR {pr.PrId} 的 {pr.SourceBranch} 与 {pr.TargetBranch} 即使在全量历史下也没有共同祖先，"
+        + "三点 diff 无法成立，拒绝在错误的 diff 上评审");
+
+    /// <summary>加深阶梯的上限；再找不到 merge-base 就直接 <c>--unshallow</c>。</summary>
+    internal const int MaxLadderDepth = 256;
+
+    /// <summary>
+    /// 从 <paramref name="initialDepth"/> 起逐级翻倍的加深深度，不超过 <see cref="MaxLadderDepth"/>。
+    /// </summary>
+    /// <remarks>
+    /// 例如初始 8 → 16、32、64、128、256。每级多一次往返（几秒），但总传输量只比刚好够用的深度
+    /// 多不到一倍；不翻倍、一步跳深则可能多拉几十倍。
+    /// </remarks>
+    internal static IEnumerable<int> DeepenLadder(int initialDepth)
+    {
+        for (var depth = Math.Max(1, initialDepth) * 2; depth <= MaxLadderDepth; depth *= 2)
+        {
+            yield return depth;
         }
     }
 

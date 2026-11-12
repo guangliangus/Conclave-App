@@ -126,22 +126,24 @@ public sealed class ConclaveOptions
     public int DiscoveryConcurrency { get; set; } = 8;
 
     /// <summary>
-    /// 拉取临时工作区时的初始深度。
+    /// 按分支拉取临时工作区时的初始深度。
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 不能只拉 <c>--depth=1</c>：<c>az-pr-review</c> 靠 <c>git diff target...source</c>
-    /// 取三点 diff，而三点 diff 要 merge-base。实测浅到拿不到共同祖先时，
-    /// <c>git diff a...b</c> 直接以退出码 128 报 <c>fatal: no merge base</c>，
-    /// 整次评审在读 diff 那一步就死掉、只落下一张 Error 票。
+    /// 只用于退路：首选是拉 ADO 的 PR 合并提交（固定 <c>--depth=2</c>），PR 有冲突、
+    /// 或合并提交还没跟上源提交时才按分支拉（见 <c>Conclave.Infrastructure.GitWorkspaceFactory</c>）。
     /// </para>
     /// <para>
-    /// 所以拉完必须校验 merge-base，不够就加深（见
-    /// <c>Conclave.Infrastructure.GitWorkspaceFactory</c>）。这个值只是省流量的起点，
-    /// 正确性由校验保证，配小了只会多一次加深往返。
+    /// 按分支拉时 <c>az-pr-review</c> 靠 <c>git diff target...source</c> 取三点 diff，要 merge-base，
+    /// 所以拉完必须校验，不够就逐级翻倍加深。这个值只是起点，正确性由校验保证。
+    /// </para>
+    /// <para>
+    /// <b>宁小勿大。</b> 深度遇上合并提交会成倍展开：某前端仓库上 50 实际拉进 539 个提交、220 MiB，
+    /// 要 16 分钟；而 merge-base 只在深度 6。配 8 时同一个 PR 是 39 MiB / 190 秒。配小了的代价
+    /// 只是多几次加深往返（加深是增量的，不重传已有对象）。
     /// </para>
     /// </remarks>
-    public int FetchDepth { get; set; } = 50;
+    public int FetchDepth { get; set; } = 8;
 
     /// <summary>只轮询这些 project；留空表示全部。</summary>
     /// <remarks>

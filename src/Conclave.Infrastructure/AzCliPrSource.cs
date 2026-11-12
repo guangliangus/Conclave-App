@@ -248,6 +248,7 @@ public sealed class AzCliPrSource(
             Title = Str(e, "title"),
             Author = e.TryGetProperty("createdBy", out var by) ? Str(by, "uniqueName") : string.Empty,
             SrcCommit = e.TryGetProperty("lastMergeSourceCommit", out var src) ? Str(src, "commitId") : string.Empty,
+            MergeStatus = Str(e, "mergeStatus"),
             IsDraft = e.TryGetProperty("isDraft", out var draft)
                 && draft.ValueKind is JsonValueKind.True or JsonValueKind.False
                 && draft.GetBoolean(),
