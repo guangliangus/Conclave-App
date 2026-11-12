@@ -1565,8 +1565,16 @@ public sealed partial class MainViewModel : ViewModelBase
         }
 
         Log?.Dispose();
+
+        // 评审者每轮现查，不用 row 上那份快照：表格要等下一次状态变化才重建，
+        // 刚开评时（尤其从飞书「开始评审」的深链点进来）手上的 row 往往还是评审者为空的那一版。
+        // 表里已经找不到这一行（评完退场、或者是从别的表点开的）就沿用打开时那份。
+        var revisionId = row.RevisionId;
+        var initial = row.ReviewerId;
         Log = new ReviewLogViewModel(
-            _mesh, _progress, _logArchive, row.RevisionId, row.ReviewerId, row.Subject);
+            _mesh, _progress, _logArchive, revisionId,
+            () => RowFor(revisionId) is { } current ? current.ReviewerId : initial,
+            row.Subject);
     }
 
     /// <summary>
