@@ -100,6 +100,8 @@ public static class ConclaveServiceCollectionExtensions
         });
 
         _ = services.AddSingleton<ExecutableResolver>();
+        // 单例：登录 shell 的 PATH 只探一次，所有评审共用。
+        _ = services.AddSingleton<ChildProcessPath>();
         _ = services.AddSingleton<ClaudeCli>();
         _ = services.AddSingleton<IClaudeCli>(sp => sp.GetRequiredService<ClaudeCli>());
         _ = services.AddSingleton<NodeState>();
