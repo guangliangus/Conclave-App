@@ -80,15 +80,18 @@ public interface IPrSource
     Task<string> GetCloneUrlAsync(PrMeta pr, CancellationToken ct);
 
     /// <summary>
-    /// 这个 PR 在 Azure DevOps 上还是 active 吗。
+    /// 正在评的这一版（<paramref name="pr"/> 的 <see cref="PrMeta.SrcCommit"/>）还值不值得评下去。
     /// </summary>
     /// <returns>
-    /// 还活着为 <c>true</c>。<b>问不出来时也返回 <c>true</c></b> —— 见下。
+    /// PR 不再 active 为 <see cref="PrLiveness.Closed"/>；还开着但源提交已经不是
+    /// <see cref="PrMeta.SrcCommit"/> 为 <see cref="PrLiveness.Superseded"/>；否则
+    /// <see cref="PrLiveness.Active"/>。<b>问不出来时也返回 <see cref="PrLiveness.Active"/></b> —— 见下。
     /// </returns>
     /// <remarks>
     /// <para>
-    /// 给「评审跑到一半 PR 被合了 / 被撤了」用：那种情况下继续跑纯属白烧额度，
-    /// 一次评审能跑 45 分钟。
+    /// 给「评审跑到一半 PR 被合了 / 被撤了 / 又推了新提交」用：那几种情况下继续跑纯属白烧额度，
+    /// 一次评审能跑 45 分钟。新推送尤其隐蔽：PR 还是 active，评审照常跑完、票也照常落链，
+    /// 但旧版本已经从队列里退场，那张票没人公布 —— 评论不会发到 PR 上，界面上也没有任何报错。
     /// </para>
     /// <para>
     /// <b>为什么不看队列项有没有消失。</b> 队列是各节点上报的并集，发现节点临时掉线、
@@ -97,11 +100,11 @@ public interface IPrSource
     /// </para>
     /// <para>
     /// <b>问不出来必须当作「还活着」。</b> az 偶发失败、网络抖动、token 过期都会让这个调用
-    /// 失败，而那些跟 PR 的状态毫无关系。返回 false 就等于「一断网就把所有在跑的评审掐了」。
-    /// 宁可多跑一次，不要误杀。
+    /// 失败，而那些跟 PR 的状态毫无关系。返回别的就等于「一断网就把所有在跑的评审掐了」。
+    /// 宁可多跑一次，不要误杀。源提交读不到（空）时同理，不算新推送。
     /// </para>
     /// </remarks>
-    Task<bool> IsStillActiveAsync(PrMeta pr, CancellationToken ct);
+    Task<PrLiveness> CheckLivenessAsync(PrMeta pr, CancellationToken ct);
 
     /// <summary>
     /// 组织（collection）地址，形如 <c>https://host/Collection</c>；读不到时返回空串。

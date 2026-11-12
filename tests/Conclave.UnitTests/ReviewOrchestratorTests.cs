@@ -1070,6 +1070,63 @@ public class ReviewOrchestratorTests
     }
 
     /// <summary>
+    /// 评审途中作者推了新提交：PR 还是 active，但这一版已经过时 —— 同样就地掐断、不出票。
+    /// </summary>
+    /// <remarks>
+    /// 早先看门狗只看 status，于是旧版本一路评完、票落了链，却因为旧版本已经从队列退场而没人公布：
+    /// 白烧一整轮，评论也没发到 PR 上。
+    /// </remarks>
+    [Fact]
+    public async Task A_review_stops_when_the_pr_gets_a_new_push_midway()
+    {
+        using var h = new Harness();
+        h.Options.AutoReview = true;
+        h.Options.PrStatusCheckInterval = TimeSpan.FromMilliseconds(20);
+
+        var pr = Pr();
+        h.PrSource.CurrentSrc[pr.PrId] = "bbbbbbbb22222222";
+        h.Runner.Gate = new TaskCompletionSource();
+
+        var rev = await h.ReportAsync(pr);
+        await h.TickAsync();
+
+        Assert.Empty((await h.StateOfAsync(rev)).Ballots);
+        Assert.Contains(h.State.Notices, n => n.Title.Contains("新推送", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// 被新推送掐断之后，新版本一进队列就由本节点认领、接着评。
+    /// </summary>
+    /// <remarks>
+    /// 人的意图是「评这个 PR」，不是「评那个提交」。自动评审关着时，没有这一步的话新版本会一直躺在
+    /// 队列里，直到有人发现、再点一次。
+    /// </remarks>
+    [Fact]
+    public async Task After_a_new_push_the_new_revision_is_claimed_and_reviewed()
+    {
+        using var h = new Harness();
+        h.Options.PrStatusCheckInterval = TimeSpan.FromMilliseconds(20);
+
+        var pr = Pr();
+        var rev = await h.ReportAsync(pr);
+        h.Orchestrator.Claim(rev.Id);
+
+        h.PrSource.CurrentSrc[pr.PrId] = "bbbbbbbb22222222";
+        h.Runner.Gate = new TaskCompletionSource();
+        await h.TickAsync();
+        Assert.Empty((await h.StateOfAsync(rev)).Ballots);
+
+        // 发现循环看到了新推送。
+        h.Runner.Gate = null;
+        var next = await h.ReportAsync(pr with { SrcCommit = "bbbbbbbb22222222" });
+
+        await h.TickAsync();   // 认领新版本（认领随实时状态生效，下一轮才排得上）
+        await h.TickAsync();   // 开评
+
+        Assert.Single((await h.StateOfAsync(next)).Ballots);
+    }
+
+    /// <summary>
     /// PR 还活着就别乱掐。
     /// </summary>
     /// <remarks>
