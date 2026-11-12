@@ -78,10 +78,11 @@ public sealed class ConclaveOptions
     public TimeSpan ReviewTimeout { get; set; } = TimeSpan.FromMinutes(45);
 
     /// <summary>
-    /// 评审跑着的时候，多久问一次 ADO「这个 PR 还活着吗」。
+    /// 评审跑着的时候，多久问一次 ADO「这个 PR 还活着吗、有没有新推送」。
     /// </summary>
     /// <remarks>
-    /// 一次评审能跑 45 分钟，期间 PR 被合或被撤是常事，继续跑就是白烧额度。配成
+    /// 一次评审能跑 45 分钟，期间 PR 被合、被撤或者又推了新提交是常事，继续跑就是白烧额度
+    /// （新推送之后旧版本的票没人公布）。配成
     /// <see cref="TimeSpan.Zero"/> 或负数关掉这个检查。每次检查是一条 <c>az repos pr show</c>，
     /// 只在正在评审的那个节点上跑、一次只有一个 PR，所以一分钟一次的开销可以忽略。
     /// </remarks>

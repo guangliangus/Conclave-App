@@ -192,38 +192,58 @@ public sealed class AzCliPrSource(
         }
     }
 
-    public async Task<bool> IsStillActiveAsync(PrMeta pr, CancellationToken ct)
+    public async Task<PrLiveness> CheckLivenessAsync(PrMeta pr, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pr);
 
         try
         {
-            // 只要 status 一个字段，不要整个 PR：这条在评审跑着的时候每分钟打一次。
-            var status = await AzAsync(
+            // 只要两个字段，不要整个 PR：这条在评审跑着的时候每分钟打一次。
+            var json = await AzAsync(
                 [
                     "repos", "pr", "show",
                     "--id", pr.PrId.ToString(CultureInfo.InvariantCulture),
-                    "--query", "status", "-o", "tsv",
+                    "--query", "{status:status, src:lastMergeSourceCommit.commitId}", "-o", "json",
                 ],
                 ct).ConfigureAwait(false);
 
-            var trimmed = status.Trim();
-
             // 空输出当作「还活着」：它跟 az 报错是同一类情况 —— 什么都没问出来。
-            if (trimmed.Length == 0)
+            if (string.IsNullOrWhiteSpace(json))
             {
-                return true;
+                return PrLiveness.Active;
             }
 
-            return string.Equals(trimmed, "active", StringComparison.OrdinalIgnoreCase);
+            using var doc = JsonDocument.Parse(json);
+            return Liveness(pr, Str(doc.RootElement, "status"), Str(doc.RootElement, "src"));
         }
         catch (Exception ex) when (ex is InvalidOperationException or JsonException)
         {
             // 问不出来一律当作还活着。az 偶发失败、网络抖动、token 过期都跟 PR 状态无关，
-            // 返回 false 等于「一断网就把所有在跑的评审掐了」—— 那比多跑一次糟得多。
+            // 返回别的等于「一断网就把所有在跑的评审掐了」—— 那比多跑一次糟得多。
             logger.LogDebug(ex, "问不到 PR {PrId} 的状态，当作仍然活跃", pr.PrId);
-            return true;
+            return PrLiveness.Active;
         }
+    }
+
+    /// <summary>按 ADO 报的 status 和当前源提交，判断正在评的这一版还值不值得评下去。</summary>
+    /// <remarks>
+    /// 任何一项读不到（空）都按「没问出来」处理，不往坏的方向猜：
+    /// status 为空不算关闭，源提交为空不算新推送。
+    /// </remarks>
+    internal static PrLiveness Liveness(PrMeta pr, string status, string currentSrc)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+
+        if (status.Length > 0 && !string.Equals(status, "active", StringComparison.OrdinalIgnoreCase))
+        {
+            return PrLiveness.Closed;
+        }
+
+        return currentSrc.Length > 0
+            && pr.SrcCommit.Length > 0
+            && !string.Equals(currentSrc, pr.SrcCommit, StringComparison.OrdinalIgnoreCase)
+                ? PrLiveness.Superseded
+                : PrLiveness.Active;
     }
 
     private static PrMeta? ParsePr(JsonElement e)

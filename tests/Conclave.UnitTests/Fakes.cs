@@ -9,10 +9,22 @@ internal sealed class FakePrSource : IPrSource
     /// <summary>塞进来的 PR 号，在 ADO 上就当它已经不是 active 了。</summary>
     internal HashSet<int> ClosedPrIds { get; } = [];
 
-    public Task<bool> IsStillActiveAsync(PrMeta pr, CancellationToken ct)
+    /// <summary>PR 号 → ADO 上此刻的源提交。跟 <see cref="PrMeta.SrcCommit"/> 不同就是「评审途中有了新推送」。</summary>
+    internal Dictionary<int, string> CurrentSrc { get; } = [];
+
+    public Task<PrLiveness> CheckLivenessAsync(PrMeta pr, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pr);
-        return Task.FromResult(!ClosedPrIds.Contains(pr.PrId));
+
+        if (ClosedPrIds.Contains(pr.PrId))
+        {
+            return Task.FromResult(PrLiveness.Closed);
+        }
+
+        return Task.FromResult(
+            CurrentSrc.TryGetValue(pr.PrId, out var src) && src != pr.SrcCommit
+                ? PrLiveness.Superseded
+                : PrLiveness.Active);
     }
 
     /// <summary>project → 该 project 下的活跃 PR。</summary>

@@ -107,6 +107,18 @@ public sealed class ReviewOrchestrator : BackgroundService
     /// </remarks>
     private readonly ConcurrentDictionary<string, byte> _announced = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// 评审途中被新推送掐断的 PR：(project, PR 号) → (被掐断的那一版, 掐断时刻)。
+    /// 新版本一进队列就由本节点认领接着评，见 <see cref="FollowUpSuperseded"/>。
+    /// </summary>
+    private readonly ConcurrentDictionary<(string Project, int PrId), (string Revision, DateTimeOffset At)> _followUps = new();
+
+    /// <summary>
+    /// 等新版本进队列最多等多久。发现循环 30 秒一轮，正常一两分钟内就到；
+    /// 等不到多半是 PR 随后被关了，或者新推送被撤回了 —— 那就别一直惦记着。
+    /// </summary>
+    private static readonly TimeSpan FollowUpLifetime = TimeSpan.FromMinutes(10);
+
     private readonly SemaphoreSlim _slots;
 
     public ReviewOrchestrator(
@@ -365,6 +377,8 @@ public sealed class ReviewOrchestrator : BackgroundService
             .ReadSummaryAsync(QueueProjection.RevisionIds(states, alive), ct)
             .ConfigureAwait(false);
         var queue = QueueProjection.Build(states, alive, summary.ValidBallots, summary.Finished);
+
+        FollowUpSuperseded(queue, now);
 
         var views = new List<PrView>(queue.Count);
 
@@ -642,6 +656,57 @@ public sealed class ReviewOrchestrator : BackgroundService
     }
 
     /// <summary>
+    /// 被新推送掐断的 PR，新版本进队列了就认领它接着评。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 用认领而不是 <see cref="RequestReview"/>：认领会广播出去、让本节点优先坐这一版的席位，
+    /// 跟人当初点「认领」是同一个动作。只请求的话席位可能分给别的节点，而
+    /// <see cref="ConclaveOptions.AutoReview"/> 关着时那个节点并不会动。
+    /// </para>
+    /// <para>
+    /// 新版本已经有人认领或在评了就不插手 —— 那说明有人比这里更早接上了。
+    /// </para>
+    /// </remarks>
+    private void FollowUpSuperseded(IReadOnlyList<QueueEntry> queue, DateTimeOffset now)
+    {
+        foreach (var (key, pending) in _followUps)
+        {
+            if (now - pending.At > FollowUpLifetime)
+            {
+                _ = _followUps.TryRemove(key, out _);
+                _logger.LogInformation(
+                    "{Window} 内没等到 PR {PrId} 的新版本（上一版 {Revision} 被新推送掐断），不再自动接着评",
+                    FollowUpLifetime, key.PrId, pending.Revision);
+                continue;
+            }
+
+            var next = queue.FirstOrDefault(e =>
+                !e.Finished
+                && e.Revision.PrId == key.PrId
+                && string.Equals(e.Revision.Project, key.Project, StringComparison.Ordinal)
+                && !string.Equals(e.Revision.Id, pending.Revision, StringComparison.Ordinal));
+
+            if (next is null)
+            {
+                continue;
+            }
+
+            _ = _followUps.TryRemove(key, out _);
+
+            if (next.ClaimedBy is not null || next.ReviewingBy is not null)
+            {
+                continue;
+            }
+
+            _logger.LogInformation(
+                "PR {PrId} 的新版本 {Revision} 进队列了，接着评（上一版 {Old} 被新推送掐断）",
+                key.PrId, next.Revision.Id, pending.Revision);
+            Claim(next.Revision.Id);
+        }
+    }
+
+    /// <summary>
     /// 由本节点负责公布这个 PR 的最终结论。
     /// </summary>
     /// <remarks>
@@ -872,9 +937,12 @@ public sealed class ReviewOrchestrator : BackgroundService
             // 声明在 try 外：finally 里要收它。评审还没开跑就返回时它仍是 null。
             Task? announced = null;
 
-            // PR 被合 / 被撤时掐断这次评审。声明在 try 外面：catch 里要靠它分辨
+            // PR 被合 / 被撤 / 有了新推送时掐断这次评审。声明在 try 外面：catch 里要靠它分辨
             // 「是被掐断的」还是「真失败了」，而这两者的收尾完全不同。
             using var prClosed = new CancellationTokenSource();
+
+            // 看门狗为什么掐的。被掐断时要据此决定怎么收尾：关了就收手，新推送还要接着评新版本。
+            var abortedBy = PrLiveness.Active;
 
             try
             {
@@ -924,7 +992,7 @@ public sealed class ReviewOrchestrator : BackgroundService
                 finally
                 {
                     await watchdogStop.CancelAsync().ConfigureAwait(false);
-                    await watchdog.ConfigureAwait(false);
+                    abortedBy = await watchdog.ConfigureAwait(false);
                 }
 
                 // 把人读的评审者身份盖在票上：审计问的是「谁」，ElectorId 只是公钥指纹。
@@ -976,6 +1044,23 @@ public sealed class ReviewOrchestrator : BackgroundService
                 // 出一张 Error 票会让这一轮算作「烧掉了」，于是席位让给下一个节点重试 ——
                 // 为一个已经不存在的 PR 再烧一轮，正好是这个功能要省下来的那部分。
                 // 队列项本来也会随发现循环消失，所以这里安静收手就够了。
+                if (prClosed.IsCancellationRequested && abortedBy == PrLiveness.Superseded)
+                {
+                    // 新推送：这一版的票就算出了也没人公布，所以同样不出票。
+                    // 但人的意图是「评这个 PR」，不是「评这个提交」—— 记下来，新版本一进队列就接着评，
+                    // 不然自动评审关着时它会一直躺在队列里，等人发现了再点一次。
+                    _followUps[(pr.Project, pr.PrId)] = (revision.Id, DateTimeOffset.UtcNow);
+
+                    _logger.LogInformation(
+                        "PR {PrId} 有了新推送，{Revision} round={Round} 中止，不出票；新版本进队列后由本节点接着评",
+                        pr.PrId, revision.Id, round);
+                    _state.Notify(
+                        NoticeKind.Info,
+                        $"PR #{pr.PrId} 有新推送，旧版本评审中止",
+                        $"{pr.Repo}「{pr.Title}」· {revision.Id} 已过时，没有出票；新版本进队列后本节点会自动接着评");
+                    return;
+                }
+
                 if (prClosed.IsCancellationRequested)
                 {
                     _logger.LogInformation(
@@ -1051,24 +1136,30 @@ public sealed class ReviewOrchestrator : BackgroundService
     }
 
     /// <summary>
-    /// 评审跑着的时候盯住 PR 还是不是 active，被合/被撤就掐断。
+    /// 评审跑着的时候盯住 PR：被合/被撤、或者源分支有了新推送，就掐断。
     /// </summary>
+    /// <returns>掐断的原因；评审自己跑完（看门狗被叫停）时是 <see cref="PrLiveness.Active"/>。</returns>
     /// <remarks>
     /// <para>
-    /// 判据只认 ADO（<see cref="IPrSource.IsStillActiveAsync"/>），<b>不</b>看队列项还在不在：
+    /// 判据只认 ADO（<see cref="IPrSource.CheckLivenessAsync"/>），<b>不</b>看队列项还在不在：
     /// 发现节点临时掉线、心跳过期，队列项一样会消失，拿它当判据就是误杀，
     /// 而误杀的代价是白烧一整轮。
+    /// </para>
+    /// <para>
+    /// <b>新推送也要掐。</b> 早先只看 status：作者在评审途中推了新提交，PR 仍是 active，
+    /// 于是旧版本一路评完（一次实测 9 分钟、约 $5.7），票照常落链 —— 但旧版本已经从队列退场，
+    /// 那张票没人公布，评论不会发到 PR 上，界面上也看不出任何异常。
     /// </para>
     /// <para>
     /// 问不出来当作还活着（那条规则在端口上），所以 az 抖一下不会掐掉正在跑的评审。
     /// </para>
     /// </remarks>
-    private async Task WatchPrAsync(
-        PrMeta pr, Revision revision, CancellationTokenSource closed, CancellationToken ct)
+    private async Task<PrLiveness> WatchPrAsync(
+        PrMeta pr, Revision revision, CancellationTokenSource abort, CancellationToken ct)
     {
         if (_options.PrStatusCheckInterval <= TimeSpan.Zero)
         {
-            return;
+            return PrLiveness.Active;
         }
 
         try
@@ -1079,15 +1170,25 @@ public sealed class ReviewOrchestrator : BackgroundService
             {
                 LoopInterval.Follow(timer, _options.PrStatusCheckInterval);
 
-                if (await _prSource.IsStillActiveAsync(pr, ct).ConfigureAwait(false))
+                var liveness = await _prSource.CheckLivenessAsync(pr, ct).ConfigureAwait(false);
+                if (liveness == PrLiveness.Active)
                 {
                     continue;
                 }
 
-                _logger.LogInformation(
-                    "PR {PrId} 在评审途中不再是 active，掐断 {Revision}", pr.PrId, revision.Id);
-                await closed.CancelAsync().ConfigureAwait(false);
-                return;
+                if (liveness == PrLiveness.Superseded)
+                {
+                    _logger.LogInformation(
+                        "PR {PrId} 在评审途中有了新推送，{Revision} 已过时，掐断", pr.PrId, revision.Id);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "PR {PrId} 在评审途中不再是 active，掐断 {Revision}", pr.PrId, revision.Id);
+                }
+
+                await abort.CancelAsync().ConfigureAwait(false);
+                return liveness;
             }
         }
         catch (OperationCanceledException)
@@ -1099,6 +1200,8 @@ public sealed class ReviewOrchestrator : BackgroundService
             // 看门狗自己挂了不能连累评审 —— 它只是个省额度的优化。
             _logger.LogWarning(ex, "盯 PR {PrId} 状态的看门狗出错，评审继续", pr.PrId);
         }
+
+        return PrLiveness.Active;
     }
 
     /// <summary>等当前所有在跑的评审收尾。</summary>
