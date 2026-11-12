@@ -165,6 +165,14 @@ public sealed class ExecutableResolver(ConclaveOptions options)
             command);
     }
 
+    /// <summary>
+    /// 解析时依次查看的目录：配置的 <c>ExtraToolPaths</c>、当前 PATH、兜底目录。可能有重复。
+    /// </summary>
+    /// <remarks>
+    /// 给 <see cref="ChildProcessPath"/> 用：评审子进程的 PATH 至少要能找到这里找得到的东西。
+    /// </remarks>
+    public IEnumerable<string> SearchDirectories() => Directories();
+
     private IEnumerable<string> Directories()
     {
         // 顺序：配置 > PATH > 兜底目录。配置能压过一切，兜底只在 PATH 不含时起作用。

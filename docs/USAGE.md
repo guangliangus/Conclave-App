@@ -410,7 +410,7 @@ HTTP     :47708               ← 区块传播、补链、指派、实时日志�
 | `ProjectAllowList` / `ProjectDenyList` | 空 | 只轮询 / 排除某些 project（支持 `*` `?` 通配） |
 | `ExcludedProjectSuffixes` | `-qa;-test` | 扫描 project 时按**后缀**排除,分号分隔,大小写不敏感。配空串关掉 |
 | `AzureDevOpsOrgUrl` | 空 | 留空则读 `az devops configure` 的 organization |
-| `ExtraToolPaths` | 空 | `az` / `claude` 装在非常规位置时补路径 |
+| `ExtraToolPaths` | 空 | `az` / `claude` 装在非常规位置时补路径；也排在评审子进程 PATH 的最前面 |
 | `Mesh.Enabled` | false | 关掉就是单机模式 |
 | `Lark.Enabled` | false | 结论出来后飞书私聊通知 PR 作者，见下面「开飞书通知」 |
 
@@ -464,6 +464,12 @@ launchctl setenv CONCLAVE_Conclave__Lark__AppSecret "xxx"
 **双击图标启动后提示「读不到 az 登录身份」或者「0 个 project」，但终端里一切正常**
 
 从 Finder 启动 `.app` 时，系统只给一个最小 PATH（`/usr/bin:/bin:/usr/sbin:/sbin`），而 `az` 在 `/opt/homebrew/bin`、`claude` 在 `~/.local/bin`，都不在里面。程序内部有兜底（配置 → PATH → 常见安装目录），还找不到就在 `ExtraToolPaths` 里显式写上。
+
+**评审日志里 Claude 说「`az` isn't available」「`go` isn't on PATH」，或者自己在命令前加 `export PATH=…`**
+
+同一个原因，落在评审子进程上：claude 的 Bash 工具用的是从 Conclave 继承来的 PATH。自动更新用 `open -n` 重启时会把旧进程的 PATH 原样传下去，所以双击启动过一次的节点会一直是最小 PATH。
+
+现在启动 claude 时会单独给它一份完整 PATH：`ExtraToolPaths` → Conclave 用的 `az` 所在目录 → 登录 shell（`$SHELL -i -l`）的 PATH → 兜底目录。启动后 app 日志里有一行 `评审子进程的 PATH 取自登录 shell …`，列出实际用的目录；读不到登录 shell 时会留一条 warning。某个工具还是找不到，就把它的目录写进 `ExtraToolPaths`。
 
 **某个节点的评审全是 Error，日志里是 `API Error: 400 … does not support this model; version X or newer is required`**
 

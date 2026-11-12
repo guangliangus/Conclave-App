@@ -48,6 +48,7 @@ public sealed class ClaudeReviewRunner(
     IPrSource prSource,
     GitWorkspaceFactory workspaces,
     ClaudeCli claudeCli,
+    ChildProcessPath childPath,
     ReviewProgressLog progress,
     ReviewSkillDeployer skills,
     ConclaveOptions options,
@@ -171,6 +172,9 @@ public sealed class ClaudeReviewRunner(
             ["REVIEW_MODE"] = "collect",
             ["CONCLAVE_REVISION"] = revision.Id,
             ["CONCLAVE_ROUND"] = round.ToString(CultureInfo.InvariantCulture),
+            // 不给的话子进程继承 app 自己的 PATH —— 双击启动时那是最小 PATH，
+            // az_pr.sh 调不到 az、跑检查找不到 go / node（见 ChildProcessPath）。
+            ["PATH"] = await childPath.GetAsync(ct).ConfigureAwait(false),
         };
 
         // 路径和版本要写进日志。一台机器上有好几份 claude 是常态（官方安装器一份、

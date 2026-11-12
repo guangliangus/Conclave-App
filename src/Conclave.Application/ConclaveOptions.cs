@@ -440,6 +440,10 @@ public sealed class ConclaveOptions
     /// 从 Finder 启动 <c>.app</c> 时 LaunchServices 只给一个最小 PATH，
     /// <c>az</c> 和 <c>claude</c> 都不在里面。解析器自带常见安装目录的兜底，
     /// 装在非常规位置时用这个补。
+    /// <para>
+    /// 这些目录也会排在评审子进程 PATH 的最前面（见 <c>ChildProcessPath</c>）：
+    /// 评审里跑检查要的 <c>go</c> / <c>node</c> 不在登录 shell 的 PATH 里时，也在这里补。
+    /// </para>
     /// </remarks>
     public IList<string> ExtraToolPaths { get; set; } = [];
 
